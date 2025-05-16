@@ -35,7 +35,7 @@ app.put('/api/admin/configuracion', async (req, res) => {
 
     try {
         const result = await pool.query(
-            'UPDATE configuracion SET tasa_dolar = $1, pagina_bloqueada = $2, fecha_sorteo = $3',
+            'UPDATE configuracion SET tasa_dolar = $1, pagina_bloqueada = $2, fecha_sorteo = $3 WHERE id = (SELECT id FROM configuracion LIMIT 1)',
             [tasa_dolar, pagina_bloqueada, fecha_sorteo]
         );
 
