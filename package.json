@@ -1,8 +1,9 @@
 {
   "name": "demo-01",
   "version": "1.0.0",
-  "main": "admin.js",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -10,6 +11,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "express": "^4.17.1",
     "pg": "^8.16.0"
   }
 }
