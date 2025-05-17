@@ -3,9 +3,22 @@ const { Pool } = require('pg');
 const fileUpload = require('express-fileupload'); // Importa el middleware
 const fs = require('fs').promises;
 const path = require('path');
+const cors = require('cors'); // Importa el middleware CORS
 
 const app = express();
 const port = process.env.PORT || 3000; // Usar el puerto proporcionado por Render o 3000 por defecto
+
+// Configura CORS para permitir solicitudes desde tu dominio de Netlify
+const corsOptions = {
+  origin: 'https://paneladmin01.netlify.app',
+  methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+  credentials: true, // Si necesitas manejar cookies o autenticación
+  optionsSuccessStatus: 204, // Algunos navegadores requieren esta respuesta para OPTIONS preflight
+};
+
+app.use(cors(corsOptions)); // Aplica el middleware CORS con las opciones configuradas
+app.use(express.json());
+app.use(fileUpload()); // Agrega el middleware para manejar la carga de archivos
 
 const CONFIG_FILE_PATH = path.join(__dirname, 'configuracion.json');
 const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
@@ -51,22 +64,6 @@ async function guardarHorariosZulia(horarios) {
     return false;
   }
 }
-
-// Middleware para analizar el cuerpo de las peticiones JSON
-app.use(express.json());
-app.use(fileUpload()); // Agrega el middleware para manejar la carga de archivos
-
-// Configuración de la conexión a la base de datos PostgreSQL usando variables de entorno
-const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_DATABASE,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432, // Asegurarse de que el puerto sea un número
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
 
 // Nuevas rutas para la configuración (almacenada en archivo)
 app.get('/api/admin/configuracion', async (req, res) => {
