@@ -196,10 +196,12 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
 
 // API para obtener la lista de comprobantes adjuntados
 app.get('/api/admin/comprobantes', async (req, res) => {
+    const filePath = path.join(__dirname, 'comprobantes.json');
+    console.log('Intentando leer el archivo de comprobantes en:', filePath);
     try {
-        const data = await fs.readFile(COMPROBANTES_FILE_PATH, 'utf8');
+        const data = await fs.readFile(filePath, 'utf8');
         const comprobantes = JSON.parse(data);
-        res.json(comprobantes); // SIMPLIFICADO: Envía todo el array sin filtrar
+        res.json(comprobantes); // Envía todo el array sin filtrar
     } catch (error) {
         console.error('Error al leer el archivo de comprobantes:', error);
         res.status(500).json({ error: 'Error al obtener la lista de comprobantes desde el archivo.' });
