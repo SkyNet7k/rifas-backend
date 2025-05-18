@@ -8,22 +8,28 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- Conexión a la Base de Datos (Asumiendo que 'pool' está configurado en algún lugar) ---
-// Ejemplo:
-// const pool = new Pool({
-//    connectionString: process.env.DATABASE_URL, // O tus credenciales directas
-// });
-// pool.on('error', (err, client) => {
-//    console.error('Error inesperado en cliente idle', err);
-//    process.exit(-1);
-// });
+// --- Conexión a la Base de Datos ---
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL, // Asegúrate de que esta variable de entorno esté configurada en Render
+    // O si prefieres usar credenciales directas para desarrollo:
+    // host: 'dpg-d0j3i87diees73cvnjeg-a.oregon-postgres.render.com',
+    // user: 'rifas_db_g8n7_user',
+    // database: 'rifas_db_g8n7',
+    // password: 'txgZtB4MwLCawXZ14tIjp5w9NqOzar8w',
+    // port: 5432, // Puerto por defecto de PostgreSQL
+});
+
+pool.on('error', (err, client) => {
+    console.error('Error inesperado en cliente idle', err);
+    process.exit(-1);
+});
 // --- FIN Conexión a la Base de Datos ---
 
 // Configura CORS
 const corsOptions = {
     origin: [
         'https://paneladmin01.netlify.app', // Tu panel de administración
-        'https://tuoportunidadeshoy.netlify.app'   // Tu panel de cliente
+        'https://tuoportunidadeshoy.netlify.app'     // Tu panel de cliente
     ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
@@ -310,8 +316,8 @@ app.post('/api/compras', async (req, res) => {
 
         // 3. Guardar la información de la compra en la base de datos (usando los valores CALCULADOS)
         const resultCompra = await pool.query(
-            'INSERT INTO compras (comprador, telefono, numeros_seleccionados, valor_usd, valor_bs, tasa_aplicada, fecha_compra, fecha_sorteo, comprobante_nombre, comprobante_tipo, comprobante_datos) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
-            [comprador, telefono, JSON.stringify(numeros), valorTotalUsdCalculado, valorTotal,BsCalculado, tasaDolar, fechaCompra, fechaSorteo, comprobante.name, comprobante.mimetype, comprobante.data]
+            'INSERT INTO compras (comprador, telefono, numeros_seleccionados, valor_usd, valor_bs, tasa_aplicada, fecha_compra, fecha_sorteo, comprobante_nombre, comprobante_tipo, comprobante_datos) VALUES ($1, $2,$3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id',
+            [comprador, telefono, JSON.stringify(numeros), valorTotalUsdCalculado, valorTotalBsCalculado, tasaDolar, fechaCompra, fechaSorteo, comprobante.name, comprobante.mimetype, comprobante.data]
         );
         const compraId = resultCompra.rows[0].id;
 
