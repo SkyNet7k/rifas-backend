@@ -1,4 +1,6 @@
 {
-  "tasa_dolar": 0,
-  "pagina_bloqueada": false
+  "tasa_dolar": 36.5,       // O el valor actual que tengas
+  "pagina_bloqueada": false, // O el valor actual
+  "fecha_sorteo": null,    // O el valor actual
+  "precio_ticket": 1.50     // <-- Nuevo campo, con el valor que tú decidas
 }
