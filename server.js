@@ -12,11 +12,11 @@ const port = process.env.PORT || 3000;
 const pool = new Pool({
     // connectionString: process.env.DATABASE_URL, // Asegúrate de que esta variable de entorno esté configurada en Render
     // O si prefieres usar credenciales directas para desarrollo:
-    host: 'dpg-d0j3i87diees73cvnjeg-a.oregon-postgres.render.com', // Reemplaza con tu host real
-    user: 'rifas_db_g8n7', // Reemplaza con tu usuario real
-    database: 'rifas_db_g8n7/ Reemplaza con tu base de datos real
-    password: 'txgZtB4MwLCawXZ14tIjp5w9NqOzar8w', // ¡Reemplaza con tu contraseña real!
-    port: 5432, // Puerto por defecto de PostgreSQL
+    host: 'dpg-d0jugcd6ubrc73aqep00-a',
+    user: 'rifas_db_g8n7_user',
+    database: 'rifas_db_g8n7',
+    password: 'txgZtB4MwLCawXZ14tIjp5w9NqOzar8w',
+    port: 5432,
 });
 
 pool.on('error', (err, client) => {
@@ -24,6 +24,7 @@ pool.on('error', (err, client) => {
     process.exit(-1);
 });
 // --- FIN Conexión a la Base de Datos ---
+
 // Configura CORS
 const corsOptions = {
     origin: [
