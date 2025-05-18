@@ -1,0 +1,6 @@
+// comprobantes.json
+[
+    { "id": 1, "comprador": "Juan Perez", "telefono": "123456789", "comprobante_nombre": "pago1.jpg", "comprobante_tipo": "image/jpeg", "fecha_compra": "2025-05-18" },
+    { "id": 3, "comprador": "Carlos Ruiz", "telefono": "112233445", "comprobante_nombre": "transferencia2.png", "comprobante_tipo": "image/png", "fecha_compra": "2025-05-16" }
+    // ... más comprobantes ...
+]

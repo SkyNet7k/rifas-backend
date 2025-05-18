@@ -1,5 +1,4 @@
 const express = require('express');
-const { Pool } = require('pg');
 const fileUpload = require('express-fileupload');
 const fs = require('fs').promises;
 const path = require('path');
@@ -9,28 +8,27 @@ const XLSX = require('xlsx'); // Importar la librería xlsx
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- Conexión a la Base de Datos ---
-const pool = new Pool({
-    // connectionString: process.env.DATABASE_URL, // Asegúrate de que esta variable de entorno esté configurada en Render
-    // O si prefieres usar credenciales directas para desarrollo:
-    host: 'dpg-d0jugcd6ubrc73aqep00-a',
-    user: 'rifas_db_g8n7_user',
-    database: 'rifas_db_g8n7',
-    password: 'txgZtB4MwLCawXZ14tIjp5w9NqOzar8w',
-    port: 5432,
-});
-
-pool.on('error', (err, client) => {
-    console.error('Error inesperado en cliente idle', err);
-    process.exit(-1);
-});
-// --- FIN Conexión a la Base de Datos ---
+// --- Conexión a la Base de Datos (COMENTADA) ---
+// const { Pool } = require('pg');
+// const pool = new Pool({
+//     host: 'dpg-d0jugcd6ubrc73aqep00-a',
+//     user: 'rifas_db_g8n7_user',
+//     database: 'rifas_db_g8n7',
+//     password: 'txgZtB4MwLCawXZ14tIjp5w9NqOzar8w',
+//     port: 5432,
+// });
+//
+// pool.on('error', (err, client) => {
+//     console.error('Error inesperado en cliente idle', err);
+//     process.exit(-1);
+// });
+// --- FIN Conexión a la Base de Datos (COMENTADA) ---
 
 // Configura CORS
 const corsOptions = {
     origin: [
         'https://paneladmin01.netlify.app', // Tu panel de administración
-        'https://tuoportunidadeshoy.netlify.app'         // Tu panel de cliente
+        'https://tuoportunidadeshoy.netlify.app'           // Tu panel de cliente
     ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
@@ -43,26 +41,21 @@ app.use(fileUpload());
 
 const CONFIG_FILE_PATH = path.join(__dirname, 'configuracion.json');
 const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
+const VENTAS_FILE_PATH = path.join(__dirname, 'data', 'ventas.json');
+const COMPROBANTES_FILE_PATH = path.join(__dirname, 'data', 'comprobantes.json');
 
 async function leerConfiguracion() {
     try {
         const data = await fs.readFile(CONFIG_FILE_PATH, 'utf8');
         const config = JSON.parse(data);
-        if (config.precio_ticket === undefined) {
-            config.precio_ticket = 1.00;
-        }
+        if (config.precio_ticket === undefined) config.precio_ticket = 1.00;
         if (config.tasa_dolar === undefined) config.tasa_dolar = 0;
         if (config.pagina_bloqueada === undefined) config.pagina_bloqueada = false;
         if (config.fecha_sorteo === undefined) config.fecha_sorteo = null;
         return config;
     } catch (error) {
         console.error('Error al leer la configuración, usando valores por defecto:', error.message);
-        return {
-            tasa_dolar: 0,
-            pagina_bloqueada: false,
-            fecha_sorteo: null,
-            precio_ticket: 1.00
-        };
+        return { tasa_dolar: 0, pagina_bloqueada: false, fecha_sorteo: null, precio_ticket: 1.00 };
     }
 }
 
@@ -167,52 +160,27 @@ app.delete('/api/admin/rifas/:id', async (req, res) => { /* ... */ });
 app.post('/api/compras', async (req, res) => { /* ... */ });
 // --- Fin Ruta de Compra ---
 
-// --- Nuevas Rutas para Gestión de Ventas (MODIFICADAS) ---
+// --- Nuevas Rutas para Gestión de Ventas (MODIFICADAS PARA ARCHIVOS) ---
 
 // API para obtener la lista de todas las ventas (SIN comprobantes)
 app.get('/api/admin/ventas', async (req, res) => {
     try {
-        const result = await pool.query(`
-            SELECT
-                id,
-                comprador,
-                telefono,
-                numeros_seleccionados,
-                valor_usd,
-                valor_bs,
-                tasa_aplicada,
-                fecha_compra,
-                fecha_sorteo
-            FROM compras
-            ORDER BY fecha_compra DESC
-        `);
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Error al obtener la lista de ventas:', err);
-        res.status(500).json({ error: 'Error al obtener la lista de ventas desde la base de datos.' });
+        const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
+        const ventas = JSON.parse(data);
+        res.json(ventas);
+    } catch (error) {
+        console.error('Error al leer el archivo de ventas:', error);
+        res.status(500).json({ error: 'Error al obtener la lista de ventas desde el archivo.' });
     }
 });
 
 // API para exportar la lista de todas las ventas a Excel
 app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     try {
-        const result = await pool.query(`
-            SELECT
-                id AS "ID Venta",
-                comprador AS "Comprador",
-                telefono AS "Teléfono",
-                numeros_seleccionados AS "Números Seleccionados",
-                valor_usd AS "Valor USD",
-                valor_bs AS "Valor Bs",
-                tasa_aplicada AS "Tasa Aplicada",
-                fecha_compra AS "Fecha Compra",
-                fecha_sorteo AS "Fecha Sorteo"
-            FROM compras
-            ORDER BY fecha_compra DESC
-        `);
-        const data = result.rows;
+        const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
+        const ventas = JSON.parse(data);
         const workbook = XLSX.utils.book_new();
-        const worksheet = XLSX.utils.json_to_sheet(data);
+        const worksheet = XLSX.utils.json_to_sheet(ventas);
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Ventas');
         const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
 
@@ -221,30 +189,21 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
         res.send(excelBuffer);
 
     } catch (error) {
-        console.error('Error al exportar la lista de ventas a Excel:', error);
-        res.status(500).json({ error: 'Error al exportar la lista de ventas a Excel' });
+        console.error('Error al leer el archivo de ventas para exportar:', error);
+        res.status(500).json({ error: 'Error al exportar la lista de ventas a Excel.' });
     }
 });
 
-// API para obtener la lista de comprobantes adjuntados (SIN MODIFICACIONES NECESARIAS)
+// API para obtener la lista de comprobantes adjuntados
 app.get('/api/admin/comprobantes', async (req, res) => {
     try {
-        const result = await pool.query(`
-            SELECT
-                id AS id_compra, -- Alias para mayor claridad
-                comprador,
-                telefono,
-                comprobante_nombre,
-                comprobante_tipo,
-                fecha_compra
-            FROM compras
-            WHERE comprobante_nombre IS NOT NULL AND comprobante_nombre != ''
-            ORDER BY fecha_compra DESC
-        `);
-        res.json(result.rows);
-    } catch (err) {
-        console.error('Error al obtener la lista de comprobantes:', err);
-        res.status(500).json({ error: 'Error al obtener la lista de comprobantes desde la base de datos.' });
+        const data = await fs.readFile(COMPROBANTES_FILE_PATH, 'utf8');
+        const comprobantes = JSON.parse(data);
+        const comprobantesFiltrados = comprobantes.filter(compra => compra.comprobante_nombre);
+        res.json(comprobantesFiltrados);
+    } catch (error) {
+        console.error('Error al leer el archivo de comprobantes:', error);
+        res.status(500).json({ error: 'Error al obtener la lista de comprobantes desde el archivo.' });
     }
 });
 
@@ -259,8 +218,6 @@ app.listen(port, () => {
 });
 
 process.on('SIGINT', () => {
-    pool.end(() => {
-        console.log('Pool de base de datos cerrado.');
-        process.exit(0);
-    });
+    console.log('Servidor cerrado.');
+    process.exit(0);
 });
