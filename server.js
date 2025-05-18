@@ -8,12 +8,22 @@ const cors = require('cors');
 const app = express();
 const port = process.env.PORT || 3000;
 
+// --- Conexión a la Base de Datos ---
+const pool = new Pool({
+    // connectionString: process.env.DATABASE_URL, // Asegúrate de que esta variable de entorno esté configurada en Render
+    // O si prefieres usar credenciales directas para desarrollo:
+    host: 'dpg-d0j3i87diees73cvnjeg-a.oregon-postgres.render.com', // Reemplaza con tu host real
+    user: 'rifas_db_g8n7', // Reemplaza con tu usuario real
+    database: 'rifas_db_g8n7/ Reemplaza con tu base de datos real
+    password: 'txgZtB4MwLCawXZ14tIjp5w9NqOzar8w', // ¡Reemplaza con tu contraseña real!
+    port: 5432, // Puerto por defecto de PostgreSQL
+});
+
 pool.on('error', (err, client) => {
     console.error('Error inesperado en cliente idle', err);
     process.exit(-1);
 });
 // --- FIN Conexión a la Base de Datos ---
-
 // Configura CORS
 const corsOptions = {
     origin: [
