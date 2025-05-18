@@ -199,8 +199,7 @@ app.get('/api/admin/comprobantes', async (req, res) => {
     try {
         const data = await fs.readFile(COMPROBANTES_FILE_PATH, 'utf8');
         const comprobantes = JSON.parse(data);
-        const comprobantesFiltrados = comprobantes.filter(compra => compra.comprobante_nombre);
-        res.json(comprobantesFiltrados);
+        res.json(comprobantes); // SIMPLIFICADO: Envía todo el array sin filtrar
     } catch (error) {
         console.error('Error al leer el archivo de comprobantes:', error);
         res.status(500).json({ error: 'Error al obtener la lista de comprobantes desde el archivo.' });
