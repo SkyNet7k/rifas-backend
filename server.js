@@ -179,6 +179,7 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     try {
         const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
         const ventas = JSON.parse(data);
+        console.log('Contenido de ventas para exportar:', ventas); // <-- Agrega esta línea
         const workbook = XLSX.utils.book_new();
         const worksheet = XLSX.utils.json_to_sheet(ventas);
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Ventas');
