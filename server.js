@@ -41,8 +41,8 @@ app.use(fileUpload());
 
 const CONFIG_FILE_PATH = path.join(__dirname, 'configuracion.json');
 const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
-const VENTAS_FILE_PATH = path.join(__dirname, 'data', 'ventas.json');
-const COMPROBANTES_FILE_PATH = path.join(__dirname, 'data', 'comprobantes.json');
+const VENTAS_FILE_PATH = path.join(__dirname, 'ventas.json');
+const COMPROBANTES_FILE_PATH = path.join(__dirname, 'comprobantes.json');
 
 async function leerConfiguracion() {
     try {
