@@ -195,6 +195,29 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     }
 });
 
+// API para registrar una nueva venta
+app.post('/api/ventas', async (req, res) => {
+    try {
+        const nuevaVenta = req.body; // Los datos de la nueva venta vendrán en el cuerpo de la solicitud (req.body)
+
+        // Leer el contenido actual del archivo ventas.json
+        const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
+        const ventas = JSON.parse(data);
+
+        // Agregar la nueva venta al array
+        ventas.push(nuevaVenta);
+
+        // Escribir el array actualizado de vuelta a ventas.json
+        await fs.writeFile(VENTAS_FILE_PATH, JSON.stringify(ventas, null, 2), 'utf8');
+
+        res.status(201).json({ message: 'Venta registrada exitosamente', venta: nuevaVenta });
+
+    } catch (error) {
+        console.error('Error al registrar la venta:', error);
+        res.status(500).json({ error: 'Error al registrar la venta.' });
+    }
+});
+
 // API para obtener la lista de comprobantes adjuntados
 app.get('/api/admin/comprobantes', async (req, res) => {
     const filePath = path.join(__dirname, 'comprobantes.json');
@@ -209,6 +232,7 @@ app.get('/api/admin/comprobantes', async (req, res) => {
     }
 });
 
+// --- Fin Nuevas Rutas para Gestión de Ventas ---
 // --- Fin Nuevas Rutas para Gestión de Ventas ---
 
 app.get('/', (req, res) => {
