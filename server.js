@@ -44,7 +44,7 @@ const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE_PATH = path.join(__dirname, 'ventas.json');
 const COMPROBANTES_FILE_PATH = path.join(__dirname, 'comprobantes.json');
 
-aasync function leerConfiguracion() {
+async function leerConfiguracion() {
     try {
         const data = await fs.readFile(CONFIG_FILE_PATH, 'utf8');
         const config = JSON.parse(data);
