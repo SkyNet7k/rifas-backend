@@ -44,10 +44,11 @@ const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE_PATH = path.join(__dirname, 'ventas.json');
 const COMPROBANTES_FILE_PATH = path.join(__dirname, 'comprobantes.json');
 
-async function leerConfiguracion() {
+aasync function leerConfiguracion() {
     try {
         const data = await fs.readFile(CONFIG_FILE_PATH, 'utf8');
         const config = JSON.parse(data);
+        console.log('Valor de precio_ticket leído del archivo:', config.precio_ticket); // <-- Coloca la línea aquí
         if (config.precio_ticket === undefined) config.precio_ticket = 1.00;
         if (config.tasa_dolar === undefined) config.tasa_dolar = 0;
         if (config.pagina_bloqueada === undefined) config.pagina_bloqueada = false;
