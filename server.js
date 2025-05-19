@@ -155,11 +155,6 @@ app.post('/api/admin/rifas', async (req, res) => { /* ... */ });
 app.put('/api/admin/rifas/:id', async (req, res) => { /* ... */ });
 app.delete('/api/admin/rifas/:id', async (req, res) => { /* ... */ });
 // --- Fin Rutas de Rifas ---
-
-// --- Ruta de Compra (Sin cambios) ---
-app.post('/api/compras', async (req, res) => { /* ... */ });
-// --- Fin Ruta de Compra ---
-
 // --- Nuevas Rutas para Gestión de Ventas (MODIFICADAS PARA ARCHIVOS) ---
 
 // API para obtener la lista de todas las ventas (SIN comprobantes)
@@ -232,7 +227,69 @@ app.get('/api/admin/comprobantes', async (req, res) => {
     }
 });
 
+// API para cargar y registrar comprobantes
+app.post('/api/comprobantes', async (req, res) => {
+    try {
+        if (!req.files || Object.keys(req.files).length === 0) {
+            return res.status(400).json({ error: 'No se encontraron archivos para subir.' });
+        }
+
+        const comprobante = req.files.comprobante; // Asumimos que el archivo se envía con el nombre de campo "comprobante"
+        const { ventaId } = req.body; // Puedes enviar información adicional como el ID de la venta
+
+        // Validar el tipo y tamaño del archivo si es necesario
+        const allowedMimeTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+        if (!allowedMimeTypes.includes(comprobante.mimetype)) {
+            return res.status(400).json({ error: 'Tipo de archivo no permitido.' });
+        }
+
+        const maxSize = 5 * 1024 * 1024; // 5MB
+        if (comprobante.size > maxSize) {
+            return res.status(400).json({ error: 'El archivo es demasiado grande.' });
+        }
+
+        // Generar un nombre de archivo único (puedes usar UUID o una combinación de timestamp y nombre original)
+        const nombreArchivo = `${Date.now()}-${comprobante.name}`;
+        const rutaAlmacenamiento = path.join(__dirname, 'uploads', nombreArchivo); // Define una carpeta 'uploads' para guardar los archivos
+
+        // Mover el archivo subido a la carpeta de almacenamiento
+        await comprobante.mv(rutaAlmacenamiento);
+
+        // Leer el contenido actual del archivo comprobantes.json
+        const data = await fs.readFile(COMPROBANTES_FILE_PATH, 'utf8');
+        const comprobantes = JSON.parse(data);
+
+        // Crear un nuevo objeto de comprobante para almacenar en el archivo JSON
+        const nuevoComprobante = {
+            id: Date.now(), // Generar un ID simple basado en timestamp
+            ventaId: ventaId,
+            comprobante_nombre: nombreArchivo,
+            comprobante_tipo: comprobante.mimetype,
+            fecha_carga: new Date().toISOString()
+            // Puedes agregar más información relevante aquí
+        };
+
+        // Agregar el nuevo comprobante al array
+        comprobantes.push(nuevoComprobante);
+
+        // Escribir el array actualizado de vuelta a comprobantes.json
+        await fs.writeFile(COMPROBANTES_FILE_PATH, JSON.stringify(comprobantes, null, 2), 'utf8');
+
+        res.status(201).json({ message: 'Comprobante cargado exitosamente', comprobante: nuevoComprobante });
+
+    } catch (error) {
+        console.error('Error al cargar el comprobante:', error);
+        res.status(500).json({ error: 'Error al cargar el comprobante.' });
+    }
+});
+
 // --- Fin Nuevas Rutas para Gestión de Ventas ---
+
+// --- Ruta de Compra (Sin cambios) ---
+app.post('/api/compras', async (req, res) => { /* ... */ });
+// --- Fin Ruta de Compra ---
+
+
 // --- Fin Nuevas Rutas para Gestión de Ventas ---
 
 app.get('/', (req, res) => {
