@@ -1,5 +1,5 @@
 const express = require('express');
-const fileUpload = require('express-fileupload'); // Mantenerlo por ahora, por si lo usas en el admin u otras cosas
+const fileUpload = require('express-fileupload');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
@@ -21,9 +21,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json());
-// Mantener fileUpload si tienes otras rutas que suban archivos (ej. en el admin)
-// Si solo para el comprobante lo usabas, podrías considerar eliminarlo si ya no lo necesitas en ninguna parte.
-app.use(fileUpload());
+app.use(fileUpload()); // Mantenerlo por ahora, por si lo usas en el admin u otras cosas
 
 const CONFIG_FILE_PATH = path.join(__dirname, 'configuracion.json');
 const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
@@ -83,7 +81,7 @@ async function guardarHorariosZulia(horarios) {
     }
 }
 
-// Rutas de configuración y horarios (sin cambios)
+// Rutas de configuración y horarios
 app.get('/api/admin/configuracion', async (req, res) => {
     const config = await leerConfiguracion();
     res.json(config);
@@ -128,21 +126,41 @@ app.put('/api/admin/horarios-zulia', async (req, res) => {
     }
 });
 
-// Rutas de Usuarios (Sin cambios)
-app.post('/api/admin/usuarios', async (req, res) => { /* ... */ });
-app.get('/api/admin/usuarios', async (req, res) => { /* ... */ });
-app.get('/api/admin/usuarios/:id', async (req, res) => { /* ... */ });
-app.put('/api/admin/usuarios/:id', async (req, res) => { /* ... */ });
-app.delete('/api/admin/usuarios/:id', async (req, res) => { /* ... */ });
+// Rutas de Usuarios (expandidas como placeholders)
+app.post('/api/admin/usuarios', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de usuarios: Crear - No implementada' });
+});
+app.get('/api/admin/usuarios', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de usuarios: Obtener todos - No implementada' });
+});
+app.get('/api/admin/usuarios/:id', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de usuarios: Obtener por ID - No implementada' });
+});
+app.put('/api/admin/usuarios/:id', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de usuarios: Actualizar - No implementada' });
+});
+app.delete('/api/admin/usuarios/:id', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de usuarios: Eliminar - No implementada' });
+});
 
-// Rutas de Rifas (Sin cambios importantes en la lógica)
-app.get('/api/admin/rifas', async (req, res) => { /* ... */ });
-app.get('/api/admin/rifas/:id', async (req, res) => { /* ... */ });
-app.post('/api/admin/rifas', async (req, res) => { /* ... */ });
-app.put('/api/admin/rifas/:id', async (req, res) => { /* ... */ });
-app.delete('/api/admin/rifas/:id', async (req, res) => { /* ... */ });
+// Rutas de Rifas (expandidas como placeholders)
+app.get('/api/admin/rifas', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de rifas: Obtener todas - No implementada' });
+});
+app.get('/api/admin/rifas/:id', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de rifas: Obtener por ID - No implementada' });
+});
+app.post('/api/admin/rifas', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de rifas: Crear - No implementada' });
+});
+app.put('/api/admin/rifas/:id', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de rifas: Actualizar - No implementada' });
+});
+app.delete('/api/admin/rifas/:id', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de rifas: Eliminar - No implementada' });
+});
 
-// --- Rutas de Gestión de Ventas (MODIFICADAS) ---
+// --- Rutas de Gestión de Ventas ---
 
 // API para obtener la lista de todas las ventas
 app.get('/api/admin/ventas', async (req, res) => {
@@ -177,15 +195,57 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     }
 });
 
-// API para registrar una nueva venta (MODIFICADA)
+// --- Nueva Ruta para Obtener Números Vendidos para el Cliente ---
+
+app.get('/api/numeros-vendidos-para-cliente', async (req, res) => {
+    try {
+        const { fechaSorteo } = req.query; // Esperamos la fecha del sorteo en formato 'YYYY-MM-DD' (ej. 2025-05-20)
+
+        if (!fechaSorteo) {
+            return res.status(400).json({ error: 'La fecha del sorteo es obligatoria.' });
+        }
+
+        let ventas = [];
+        try {
+            const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
+            ventas = JSON.parse(data);
+        } catch (readError) {
+            console.warn('Archivo ventas.json no encontrado o vacío al consultar números vendidos para cliente. Error:', readError.message);
+            ventas = [];
+        }
+
+        const numerosVendidos = new Set();
+
+        ventas.forEach(venta => {
+            const ventaDate = venta.fechaSorteo ? venta.fechaSorteo.substring(0, 10) : null;
+
+            if (ventaDate === fechaSorteo && Array.isArray(venta.numeros)) {
+                venta.numeros.forEach(numero => {
+                    numerosVendidos.add(numero);
+                });
+            }
+        });
+
+        res.json({
+            fechaSorteo: fechaSorteo,
+            numeros_vendidos: Array.from(numerosVendidos)
+        });
+
+    } catch (error) {
+        console.error('Error al obtener números vendidos para el cliente:', error);
+        res.status(500).json({ error: 'Error al obtener los números vendidos.' });
+    }
+});
+
+// --- API para Registrar una Nueva Venta (Con Validación de Duplicados) ---
+
 app.post('/api/ventas', async (req, res) => {
     try {
-        // Los datos de la nueva venta, incluyendo el numeroComprobante, vendrán en req.body
         const {
             numeros,
             comprador,
             telefono,
-            numeroComprobante, // <-- ¡Aquí capturamos el nuevo campo!
+            numeroComprobante,
             valorTotalUsd,
             valorTotalBs,
             tasaAplicada,
@@ -193,7 +253,7 @@ app.post('/api/ventas', async (req, res) => {
             fechaSorteo
         } = req.body;
 
-        // **Validaciones básicas (puedes añadir más si es necesario)**
+        // **Validaciones básicas**
         if (!numeros || numeros.length === 0) {
             return res.status(400).json({ message: 'Debe seleccionar al menos un número.' });
         }
@@ -203,18 +263,49 @@ app.post('/api/ventas', async (req, res) => {
         if (!telefono || telefono.trim() === '') {
             return res.status(400).json({ message: 'El teléfono es obligatorio.' });
         }
-        // **Nueva validación para el número de comprobante**
         if (!numeroComprobante || numeroComprobante.trim() === '') {
             return res.status(400).json({ message: 'El número de comprobante es obligatorio.' });
         }
+        if (!fechaSorteo) {
+            return res.status(400).json({ message: 'La fecha del sorteo es obligatoria.' });
+        }
 
-        // Crear el objeto de la nueva venta con el numeroComprobante
+        let ventas = [];
+        try {
+            const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
+            ventas = JSON.parse(data);
+        } catch (readError) {
+            console.warn('Archivo ventas.json no encontrado o vacío al procesar nueva venta. Error:', readError.message);
+            ventas = [];
+        }
+
+        // --- VALIDACIÓN DE NÚMEROS YA VENDIDOS PARA ESTE SORTEO ---
+        const numerosYaVendidosParaEsteSorteo = new Set();
+        ventas.forEach(venta => {
+            const ventaDate = venta.fechaSorteo ? venta.fechaSorteo.substring(0, 10) : null;
+            const currentDrawDate = fechaSorteo.substring(0, 10);
+
+            if (ventaDate === currentDrawDate && Array.isArray(venta.numeros)) {
+                venta.numeros.forEach(num => numerosYaVendidosParaEsteSorteo.add(num));
+            }
+        });
+
+        const numerosDuplicados = numeros.filter(num => numerosYaVendidosParaEsteSorteo.has(num));
+
+        if (numerosDuplicados.length > 0) {
+            return res.status(409).json({
+                message: `¡Ups! Los siguientes números ya están vendidos para el sorteo del ${fechaSorteo.substring(0, 10)}: ${numerosDuplicados.join(', ')}. Por favor, elige otros.`,
+                numeros_conflictivos: numerosDuplicados
+            });
+        }
+        // --- FIN VALIDACIÓN ---
+
         const nuevaVenta = {
-            id: Date.now(), // ID único para la venta
+            id: Date.now(),
             numeros: numeros,
             comprador: comprador,
             telefono: telefono,
-            numeroComprobante: numeroComprobante, // <-- Almacenamos el número de comprobante
+            numeroComprobante: numeroComprobante,
             valorTotalUsd: valorTotalUsd,
             valorTotalBs: valorTotalBs,
             tasaAplicada: tasaAplicada,
@@ -222,60 +313,41 @@ app.post('/api/ventas', async (req, res) => {
             fechaSorteo: fechaSorteo
         };
 
-        // Leer el contenido actual del archivo ventas.json
-        const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
-        const ventas = JSON.parse(data);
-
-        // Agregar la nueva venta al array
         ventas.push(nuevaVenta);
 
-        // Escribir el array actualizado de vuelta a ventas.json
         await fs.writeFile(VENTAS_FILE_PATH, JSON.stringify(ventas, null, 2), 'utf8');
 
-        res.status(201).json({ message: 'Venta registrada exitosamente', venta: nuevaVenta });
+        console.log('Venta guardada exitosamente:', nuevaVenta.id);
+        res.status(201).json({ message: '¡Venta registrada con éxito!', venta: nuevaVenta });
 
     } catch (error) {
         console.error('Error al registrar la venta:', error);
-        res.status(500).json({ error: 'Error al registrar la venta.' });
+        res.status(500).json({ error: 'Hubo un error al registrar tu venta. Por favor, intenta de nuevo.' });
     }
 });
 
-// --- Eliminando o adaptando la ruta de carga de comprobantes si ya no se usarán archivos
-// Si la funcionalidad de "adjuntar comprobante (capture)" desaparece, esta ruta ya no es necesaria.
-// Si aún planeas que el administrador pueda adjuntar comprobantes de alguna manera, podríamos adaptarla.
-// Por ahora, la comentaré o la eliminaré por completo de la lógica del cliente.
-// Si necesitas mantener la lógica de subida de archivos para OTRAS cosas (ej. en el panel de admin),
-// mantén `app.use(fileUpload());` y esta ruta podría adaptarse para esas necesidades.
-
+// --- API para cargar y registrar comprobantes (Comentada para el flujo de cliente) ---
 /*
-// API para cargar y registrar comprobantes (OBSOLETA para el flujo del cliente si ahora es solo un número)
 app.post('/api/comprobantes', async (req, res) => {
     try {
         if (!req.files || Object.keys(req.files).length === 0) {
             return res.status(400).json({ error: 'No se encontraron archivos para subir.' });
         }
-
-        const comprobante = req.files.comprobante; // Asumimos que el archivo se envía con el nombre de campo "comprobante"
-        const { ventaId } = req.body; // Puedes enviar información adicional como el ID de la venta
-
+        const comprobante = req.files.comprobante;
+        const { ventaId } = req.body;
         const allowedMimeTypes = ['image/jpeg', 'image/png', 'application/pdf'];
         if (!allowedMimeTypes.includes(comprobante.mimetype)) {
             return res.status(400).json({ error: 'Tipo de archivo no permitido.' });
         }
-
         const maxSize = 5 * 1024 * 1024; // 5MB
         if (comprobante.size > maxSize) {
             return res.status(400).json({ error: 'El archivo es demasiado grande.' });
         }
-
         const nombreArchivo = `${Date.now()}-${comprobante.name}`;
         const rutaAlmacenamiento = path.join(__dirname, 'uploads', nombreArchivo);
-
         await comprobante.mv(rutaAlmacenamiento);
-
         const data = await fs.readFile(COMPROBANTES_FILE_PATH, 'utf8');
         const comprobantes = JSON.parse(data);
-
         const nuevoComprobante = {
             id: Date.now(),
             ventaId: ventaId,
@@ -283,13 +355,9 @@ app.post('/api/comprobantes', async (req, res) => {
             comprobante_tipo: comprobante.mimetype,
             fecha_carga: new Date().toISOString()
         };
-
         comprobantes.push(nuevoComprobante);
-
         await fs.writeFile(COMPROBANTES_FILE_PATH, JSON.stringify(comprobantes, null, 2), 'utf8');
-
         res.status(201).json({ message: 'Comprobante cargado exitosamente', comprobante: nuevoComprobante });
-
     } catch (error) {
         console.error('Error al cargar el comprobante:', error);
         res.status(500).json({ error: 'Error al cargar el comprobante.' });
@@ -298,27 +366,26 @@ app.post('/api/comprobantes', async (req, res) => {
 */
 
 // API para obtener la lista de comprobantes adjuntados (si el archivo comprobantes.json aún existe)
-// Esta ruta aún puede servir para listar antiguos comprobantes adjuntados por imagen si los mantienes en ese archivo.
-// Pero la lógica de carga para nuevos ya no será de archivos.
 app.get('/api/admin/comprobantes', async (req, res) => {
     const filePath = path.join(__dirname, 'comprobantes.json');
     console.log('Intentando leer el archivo de comprobantes en:', filePath);
     try {
         const data = await fs.readFile(filePath, 'utf8');
         const comprobantes = JSON.parse(data);
-        res.json(comprobantes); // Envía todo el array sin filtrar
+        res.json(comprobantes);
     } catch (error) {
         console.error('Error al leer el archivo de comprobantes:', error);
         res.status(500).json({ error: 'Error al obtener la lista de comprobantes desde el archivo.' });
     }
 });
 
-
-// Ruta de Compra (Sin cambios significativos para el flujo principal)
-app.post('/api/compras', async (req, res) => { /* ... */ });
+// Ruta de Compra (expandida como placeholder)
+app.post('/api/compras', async (req, res) => {
+    res.status(501).json({ message: 'Ruta de compras: Proceso de compra - No implementada' });
+});
 
 app.get('/', (req, res) => {
-    res.send('¡Hola desde el backend de tu proyecto de Rifas y Loterias!');
+    res.send('¡Hola desde el backend de tu proyecto web de Rifas y Loterias!');
 });
 
 app.listen(port, () => {
