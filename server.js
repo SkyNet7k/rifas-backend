@@ -26,8 +26,10 @@ app.use(fileUpload());
 const CONFIG_FILE_PATH = path.join(__dirname, 'configuracion.json');
 const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE_PATH = path.join(__dirname, 'ventas.json');
-const COMPROBANTES_FILE_PATH = path.join(__dirname, 'comprobantes.json');
+const COMPROBANTES_FILE_PATH = path.join(__dirname, 'comprobantes.json'); // Mantener si todavía usas esto para logs
 
+
+// --- Funciones para leer/escribir configuración (con nuevo campo `ultimo_numero_ticket`) ---
 async function leerConfiguracion() {
     try {
         const data = await fs.readFile(CONFIG_FILE_PATH, 'utf8');
@@ -37,13 +39,24 @@ async function leerConfiguracion() {
         if (config.tasa_dolar === undefined) config.tasa_dolar = 0;
         if (config.pagina_bloqueada === undefined) config.pagina_bloqueada = false;
         if (config.fecha_sorteo === undefined) config.fecha_sorteo = null;
-        // ¡NUEVO CAMPO! Asignar un valor por defecto si no existe
         if (config.numero_sorteo_correlativo === undefined) config.numero_sorteo_correlativo = 1;
+
+        // --- CAMBIO IMPORTANTE: Nuevo campo para el número de ticket ---
+        if (config.ultimo_numero_ticket === undefined) config.ultimo_numero_ticket = 0; // Se inicializa en 0 o 1
+        // Si tienes ventas existentes, podrías querer inicializarlo con el ID más alto + 1
+        // Para este ejemplo, lo inicializamos en 0. La primera venta será 0001.
+
         return config;
     } catch (error) {
         console.error('Error al leer la configuración, usando valores por defecto:', error.message);
-        // Asegúrate de que el valor por defecto también incluya el nuevo campo
-        return { tasa_dolar: 0, pagina_bloqueada: false, fecha_sorteo: null, precio_ticket: 1.00, numero_sorteo_correlativo: 1 };
+        return {
+            tasa_dolar: 0,
+            pagina_bloqueada: false,
+            fecha_sorteo: null,
+            precio_ticket: 1.00,
+            numero_sorteo_correlativo: 1,
+            ultimo_numero_ticket: 0 // Valor por defecto
+        };
     }
 }
 
@@ -54,12 +67,19 @@ async function guardarConfiguracion(config) {
             const currentConfig = await leerConfiguracion();
             config.precio_ticket = currentConfig.precio_ticket || 1.00;
         }
-        // Asegurarse de que numero_sorteo_correlativo sea un número válido
         if (typeof config.numero_sorteo_correlativo !== 'number' || isNaN(config.numero_sorteo_correlativo) || config.numero_sorteo_correlativo < 1) {
             console.warn('Intento de guardar un número de sorteo correlativo inválido. Usando el valor actual o por defecto (1).');
             const currentConfig = await leerConfiguracion();
             config.numero_sorteo_correlativo = currentConfig.numero_sorteo_correlativo || 1;
         }
+
+        // --- CAMBIO IMPORTANTE: Validar y guardar ultimo_numero_ticket ---
+        if (typeof config.ultimo_numero_ticket !== 'number' || isNaN(config.ultimo_numero_ticket) || config.ultimo_numero_ticket < 0) {
+            console.warn('Intento de guardar un último número de ticket inválido. Usando el valor actual o por defecto (0).');
+            const currentConfig = await leerConfiguracion();
+            config.ultimo_numero_ticket = currentConfig.ultimo_numero_ticket || 0;
+        }
+
         await fs.writeFile(CONFIG_FILE_PATH, JSON.stringify(config, null, 2), 'utf8');
         console.log('Configuración guardada exitosamente.');
         return true;
@@ -69,6 +89,7 @@ async function guardarConfiguracion(config) {
     }
 }
 
+// ... (Las funciones leerHorariosZulia y guardarHorariosZulia se mantienen igual) ...
 async function leerHorariosZulia() {
     try {
         const data = await fs.readFile(HORARIOS_FILE_PATH, 'utf8');
@@ -90,6 +111,7 @@ async function guardarHorariosZulia(horarios) {
     }
 }
 
+
 // Rutas de configuración y horarios
 app.get('/api/admin/configuracion', async (req, res) => {
     const config = await leerConfiguracion();
@@ -97,10 +119,11 @@ app.get('/api/admin/configuracion', async (req, res) => {
 });
 
 app.put('/api/admin/configuracion', async (req, res) => {
-    // Asegúrate de incluir 'numero_sorteo_correlativo' aquí
-    const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo } = req.body;
-    const config = await leerConfiguracion();
+    const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket } = req.body; // Incluir nuevo campo
 
+    const config = await leerConfiguracion(); // Obtener configuración actual para no sobrescribir campos
+
+    // Actualizar campos si vienen en la petición
     config.tasa_dolar = tasa_dolar !== undefined ? parseFloat(tasa_dolar) : config.tasa_dolar;
     config.pagina_bloqueada = pagina_bloqueada !== undefined ? Boolean(pagina_bloqueada) : config.pagina_bloqueada;
     config.fecha_sorteo = fecha_sorteo !== undefined ? fecha_sorteo : config.fecha_sorteo;
@@ -115,7 +138,7 @@ app.put('/api/admin/configuracion', async (req, res) => {
         }
     }
 
-    // ¡NUEVO CAMPO! Manejo del numero_sorteo_correlativo
+    // Manejo del numero_sorteo_correlativo
     if (numero_sorteo_correlativo !== undefined) {
         const parsedNumeroSorteo = parseInt(numero_sorteo_correlativo);
         if (!isNaN(parsedNumeroSorteo) && parsedNumeroSorteo >= 1) {
@@ -125,7 +148,16 @@ app.put('/api/admin/configuracion', async (req, res) => {
         }
     }
 
-
+    // --- CAMBIO IMPORTANTE: Manejo del nuevo campo ultimo_numero_ticket ---
+    if (ultimo_numero_ticket !== undefined) {
+        const parsedLastTicket = parseInt(ultimo_numero_ticket);
+        if (!isNaN(parsedLastTicket) && parsedLastTicket >= 0) {
+            config.ultimo_numero_ticket = parsedLastTicket;
+        } else {
+            console.warn('Valor de ultimo_numero_ticket recibido inválido:', ultimo_numero_ticket);
+        }
+    }
+    
     if (await guardarConfiguracion(config)) {
         res.json({ message: 'Configuración actualizada exitosamente' });
     } else {
@@ -151,7 +183,7 @@ app.put('/api/admin/horarios-zulia', async (req, res) => {
     }
 });
 
-// Rutas de Usuarios (expandidas como placeholders)
+// Rutas de Usuarios (expandidas como placeholders) - se mantienen igual
 app.post('/api/admin/usuarios', async (req, res) => {
     res.status(501).json({ message: 'Ruta de usuarios: Crear - No implementada' });
 });
@@ -168,7 +200,7 @@ app.delete('/api/admin/usuarios/:id', async (req, res) => {
     res.status(501).json({ message: 'Ruta de usuarios: Eliminar - No implementada' });
 });
 
-// Rutas de Rifas (expandidas como placeholders)
+// Rutas de Rifas (expandidas como placeholders) - se mantienen igual
 app.get('/api/admin/rifas', async (req, res) => {
     res.status(501).json({ message: 'Ruta de rifas: Obtener todas - No implementada' });
 });
@@ -185,9 +217,7 @@ app.delete('/api/admin/rifas/:id', async (req, res) => {
     res.status(501).json({ message: 'Ruta de rifas: Eliminar - No implementada' });
 });
 
-// --- Rutas de Gestión de Ventas ---
-
-// API para obtener la lista de todas las ventas
+// --- Rutas de Gestión de Ventas (se mantienen como están, leen/escriben a VENTAS_FILE_PATH) ---
 app.get('/api/admin/ventas', async (req, res) => {
     try {
         const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
@@ -199,7 +229,6 @@ app.get('/api/admin/ventas', async (req, res) => {
     }
 });
 
-// API para exportar la lista de todas las ventas a Excel
 app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     try {
         const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
@@ -220,41 +249,33 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     }
 });
 
-// --- **NUEVO ENDPOINT: API para Obtener Números DISPONIBLES para el Cliente** ---
-// Este endpoint lee la configuración para saber la fecha del sorteo actual,
-// y luego filtra las ventas para mostrar solo los números que NO han sido vendidos para ese sorteo.
-// ¡MODIFICADO PARA ENVIAR EL NUMERO DE SORTEO CORRELATIVO!
+// --- API para Obtener Números DISPONIBLES para el Cliente ---
+// MODIFICADO PARA ENVIAR EL NUMERO DE SORTEO CORRELATIVO.
 app.get('/api/numeros-disponibles', async (req, res) => {
     try {
-        // 1. Obtener la fecha del sorteo actual y el número correlativo desde la configuración.
         const config = await leerConfiguracion();
         const fechaSorteoActual = config.fecha_sorteo;
-        const numeroSorteoCorrelativo = config.numero_sorteo_correlativo; // ¡OBTENIENDO EL NUEVO CAMPO!
-
+        const numeroSorteoCorrelativo = config.numero_sorteo_correlativo;
 
         if (!fechaSorteoActual) {
-            // Si no hay una fecha de sorteo configurada, asumimos que no hay números disponibles aún.
             return res.status(200).json({
                 numerosDisponibles: [],
                 fechaSorteo: null,
-                numeroSorteoCorrelativo: numeroSorteoCorrelativo, // También enviarlo aquí
+                numeroSorteoCorrelativo: numeroSorteoCorrelativo,
                 message: 'No hay una fecha de sorteo configurada. Números no disponibles.'
             });
         }
 
-        // 2. Obtener todas las ventas guardadas.
         let ventas = [];
         try {
             const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
             ventas = JSON.parse(data);
         } catch (readError) {
             console.warn('Archivo ventas.json no encontrado o vacío al consultar números disponibles. Error:', readError.message);
-            ventas = []; // Si el archivo no existe o está vacío, no hay ventas.
+            ventas = [];
         }
 
         const numerosVendidosParaSorteoActual = new Set();
-
-        // Filtrar solo las ventas que corresponden a la fecha del sorteo actual
         ventas.forEach(venta => {
             const ventaFechaSorteo = venta.fechaSorteo ? venta.fechaSorteo.substring(0, 10) : null;
 
@@ -263,16 +284,13 @@ app.get('/api/numeros-disponibles', async (req, res) => {
             }
         });
 
-        // 3. Generar todos los números posibles (del 000 al 999, ya que tu frontend usa 1000 números).
         const todosLosNumeros = Array.from({ length: 1000 }, (_, i) => String(i).padStart(3, '0'));
-
-        // 4. Filtrar los números disponibles (aquellos que no están en la lista de vendidos para el sorteo actual)
         const numerosDisponibles = todosLosNumeros.filter(num => !numerosVendidosParaSorteoActual.has(num));
 
         res.json({
             numerosDisponibles: numerosDisponibles,
             fechaSorteo: fechaSorteoActual,
-            numeroSorteoCorrelativo: numeroSorteoCorrelativo // ¡ENVIANDO EL NUEVO CAMPO AL CLIENTE!
+            numeroSorteoCorrelativo: numeroSorteoCorrelativo
         });
 
     } catch (error) {
@@ -281,58 +299,14 @@ app.get('/api/numeros-disponibles', async (req, res) => {
     }
 });
 
-// --- Ruta ANTIGUA para Obtener Números Vendidos para el Cliente (Ya no la usarás directamente en el frontend,
-// pero la dejo por si acaso alguna otra parte de tu código la necesita o por referencia) ---
-app.get('/api/numeros-vendidos-para-cliente', async (req, res) => {
-    try {
-        const { fechaSorteo } = req.query; // Esperamos la fecha del sorteo en formato 'YYYY-MM-DD' (ej. 2025-05-20)
-
-        if (!fechaSorteo) {
-            return res.status(400).json({ error: 'La fecha del sorteo es obligatoria.' });
-        }
-
-        let ventas = [];
-        try {
-            const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
-            ventas = JSON.parse(data);
-        } catch (readError) {
-            console.warn('Archivo ventas.json no encontrado o vacío al consultar números vendidos para cliente. Error:', readError.message);
-            ventas = [];
-        }
-
-        const numerosVendidos = new Set();
-
-        ventas.forEach(venta => {
-            const ventaDate = venta.fechaSorteo ? venta.fechaSorteo.substring(0, 10) : null;
-
-            if (ventaDate === fechaSorteo && Array.isArray(venta.numeros)) {
-                venta.numeros.forEach(numero => {
-                    numerosVendidos.add(numero);
-                });
-            }
-        });
-
-        res.json({
-            fechaSorteo: fechaSorteo,
-            numeros_vendidos: Array.from(numerosVendidos)
-        });
-
-    } catch (error) {
-        console.error('Error al obtener números vendidos para el cliente:', error);
-        res.status(500).json({ error: 'Error al obtener los números vendidos.' });
-    }
-});
-
-// --- API para Registrar una Nueva Venta (Con Validación de Duplicados) ---
-// **IMPORTANTE:** Esta ruta ya estaba bien y no necesita cambios para esta funcionalidad.
-// Se mantiene la lógica de guardar la fechaSorteo y validar duplicados.
+// --- API para Registrar una Nueva Venta (¡CON NÚMERO DE TICKET CORRELATIVO AHORA!) ---
 app.post('/api/ventas', async (req, res) => {
     try {
         const {
             numeros,
             comprador,
             telefono,
-            numeroComprobante,
+            numeroComprobante, // Este es el número de comprobante externo, no el correlativo de ticket
             valorTotalUsd,
             valorTotalBs,
             tasaAplicada,
@@ -357,6 +331,7 @@ app.post('/api/ventas', async (req, res) => {
             return res.status(400).json({ message: 'La fecha del sorteo es obligatoria.' });
         }
 
+        // Leer ventas existentes para validación de duplicados
         let ventas = [];
         try {
             const data = await fs.readFile(VENTAS_FILE_PATH, 'utf8');
@@ -387,8 +362,17 @@ app.post('/api/ventas', async (req, res) => {
         }
         // --- FIN VALIDACIÓN ---
 
+        // --- CAMBIO IMPORTANTE: Generar el número de ticket correlativo ---
+        const config = await leerConfiguracion();
+        config.ultimo_numero_ticket++; // Incrementa el contador
+        await guardarConfiguracion(config); // Guarda el nuevo contador en el archivo
+
+        const numeroTicketGenerado = String(config.ultimo_numero_ticket).padStart(4, '0'); // Formatea a 4 dígitos
+
+
         const nuevaVenta = {
-            id: Date.now(),
+            id: Date.now(), // Un ID único basado en timestamp (puede ser el mismo que el ticket, o diferente)
+            numeroTicket: numeroTicketGenerado, // ¡NUEVO CAMPO!
             numeros: numeros,
             comprador: comprador,
             telefono: telefono,
@@ -405,7 +389,7 @@ app.post('/api/ventas', async (req, res) => {
         await fs.writeFile(VENTAS_FILE_PATH, JSON.stringify(ventas, null, 2), 'utf8');
 
         console.log('Venta guardada exitosamente:', nuevaVenta.id);
-        res.status(201).json({ message: '¡Venta registrada con éxito!', venta: nuevaVenta });
+        res.status(201).json({ message: '¡Venta registrada con éxito!', venta: nuevaVenta }); // Envía la venta completa con el numeroTicket
 
     } catch (error) {
         console.error('Error al registrar la venta:', error);
@@ -413,46 +397,11 @@ app.post('/api/ventas', async (req, res) => {
     }
 });
 
-// --- API para cargar y registrar comprobantes (Comentada para el flujo de cliente) ---
-/*
-app.post('/api/comprobantes', async (req, res) => {
-    try {
-        if (!req.files || Object.keys(req.files).length === 0) {
-            return res.status(400).json({ error: 'No se encontraron archivos para subir.' });
-        }
-        const comprobante = req.files.comprobante;
-        const { ventaId } = req.body;
-        const allowedMimeTypes = ['image/jpeg', 'image/png', 'application/pdf'];
-        if (!allowedMimeTypes.includes(comprobante.mimetype)) {
-            return res.status(400).json({ error: 'Tipo de archivo no permitido.' });
-        }
-        const maxSize = 5 * 1024 * 1024; // 5MB
-        if (comprobante.size > maxSize) {
-            return res.status(400).json({ error: 'El archivo es demasiado grande.' });
-        }
-        const nombreArchivo = `${Date.now()}-${comprobante.name}`;
-        const rutaAlmacenamiento = path.join(__dirname, 'uploads', nombreArchivo);
-        await comprobante.mv(rutaAlmacenamiento);
-        const data = await fs.readFile(COMPROBANTES_FILE_PATH, 'utf8');
-        const comprobantes = JSON.parse(data);
-        const nuevoComprobante = {
-            id: Date.now(),
-            ventaId: ventaId,
-            comprobante_nombre: nombreArchivo,
-            comprobante_tipo: comprobante.mimetype,
-            fecha_carga: new Date().toISOString()
-        };
-        comprobantes.push(nuevoComprobante);
-        await fs.writeFile(COMPROBANTES_FILE_PATH, JSON.stringify(comprobantes, null, 2), 'utf8');
-        res.status(201).json({ message: 'Comprobante cargado exitosamente', comprobante: nuevoComprobante });
-    } catch (error) {
-        console.error('Error al cargar el comprobante:', error);
-        res.status(500).json({ error: 'Error al cargar el comprobante.' });
-    }
-});
-*/
 
 // API para obtener la lista de comprobantes adjuntados (si el archivo comprobantes.json aún existe)
+// Nota: Si usas fileUpload para cargar comprobantes y los guardas en `uploads`,
+// esos archivos también se borrarán con cada reinicio. Necesitarías un servicio de almacenamiento en la nube (S3, Cloudinary, etc.)
+// para que los comprobantes sean persistentes.
 app.get('/api/admin/comprobantes', async (req, res) => {
     const filePath = path.join(__dirname, 'comprobantes.json');
     console.log('Intentando leer el archivo de comprobantes en:', filePath);
@@ -466,9 +415,9 @@ app.get('/api/admin/comprobantes', async (req, res) => {
     }
 });
 
-// Ruta de Compra (expandida como placeholder)
+// Ruta de Compra (expandida como placeholder) - Ya la migramos a /api/ventas
 app.post('/api/compras', async (req, res) => {
-    res.status(501).json({ message: 'Ruta de compras: Proceso de compra - No implementada' });
+    res.status(501).json({ message: 'Ruta de compras: Proceso de compra - No implementada (usa /api/ventas ahora)' });
 });
 
 app.get('/', (req, res) => {
