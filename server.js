@@ -1,10 +1,10 @@
 const express = require('express');
 const fileUpload = require('express-fileupload');
-const fs = require('fs').promises;
+const fs = require('fs').promises; // Usar la versión de promesas de fs
 const path = require('path');
 const cors = require('cors');
-const XLSX = require('xlsx'); // Importar la librería xlsx
-const fetch = require('node-fetch'); // Para hacer solicitudes a APIs externas
+const XLSX = require('xlsx');
+const fetch = require('node-fetch');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -21,153 +21,130 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json()); // Para parsear JSON en el body de las peticiones
-app.use(fileUpload()); // Para manejar la subida de archivos
+app.use(express.json());
+app.use(fileUpload());
 
 // Servir archivos estáticos (para los comprobantes subidos)
 // Asegúrate de que la carpeta 'uploads' exista en la raíz de tu backend
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-const CONFIG_FILE_PATH = path.join(__dirname, 'configuracion.json');
-const HORARIOS_FILE_PATH = path.join(__dirname, 'horarios_zulia.json');
-const VENTAS_FILE_PATH = path.join(__dirname, 'ventas.json');
-const RESULTADOS_ZULIA_FILE_PATH = path.join(__dirname, 'resultados_zulia.json'); // Nuevo archivo para resultados históricos
+// --- Rutas de Archivos de Datos ---
+const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
+const VENTAS_FILE = path.join(__dirname, 'ventas.json');
+const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
+const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
+const TERMINOS_CONDICIONES_FILE = path.join(__dirname, 'terminos_condiciones.txt'); // Nuevo archivo para TyC
 
-// --- Funciones de Utilidad para Lectura/Escritura de Archivos JSON ---
-
-async function leerArchivo(filePath, defaultValue = []) {
+// Función para leer archivos JSON
+async function leerArchivo(filePath, defaultValue) {
     try {
         const data = await fs.readFile(filePath, 'utf8');
-        // Manejar el caso de archivo vacío
-        if (data.trim() === '') {
-            return defaultValue;
-        }
         return JSON.parse(data);
     } catch (error) {
-        if (error.code === 'ENOENT') { // Archivo no encontrado
+        if (error.code === 'ENOENT') {
             console.warn(`Archivo no encontrado: ${filePath}. Creando con valor por defecto.`);
-            await fs.writeFile(filePath, JSON.stringify(defaultValue, null, 2), 'utf8');
+            await escribirArchivo(filePath, defaultValue);
             return defaultValue;
         }
-        console.error(`Error al leer ${filePath}:`, error.message);
-        throw error; // Propagar el error si no es ENOENT
+        console.error(`Error al leer el archivo ${filePath}:`, error);
+        throw error;
     }
 }
 
+// Función para escribir archivos JSON
 async function escribirArchivo(filePath, data) {
     try {
         await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-        return true;
     } catch (error) {
-        console.error(`Error al escribir en ${filePath}:`, error);
-        return false;
+        console.error(`Error al escribir el archivo ${filePath}:`, error);
+        throw error;
     }
 }
 
-// --- Funciones para leer/escribir configuración ---
-async function leerConfiguracion() {
-    try {
-        const data = await fs.readFile(CONFIG_FILE_PATH, 'utf8');
-        const config = JSON.parse(data);
-
-        // Asegurar que todos los campos existan con valores por defecto si no están presentes
-        config.precio_ticket = config.precio_ticket === undefined ? 1.00 : parseFloat(config.precio_ticket);
-        config.tasa_dolar = config.tasa_dolar === undefined ? 0 : parseFloat(config.tasa_dolar);
-        config.pagina_bloqueada = config.pagina_bloqueada === undefined ? false : Boolean(config.pagina_bloqueada);
-        config.fecha_sorteo = config.fecha_sorteo === undefined ? null : config.fecha_sorteo;
-        config.numero_sorteo_correlativo = config.numero_sorteo_correlativo === undefined ? 1 : parseInt(config.numero_sorteo_correlativo);
-        config.ultimo_numero_ticket = config.ultimo_numero_ticket === undefined ? 0 : parseInt(config.ultimo_numero_ticket);
-        config.ultima_fecha_resultados_zulia = config.ultima_fecha_resultados_zulia === undefined ? null : config.ultima_fecha_resultados_zulia;
-
-        return config;
-    } catch (error) {
-        console.error('Error al leer la configuración, usando valores por defecto:', error.message);
-        // Si el archivo no existe o está corrupto, devuelve un objeto de configuración por defecto
-        return {
-            tasa_dolar: 0,
-            pagina_bloqueada: false,
-            fecha_sorteo: null, // Fecha del sorteo actual (ej. "YYYY-MM-DD")
-            precio_ticket: 1.00,
-            numero_sorteo_correlativo: 1, // Número para identificar el sorteo actual (ej. Sorteo #100)
-            ultimo_numero_ticket: 0, // Último número de ticket vendido para el sorteo actual
-            ultima_fecha_resultados_zulia: null // Última fecha para la que se buscaron resultados de Zulia
-        };
-    }
+// Inicialización de archivos si no existen
+async function inicializarArchivos() {
+    await leerArchivo(CONFIG_FILE, {
+        tasa_dolar: 0,
+        pagina_bloqueada: false,
+        fecha_sorteo: null,
+        precio_ticket: 1.00,
+        numero_sorteo_correlativo: 1,
+        ultimo_numero_ticket: 0,
+        ultima_fecha_resultados_zulia: null
+    });
+    await leerArchivo(VENTAS_FILE, []);
+    await leerArchivo(HORARIOS_ZULIA_FILE, { horarios_zulia: ["12:00 PM", "04:00 PM", "07:00 PM"] });
+    await leerArchivo(RESULTADOS_ZULIA_FILE, []);
+    // No inicializamos TERMINOS_CONDICIONES_FILE aquí porque esperamos que exista con el texto ya dentro.
+    // Si no existe, la ruta /api/terminos-condiciones lo manejará con un 404.
 }
 
-async function guardarConfiguracion(config) {
-    // Validaciones antes de guardar
-    config.precio_ticket = parseFloat(config.precio_ticket);
-    if (isNaN(config.precio_ticket) || config.precio_ticket < 0) {
-        console.warn('Valor de precio_ticket inválido, se establecerá un valor por defecto.');
-        config.precio_ticket = 1.00;
-    }
-
-    config.numero_sorteo_correlativo = parseInt(config.numero_sorteo_correlativo);
-    if (isNaN(config.numero_sorteo_correlativo) || config.numero_sorteo_correlativo < 1) {
-        console.warn('Valor de numero_sorteo_correlativo inválido, se establecerá un valor por defecto (1).');
-        config.numero_sorteo_correlativo = 1;
-    }
-
-    config.ultimo_numero_ticket = parseInt(config.ultimo_numero_ticket);
-    if (isNaN(config.ultimo_numero_ticket) || config.ultimo_numero_ticket < 0) {
-        console.warn('Valor de ultimo_numero_ticket inválido, se establecerá un valor por defecto (0).');
-        config.ultimo_numero_ticket = 0;
-    }
-
-    return escribirArchivo(CONFIG_FILE_PATH, config);
-}
-
-// ... (Las funciones leerHorariosZulia y guardarHorariosZulia se mantienen similar) ...
-async function leerHorariosZulia() {
-    return leerArchivo(HORARIOS_FILE_PATH, { horarios_zulia: ["12:00 PM", "04:00 PM", "07:00 PM"] });
-}
-
-async function guardarHorariosZulia(horarios) {
-    return escribirArchivo(HORARIOS_FILE_PATH, horarios);
-}
+// Llama a la inicialización al arrancar el servidor
+inicializarArchivos().catch(err => {
+    console.error('Error durante la inicialización de archivos:', err);
+    process.exit(1); // Sale si hay un error crítico al inicializar
+});
 
 // --- Rutas de Configuración y Horarios (Panel de Administración) ---
 
 app.get('/api/admin/configuracion', async (req, res) => {
-    const config = await leerConfiguracion();
-    res.json(config);
+    try {
+        const config = await leerArchivo(CONFIG_FILE, {});
+        res.json(config);
+    } catch (error) {
+        console.error('Error al obtener la configuración:', error);
+        res.status(500).json({ error: 'Error interno del servidor al obtener la configuración.' });
+    }
 });
 
 app.put('/api/admin/configuracion', async (req, res) => {
-    const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket } = req.body;
+    try {
+        const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket } = req.body;
 
-    const config = await leerConfiguracion(); // Obtener configuración actual para no sobrescribir campos no enviados
+        const config = await leerArchivo(CONFIG_FILE, {});
 
-    config.tasa_dolar = tasa_dolar !== undefined ? parseFloat(tasa_dolar) : config.tasa_dolar;
-    config.pagina_bloqueada = pagina_bloqueada !== undefined ? Boolean(pagina_bloqueada) : config.pagina_bloqueada;
-    config.fecha_sorteo = fecha_sorteo !== undefined ? fecha_sorteo : config.fecha_sorteo; // "YYYY-MM-DD"
-    config.precio_ticket = precio_ticket !== undefined ? parseFloat(precio_ticket) : config.precio_ticket;
-    config.numero_sorteo_correlativo = numero_sorteo_correlativo !== undefined ? parseInt(numero_sorteo_correlativo) : config.numero_sorteo_correlativo;
-    config.ultimo_numero_ticket = ultimo_numero_ticket !== undefined ? parseInt(ultimo_numero_ticket) : config.ultimo_numero_ticket;
+        // Actualizar campos si vienen en la solicitud
+        if (tasa_dolar !== undefined) config.tasa_dolar = parseFloat(tasa_dolar);
+        if (pagina_bloqueada !== undefined) config.pagina_bloqueada = Boolean(pagina_bloqueada);
+        if (fecha_sorteo !== undefined) config.fecha_sorteo = fecha_sorteo;
+        if (precio_ticket !== undefined) config.precio_ticket = parseFloat(precio_ticket);
+        if (numero_sorteo_correlativo !== undefined) config.numero_sorteo_correlativo = parseInt(numero_sorteo_correlativo);
+        if (ultimo_numero_ticket !== undefined) config.ultimo_numero_ticket = parseInt(ultimo_numero_ticket);
 
-    if (await guardarConfiguracion(config)) {
-        res.json({ message: 'Configuración actualizada exitosamente' });
-    } else {
+        // Validaciones
+        if (isNaN(config.precio_ticket) || config.precio_ticket < 0) config.precio_ticket = 1.00;
+        if (isNaN(config.numero_sorteo_correlativo) || config.numero_sorteo_correlativo < 1) config.numero_sorteo_correlativo = 1;
+        if (isNaN(config.ultimo_numero_ticket) || config.ultimo_numero_ticket < 0) config.ultimo_numero_ticket = 0;
+
+        await escribirArchivo(CONFIG_FILE, config);
+        res.json({ message: 'Configuración actualizada exitosamente', config });
+    } catch (error) {
+        console.error('Error al actualizar la configuración:', error);
         res.status(500).json({ error: 'Error al guardar la configuración' });
     }
 });
 
 app.get('/api/admin/horarios-zulia', async (req, res) => {
-    const horarios = await leerHorariosZulia();
-    res.json(horarios);
+    try {
+        const horarios = await leerArchivo(HORARIOS_ZULIA_FILE, {});
+        res.json(horarios);
+    } catch (error) {
+        console.error('Error al obtener horarios del Zulia:', error);
+        res.status(500).json({ error: 'Error interno del servidor al obtener horarios.' });
+    }
 });
 
 app.put('/api/admin/horarios-zulia', async (req, res) => {
     const { horarios_zulia } = req.body;
-    if (Array.isArray(horarios_zulia)) {
-        if (await guardarHorariosZulia({ horarios_zulia })) {
-            res.json({ message: 'Horarios del Zulia actualizados exitosamente' });
-        } else {
-            res.status(500).json({ error: 'Error al guardar los horarios del Zulia' });
-        }
-    } else {
-        res.status(400).json({ error: 'El formato de los horarios debe ser un array.' });
+    if (!Array.isArray(horarios_zulia)) {
+        return res.status(400).json({ error: 'El formato de los horarios debe ser un array.' });
+    }
+    try {
+        await escribirArchivo(HORARIOS_ZULIA_FILE, { horarios_zulia });
+        res.json({ message: 'Horarios del Zulia actualizados exitosamente', horarios_zulia });
+    } catch (error) {
+        console.error('Error al guardar los horarios del Zulia:', error);
+        res.status(500).json({ error: 'Error al guardar los horarios del Zulia' });
     }
 });
 
@@ -175,17 +152,17 @@ app.put('/api/admin/horarios-zulia', async (req, res) => {
 
 app.get('/api/admin/ventas', async (req, res) => {
     try {
-        const ventas = await leerArchivo(VENTAS_FILE_PATH, []);
+        const ventas = await leerArchivo(VENTAS_FILE, []);
         res.json(ventas);
     } catch (error) {
-        console.error('Error al leer el archivo de ventas:', error);
+        console.error('Error al obtener la lista de ventas:', error);
         res.status(500).json({ error: 'Error al obtener la lista de ventas.' });
     }
 });
 
 app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     try {
-        const ventas = await leerArchivo(VENTAS_FILE_PATH, []);
+        const ventas = await leerArchivo(VENTAS_FILE, []);
         console.log('Contenido de ventas para exportar:', ventas);
         const workbook = XLSX.utils.book_new();
         const worksheet = XLSX.utils.json_to_sheet(ventas);
@@ -197,39 +174,32 @@ app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
         res.send(excelBuffer);
 
     } catch (error) {
-        console.error('Error al leer el archivo de ventas para exportar:', error);
+        console.error('Error al exportar la lista de ventas a Excel:', error);
         res.status(500).json({ error: 'Error al exportar la lista de ventas a Excel.' });
     }
 });
 
 // NUEVA RUTA: Confirmar una venta por ID (desde el panel de administración)
-app.put('/api/admin/ventas/:id/confirmar', async (req, res) => {
-    const ventaId = parseInt(req.params.id);
-
-    if (isNaN(ventaId)) {
-        return res.status(400).json({ error: 'ID de venta inválido.' });
-    }
+app.put('/api/admin/ventas/:numeroTicket/confirmar', async (req, res) => {
+    const numeroTicket = req.params.numeroTicket;
 
     try {
-        let ventas = await leerArchivo(VENTAS_FILE_PATH, []);
-        const index = ventas.findIndex(v => v.id === ventaId);
+        let ventas = await leerArchivo(VENTAS_FILE, []);
+        const ventaIndex = ventas.findIndex(v => v.numeroTicket === numeroTicket);
 
-        if (index === -1) {
+        if (ventaIndex === -1) {
             return res.status(404).json({ message: 'Venta no encontrada.' });
         }
 
-        if (ventas[index].estado === 'confirmado') {
+        if (ventas[ventaIndex].estado === 'confirmado') {
             return res.status(400).json({ message: 'Esta venta ya ha sido confirmada.' });
         }
 
-        ventas[index].estado = 'confirmado';
-        ventas[index].fechaConfirmacionAdmin = new Date().toISOString();
+        ventas[ventaIndex].estado = 'confirmado';
+        ventas[ventaIndex].fechaConfirmacionAdmin = new Date().toISOString();
+        await escribirArchivo(VENTAS_FILE, ventas);
 
-        if (await escribirArchivo(VENTAS_FILE_PATH, ventas)) {
-            res.json({ message: `Venta ${ventaId} confirmada exitosamente.`, venta: ventas[index] });
-        } else {
-            res.status(500).json({ error: 'Error al guardar la venta confirmada.' });
-        }
+        res.json({ message: `Venta ${numeroTicket} confirmada exitosamente.`, venta: ventas[ventaIndex] });
     } catch (error) {
         console.error('Error al confirmar la venta:', error);
         res.status(500).json({ error: 'Error interno del servidor al confirmar la venta.' });
@@ -237,33 +207,26 @@ app.put('/api/admin/ventas/:id/confirmar', async (req, res) => {
 });
 
 // NUEVA RUTA: Cancelar una venta por ID (desde el panel de administración)
-app.put('/api/admin/ventas/:id/cancelar', async (req, res) => {
-    const ventaId = parseInt(req.params.id);
-
-    if (isNaN(ventaId)) {
-        return res.status(400).json({ error: 'ID de venta inválido.' });
-    }
+app.put('/api/admin/ventas/:numeroTicket/cancelar', async (req, res) => {
+    const numeroTicket = req.params.numeroTicket;
 
     try {
-        let ventas = await leerArchivo(VENTAS_FILE_PATH, []);
-        const index = ventas.findIndex(v => v.id === ventaId);
+        let ventas = await leerArchivo(VENTAS_FILE, []);
+        const ventaIndex = ventas.findIndex(v => v.numeroTicket === numeroTicket);
 
-        if (index === -1) {
+        if (ventaIndex === -1) {
             return res.status(404).json({ message: 'Venta no encontrada.' });
         }
 
-        if (ventas[index].estado === 'cancelado') {
+        if (ventas[ventaIndex].estado === 'cancelado') {
             return res.status(400).json({ message: 'Esta venta ya ha sido cancelada.' });
         }
 
-        ventas[index].estado = 'cancelado';
-        ventas[index].fechaCancelacionAdmin = new Date().toISOString();
+        ventas[ventaIndex].estado = 'cancelado';
+        ventas[ventaIndex].fechaCancelacionAdmin = new Date().toISOString();
+        await escribirArchivo(VENTAS_FILE, ventas);
 
-        if (await escribirArchivo(VENTAS_FILE_PATH, ventas)) {
-            res.json({ message: `Venta ${ventaId} cancelada exitosamente.`, venta: ventas[index] });
-        } else {
-            res.status(500).json({ error: 'Error al guardar la venta cancelada.' });
-        }
+        res.json({ message: `Venta ${numeroTicket} cancelada exitosamente.`, venta: ventas[ventaIndex] });
     } catch (error) {
         console.error('Error al cancelar la venta:', error);
         res.status(500).json({ error: 'Error interno del servidor al cancelar la venta.' });
@@ -272,7 +235,7 @@ app.put('/api/admin/ventas/:id/cancelar', async (req, res) => {
 
 
 // --- Rutas de Usuarios y Rifas (Placeholders) ---
-// Mantengo los placeholders como indicaste. Implementar estas requeriría estructuras de datos adicionales.
+// (Estas rutas no interactúan con los archivos JSON en este momento)
 app.post('/api/admin/usuarios', async (req, res) => {
     res.status(501).json({ message: 'Ruta de usuarios: Crear - No implementada' });
 });
@@ -305,17 +268,14 @@ app.delete('/api/admin/rifas/:id', async (req, res) => {
     res.status(501).json({ message: 'Ruta de rifas: Eliminar - No implementada' });
 });
 
-
 // --- API para Obtener Números DISPONIBLES para el Cliente ---
-// MODIFICADO PARA ENVIAR EL NUMERO DE SORTEO CORRELATIVO Y FECHA DE SORTEO.
 app.get('/api/numeros-disponibles', async (req, res) => {
     try {
-        const config = await leerConfiguracion();
-        const fechaSorteoActual = config.fecha_sorteo; // YYYY-MM-DD
+        const config = await leerArchivo(CONFIG_FILE, {});
+        const fechaSorteoActual = config.fecha_sorteo; //YYYY-MM-DD
         const numeroSorteoCorrelativo = config.numero_sorteo_correlativo;
         const paginaBloqueada = config.pagina_bloqueada;
 
-        // Si la página está bloqueada, no se permiten ventas.
         if (paginaBloqueada) {
             return res.status(200).json({
                 numerosDisponibles: [],
@@ -336,14 +296,13 @@ app.get('/api/numeros-disponibles', async (req, res) => {
             });
         }
 
-        let ventas = await leerArchivo(VENTAS_FILE_PATH, []);
-
+        const ventas = await leerArchivo(VENTAS_FILE, []);
         const numerosVendidosParaSorteoActual = new Set();
         ventas.forEach(venta => {
-            // Solo considerar ventas confirmadas o pendientes para el sorteo actual
-            const ventaFechaSorteo = venta.fechaSorteo ? venta.fechaSorteo.substring(0, 10) : null;
-            if (ventaFechaSorteo === fechaSorteoActual && ['pendiente', 'confirmado'].includes(venta.estado) && Array.isArray(venta.numeros)) {
-                venta.numeros.forEach(num => numerosVendidosParaSorteoActual.add(num));
+            if (venta.fechaSorteo === fechaSorteoActual && ['pendiente', 'confirmado'].includes(venta.estado)) {
+                if (Array.isArray(venta.numeros)) {
+                    venta.numeros.forEach(num => numerosVendidosParaSorteoActual.add(num));
+                }
             }
         });
 
@@ -354,7 +313,7 @@ app.get('/api/numeros-disponibles', async (req, res) => {
             numerosDisponibles: numerosDisponibles,
             fechaSorteo: fechaSorteoActual,
             numeroSorteoCorrelativo: numeroSorteoCorrelativo,
-            paginaBloqueada: false // Redundante pero explícito
+            paginaBloqueada: false
         });
 
     } catch (error) {
@@ -369,20 +328,19 @@ app.post('/api/ventas', async (req, res) => {
         const {
             numeros,
             comprador,
-            cedula, // Nuevo campo
+            cedula,
             telefono,
-            email, // Nuevo campo
-            metodoPago, // Nuevo campo
-            referenciaPago, // Nuevo campo
+            email,
+            metodoPago,
+            referenciaPago,
             valorTotalUsd,
             valorTotalBs,
             tasaAplicada,
             fechaCompra,
-            fechaSorteo // Esperado como "YYYY-MM-DD"
+            fechaSorteo
         } = req.body;
 
-        // Validar si la página está bloqueada antes de procesar la venta
-        const currentConfig = await leerConfiguracion();
+        const currentConfig = await leerArchivo(CONFIG_FILE, {});
         if (currentConfig.pagina_bloqueada) {
             return res.status(403).json({ message: 'La página está bloqueada por el administrador. No se pueden realizar compras en este momento.' });
         }
@@ -413,17 +371,14 @@ app.post('/api/ventas', async (req, res) => {
             return res.status(400).json({ message: 'Los valores de pago deben ser numéricos y mayores que cero.' });
         }
 
-        let ventas = await leerArchivo(VENTAS_FILE_PATH, []);
-
         // --- VALIDACIÓN DE NÚMEROS YA VENDIDOS PARA ESTE SORTEO Y ESTADO ---
+        const ventasExistentes = await leerArchivo(VENTAS_FILE, []);
         const numerosYaVendidosParaEsteSorteo = new Set();
-        ventas.forEach(venta => {
-            const ventaFechaSorteo = venta.fechaSorteo ? venta.fechaSorteo.substring(0, 10) : null;
-            const currentDrawDate = fechaSorteo.substring(0, 10);
-
-            // Solo considerar números de ventas que estén pendientes o confirmadas para el sorteo actual
-            if (ventaFechaSorteo === currentDrawDate && ['pendiente', 'confirmado'].includes(venta.estado) && Array.isArray(venta.numeros)) {
-                venta.numeros.forEach(num => numerosYaVendidosParaEsteSorteo.add(num));
+        ventasExistentes.forEach(venta => {
+            if (venta.fechaSorteo === fechaSorteo && ['pendiente', 'confirmado'].includes(venta.estado)) {
+                if (Array.isArray(venta.numeros)) {
+                    venta.numeros.forEach(num => numerosYaVendidosParaEsteSorteo.add(num));
+                }
             }
         });
 
@@ -431,7 +386,7 @@ app.post('/api/ventas', async (req, res) => {
 
         if (numerosDuplicados.length > 0) {
             return res.status(409).json({
-                message: `¡Ups! Los siguientes números ya están vendidos para el sorteo del ${fechaSorteo.substring(0, 10)}: ${numerosDuplicados.join(', ')}. Por favor, elige otros.`,
+                message: `¡Ups! Los siguientes números ya están vendidos para el sorteo del ${fechaSorteo}: ${numerosDuplicados.join(', ')}. Por favor, elige otros.`,
                 numeros_conflictivos: numerosDuplicados
             });
         }
@@ -442,33 +397,31 @@ app.post('/api/ventas', async (req, res) => {
         if (req.files && req.files.comprobante) {
             const comprobanteFile = req.files.comprobante;
             const uploadDir = path.join(__dirname, 'uploads', 'comprobantes');
-            await fs.mkdir(uploadDir, { recursive: true }); // Asegura que el directorio exista
+            await fs.mkdir(uploadDir, { recursive: true });
 
             const fileExtension = path.extname(comprobanteFile.name);
-            const fileName = `${Date.now()}-${comprobanteFile.md5}${fileExtension}`; // Usar md5 para evitar colisiones con el nombre original
+            const fileName = `${Date.now()}-${comprobanteFile.md5}${fileExtension}`;
             const filePath = path.join(uploadDir, fileName);
 
             try {
                 await comprobanteFile.mv(filePath);
-                comprobanteUrl = `/uploads/comprobantes/${fileName}`; // URL accesible públicamente
+                comprobanteUrl = `/uploads/comprobantes/${fileName}`;
                 console.log('Comprobante subido a:', filePath);
             } catch (uploadError) {
                 console.error('Error al subir el comprobante:', uploadError);
-                // Decide si la venta debe fallar si el comprobante no se sube.
-                // Por ahora, solo logueamos el error y la venta continúa sin comprobanteUrl.
                 comprobanteUrl = null;
             }
         }
 
         // --- Generar el número de ticket correlativo ---
-        const config = await leerConfiguracion(); // Volver a leer por si otra venta incrementó
-        config.ultimo_numero_ticket++; // Incrementa el contador
-        await guardarConfiguracion(config); // Guarda el nuevo contador en el archivo
+        // Se carga la configuración, se actualiza y se guarda
+        const config = await leerArchivo(CONFIG_FILE, {});
+        config.ultimo_numero_ticket++;
+        await escribirArchivo(CONFIG_FILE, config);
 
         const numeroTicketGenerado = String(config.ultimo_numero_ticket).padStart(4, '0'); // Formatea a 4 dígitos
 
         const nuevaVenta = {
-            id: Date.now(), // Un ID único basado en timestamp
             numeroTicket: numeroTicketGenerado,
             numeros: numeros,
             comprador: comprador,
@@ -481,23 +434,18 @@ app.post('/api/ventas', async (req, res) => {
             valorTotalBs: parseFloat(valorTotalBs),
             tasaAplicada: parseFloat(tasaAplicada),
             fechaCompra: fechaCompra || new Date().toISOString(),
-            fechaSorteo: fechaSorteo, // "YYYY-MM-DD"
-            comprobanteUrl: comprobanteUrl, // URL del comprobante
-            estado: 'pendiente', // Estado inicial de la venta
-            numeroSorteoCorrelativo: currentConfig.numero_sorteo_correlativo // Asociar al sorteo actual
+            fechaSorteo: fechaSorteo,
+            comprobanteUrl: comprobanteUrl,
+            estado: 'pendiente', // Estado inicial
+            numeroSorteoCorrelativo: currentConfig.numero_sorteo_correlativo
         };
 
+        const ventas = await leerArchivo(VENTAS_FILE, []);
         ventas.push(nuevaVenta);
+        await escribirArchivo(VENTAS_FILE, ventas); // Guarda la nueva venta
 
-        if (await escribirArchivo(VENTAS_FILE_PATH, ventas)) {
-            console.log('Venta guardada exitosamente:', nuevaVenta.id);
-            res.status(201).json({ message: '¡Venta registrada con éxito!', venta: nuevaVenta });
-        } else {
-            // Si falla la escritura de la venta, deberías revertir el incremento del ticket
-            // Pero con archivos JSON, es más complejo que con una base de datos.
-            // Para una solución robusta, se recomienda una DB transaccional.
-            res.status(500).json({ error: 'Hubo un error al guardar la venta después de generarla.' });
-        }
+        console.log('Venta guardada exitosamente:', nuevaVenta.numeroTicket);
+        res.status(201).json({ message: '¡Venta registrada con éxito!', venta: nuevaVenta });
 
     } catch (error) {
         console.error('Error al registrar la venta:', error);
@@ -507,10 +455,10 @@ app.post('/api/ventas', async (req, res) => {
 
 // --- Rutas de Gestión de Resultados de Lotería Zulia ---
 
-// Obtener resultados históricos (si se han guardado)
+// Obtener resultados históricos
 app.get('/api/admin/resultados-zulia', async (req, res) => {
     try {
-        const resultados = await leerArchivo(RESULTADOS_ZULIA_FILE_PATH, []);
+        const resultados = await leerArchivo(RESULTADOS_ZULIA_FILE, []);
         res.json(resultados);
     } catch (error) {
         console.error('Error al obtener resultados del Zulia:', error);
@@ -520,14 +468,7 @@ app.get('/api/admin/resultados-zulia', async (req, res) => {
 
 // Simular la obtención de resultados de una API externa (¡REEMPLAZAR CON API REAL!)
 app.get('/api/admin/obtener-resultados-externos', async (req, res) => {
-    // NOTA: Esta es una SIMULACIÓN. Deberás reemplazarla con una API real.
-    // Consulta al proveedor de datos de loterías de Venezuela.
-    // Ejemplos de APIs (esto es FALSO, solo para ilustración):
-    // const externalApiUrl = `https://api.resultadosdeloterias.com/zulia?fecha=${req.query.fecha || new Date().toISOString().split('T')[0]}&apiKey=TU_API_KEY_AQUI`;
-    // const externalApiUrl = 'https://some-real-lottery-api.com/zulia/daily';
-
     try {
-        // Simulación de respuesta de API externa
         const mockResults = {
             zuliaNumeros: {
                 "12:00 PM": "123",
@@ -536,14 +477,6 @@ app.get('/api/admin/obtener-resultados-externos', async (req, res) => {
             },
             fecha: req.query.fecha || new Date().toISOString().split('T')[0]
         };
-
-        // En un entorno real, harías esto:
-        // const response = await fetch(externalApiUrl);
-        // if (!response.ok) {
-        //     throw new Error(`Error HTTP: ${response.status} - ${response.statusText}`);
-        // }
-        // const data = await response.json();
-        // const numerosGanadores = data.zuliaNumeros; // Ajusta según la estructura de la API real
 
         res.json({ success: true, message: 'Resultados simulados obtenidos.', resultados: mockResults.zuliaNumeros });
 
@@ -555,16 +488,16 @@ app.get('/api/admin/obtener-resultados-externos', async (req, res) => {
 
 // Guardar los números ganadores del Zulia para un sorteo específico
 app.post('/api/admin/guardar-numeros-ganadores-zulia', async (req, res) => {
-    const { fecha_sorteo, numeros_ganadores, hora_sorteo } = req.body; // fecha_sorteo en "YYYY-MM-DD", hora_sorteo en "HH:MM XM"
+    const { fecha_sorteo, numeros_ganadores, hora_sorteo } = req.body;
 
     if (!fecha_sorteo || !numeros_ganadores || !hora_sorteo) {
         return res.status(400).json({ message: 'Faltan datos obligatorios: fecha_sorteo, hora_sorteo, numeros_ganadores.' });
     }
 
     try {
-        let resultados = await leerArchivo(RESULTADOS_ZULIA_FILE_PATH, []);
+        let resultados = await leerArchivo(RESULTADOS_ZULIA_FILE, []);
 
-        // Buscar si ya existe un resultado para esta fecha y hora
+        // Busca si ya existe un resultado para esa fecha y hora
         const existingIndex = resultados.findIndex(
             r => r.fecha_sorteo === fecha_sorteo && r.hora_sorteo === hora_sorteo
         );
@@ -572,71 +505,63 @@ app.post('/api/admin/guardar-numeros-ganadores-zulia', async (req, res) => {
         const nuevoResultado = {
             fecha_sorteo: fecha_sorteo,
             hora_sorteo: hora_sorteo,
-            numeros: numeros_ganadores, // Puede ser un array o string "XX,YY,ZZ"
+            numeros: numeros_ganadores,
             timestamp: new Date().toISOString()
         };
 
         if (existingIndex !== -1) {
-            resultados[existingIndex] = nuevoResultado; // Actualizar
-            console.log(`Resultado de Zulia para ${fecha_sorteo} ${hora_sorteo} actualizado.`);
+            // Actualiza el resultado existente
+            resultados[existingIndex] = nuevoResultado;
         } else {
-            resultados.push(nuevoResultado); // Añadir
-            console.log(`Nuevo resultado de Zulia para ${fecha_sorteo} ${hora_sorteo} guardado.`);
+            // Agrega el nuevo resultado
+            resultados.push(nuevoResultado);
         }
 
-        if (await escribirArchivo(RESULTADOS_ZULIA_FILE_PATH, resultados)) {
-            // Opcional: Actualizar la última fecha de resultados buscados en la configuración
-            const config = await leerConfiguracion();
-            config.ultima_fecha_resultados_zulia = fecha_sorteo;
-            await guardarConfiguracion(config);
+        await escribirArchivo(RESULTADOS_ZULIA_FILE, resultados);
 
-            res.json({ success: true, message: 'Resultados de Zulia guardados/actualizados con éxito.' });
-        } else {
-            res.status(500).json({ error: 'Error al guardar los resultados de Zulia.' });
-        }
+        // Opcional: Actualizar la última fecha de resultados buscados en la configuración
+        const config = await leerArchivo(CONFIG_FILE, {});
+        config.ultima_fecha_resultados_zulia = fecha_sorteo;
+        await escribirArchivo(CONFIG_FILE, config);
+
+        res.json({ success: true, message: 'Resultados de Zulia guardados/actualizados con éxito.', resultado: nuevoResultado });
+
     } catch (error) {
         console.error('Error al guardar/actualizar resultados de Zulia:', error);
         res.status(500).json({ error: 'Error interno del servidor al procesar resultados de Zulia.' });
     }
 });
 
-
 // NUEVA RUTA: Cerrar el sorteo actual y preparar el siguiente (ADMIN)
 app.post('/api/admin/cerrar-sorteo-actual', async (req, res) => {
-    const { siguiente_fecha_sorteo } = req.body; // La fecha del próximo sorteo "YYYY-MM-DD"
+    const { siguiente_fecha_sorteo } = req.body;
 
     if (!siguiente_fecha_sorteo) {
         return res.status(400).json({ message: 'Debe proporcionar la fecha del siguiente sorteo (YYYY-MM-DD).' });
     }
 
     try {
-        const config = await leerConfiguracion();
+        const config = await leerArchivo(CONFIG_FILE, {});
 
-        // 1. Opcional: Limpiar ventas de sorteos anteriores (o moverlas a un historial)
-        // Por ahora, simplemente las dejamos y el filtro de `numeros-disponibles` se encarga.
-        // Si necesitas limpiar `ventas.json`, es aquí donde lo harías.
-
-        // 2. Incrementar el número correlativo del sorteo
+        // 1. Incrementar el número correlativo del sorteo
         config.numero_sorteo_correlativo++;
 
-        // 3. Reiniciar el contador de tickets
-        config.ultimo_numero_ticket = 0; // O 1 si quieres que empiece desde 1
+        // 2. Reiniciar el contador de tickets para el nuevo sorteo
+        config.ultimo_numero_ticket = 0;
 
-        // 4. Establecer la nueva fecha del sorteo
+        // 3. Establecer la nueva fecha del sorteo
         config.fecha_sorteo = siguiente_fecha_sorteo;
 
-        // 5. Desbloquear la página (si estuviera bloqueada por el cierre del sorteo)
+        // 4. Desbloquear la página (si estuviera bloqueada por el cierre del sorteo)
         config.pagina_bloqueada = false;
 
-        if (await guardarConfiguracion(config)) {
-            res.json({
-                success: true,
-                message: `Sorteo actual cerrado y siguiente sorteo preparado. Nuevo Sorteo #: ${config.numero_sorteo_correlativo}, Fecha: ${config.fecha_sorteo}.`,
-                nuevaConfig: config
-            });
-        } else {
-            res.status(500).json({ error: 'Error al cerrar el sorteo y preparar el siguiente.' });
-        }
+        await escribirArchivo(CONFIG_FILE, config); // Guarda los cambios en la configuración
+
+        res.json({
+            success: true,
+            message: `Sorteo actual cerrado y siguiente sorteo preparado. Nuevo Sorteo #: ${config.numero_sorteo_correlativo}, Fecha: ${config.fecha_sorteo}.`,
+            nuevaConfig: config
+        });
 
     } catch (error) {
         console.error('Error al cerrar el sorteo actual:', error);
@@ -644,19 +569,26 @@ app.post('/api/admin/cerrar-sorteo-actual', async (req, res) => {
     }
 });
 
+---
 
-// Ruta principal (solo para verificar que el servidor está corriendo)
-app.get('/', (req, res) => {
-    res.send('¡Hola desde el backend de tu proyecto web de Rifas y Loterias!');
-});
+## Términos y Condiciones (Nueva Ruta Pública)
 
-// Iniciar el servidor
-app.listen(port, () => {
-    console.log(`Servidor escuchando en el puerto ${port}`);
-});
+```javascript
+// --- Archivo de Términos y Condiciones ---
+const TERMINOS_CONDICIONES_FILE = path.join(__dirname, 'terminos_condiciones.txt');
 
-// Manejo de cierre del servidor (para que se cierre limpiamente en Netlify u otros hosts)
-process.on('SIGINT', () => {
-    console.log('Servidor cerrado.');
-    process.exit(0);
+// Nueva ruta para obtener los términos y condiciones (accesible para el cliente)
+app.get('/api/terminos-condiciones', async (req, res) => {
+    try {
+        const data = await fs.readFile(TERMINOS_CONDICIONES_FILE, 'utf8');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8'); // Indica que el contenido es texto plano
+        res.send(data);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            console.warn(`Archivo de términos y condiciones no encontrado: ${TERMINOS_CONDICIONES_FILE}.`);
+            return res.status(404).json({ message: 'Términos y condiciones no encontrados en el servidor.' });
+        }
+        console.error('Error al leer el archivo de términos y condiciones:', error);
+        res.status(500).json({ error: 'Error interno del servidor al obtener los términos y condiciones.' });
+    }
 });
