@@ -571,7 +571,7 @@ app.post('/api/admin/cerrar-sorteo-actual', async (req, res) => {
 
 ---
 
-## Términos y Condiciones (Nueva Ruta Pública)
+
 
 ```javascript
 // --- Archivo de Términos y Condiciones ---
