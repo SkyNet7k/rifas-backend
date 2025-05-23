@@ -16,6 +16,7 @@
     "express-fileupload": "^1.4.0",
     "node-schedule": "^2.1.1",
     "pg": "^8.16.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "node-fetch": "^3.3.2"
   }
 }
