@@ -54,18 +54,23 @@ async function leerArchivo(filePath, defaultValue = {}) {
     try {
         const data = await fs.readFile(filePath, 'utf8');
         try {
+            // Intenta parsear el JSON. Si 'data' está vacío o es inválido, esto fallará.
             return JSON.parse(data);
         } catch (parseError) {
+            // Si falla al parsear, loggea la advertencia y RE-ESCRRIBE el archivo con el defaultValue
             console.warn(`⚠️ Error al parsear el archivo ${filePath}, usando valor por defecto.`, parseError);
+            // Esto solo reescribe si el archivo ya existe y está corrupto.
             await fs.writeFile(filePath, JSON.stringify(defaultValue, null, 2), 'utf8');
-            return defaultValue;
+            return defaultValue; // Retorna el valor por defecto para que la aplicación continúe
         }
     } catch (error) {
+        // Si el archivo no existe (ENOENT), CREA el archivo con el defaultValue
         if (error.code === 'ENOENT') {
             console.warn(`Archivo ${filePath} no encontrado. Creando con valor por defecto.`);
             await fs.writeFile(filePath, JSON.stringify(defaultValue, null, 2), 'utf8');
             return defaultValue;
         }
+        // Para cualquier otro error de lectura, loggea y lanza una excepción
         console.error(`❌ Error al leer el archivo ${filePath}:`, error);
         throw new Error(`Fallo al leer o inicializar el archivo ${filePath}.`);
     }
@@ -137,7 +142,6 @@ async function enviarCorteAutomatico() {
 
         // Obtener todos los tickets ya incluidos en cortes anteriores
         const ticketsYaIncluidos = new Set();
-        // === INICIO DE LA CORRECCIÓN ===
         cortesData.cortes.forEach(corte => {
             // Verifica que 'ventasIncluidas' existe y es un array antes de iterar
             if (corte.ventasIncluidas && Array.isArray(corte.ventasIncluidas)) {
@@ -147,7 +151,6 @@ async function enviarCorteAutomatico() {
                 console.warn(`⚠️ Corte con ID ${corte.id || 'desconocido'} no tiene la propiedad 'ventasIncluidas' o no es un array. Ignorando este corte para tickets ya incluidos.`);
             }
         });
-        // === FIN DE LA CORRECCIÓN ===
 
         const ventasParaCorte = ventasData.ventas.filter(venta =>
             venta.estado === 'confirmado' &&
@@ -203,7 +206,7 @@ async function enviarCorteAutomatico() {
                             <th style="padding: 8px; text-align: left;">Método Pago</th>
                             <th style="padding: 8px; text-align: left;">Referencia</th>
                             <th style="padding: 8px; text-align: right;">Valor USD</th>
-                            <th style="padding: 8px; text-align: right;">Valor Bs</th>
+                            <th style="padding: 8px; border: 1px solid #ddd; text-align: right;">Valor Bs</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -678,4 +681,37 @@ app.listen(port, async () => {
     console.log(`   - PUT /api/admin/horarios-zulia (para actualizar)`);
     // Inicializar el transportador de correo al inicio
     await initializeTransporter();
+
+    // ========================================================================
+    // === INICIO DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
+    // ========================================================================
+    console.log('ℹ️ Iniciando verificación y posible reparación de archivos .json...');
+    const filesToVerify = [
+        { path: CONFIG_PATH, default: { fecha_sorteo: null, precio_ticket: 0, tasa_dolar: 0, pagina_bloqueada: false, numero_sorteo_correlativo: 1, mail_config: {}, admin_email_for_reports: '' } },
+        { path: NUMEROS_PATH, default: { numeros: [] } },
+        { path: VENTAS_PATH, default: { ventas: [] } }, // Este es el objetivo principal
+        { path: CORTES_PATH, default: { cortes: [] } },
+        { path: HORARIOS_ZULIA_PATH, default: { horarios_zulia: [] } }
+    ];
+
+    for (const file of filesToVerify) {
+        try {
+            const content = await fs.readFile(file.path, 'utf8');
+            JSON.parse(content); // Intentar parsear. Si falla, el catch lo coge.
+            console.log(`✅ Archivo ${path.basename(file.path)} se leyó y parseó correctamente.`);
+        } catch (error) {
+            // Si hay un error al leer o parsear (incluido ENOENT si no existe o está vacío), lo reescribimos.
+            console.warn(`⚠️ Archivo ${path.basename(file.path)} está corrupto, vacío o no existe. Intentando recrearlo con valor por defecto...`, error.message);
+            try {
+                await escribirArchivo(file.path, file.default);
+                console.log(`✅ Archivo ${path.basename(file.path)} recreado con éxito a un estado vacío/por defecto válido.`);
+            } catch (writeError) {
+                console.error(`❌ ERROR CRÍTICO: No se pudo recrear ${path.basename(file.path)}.`, writeError);
+            }
+        }
+    }
+    console.log('--- Verificación de archivos .json completada. ---');
+    // ========================================================================
+    // === FIN DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
+    // ========================================================================
 });
