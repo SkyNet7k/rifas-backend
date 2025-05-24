@@ -1,6 +1,23 @@
 {
   "tasa_dolar": 36.5,
   "pagina_bloqueada": false,
-  "fecha_sorteo": null,
-  "precio_ticket": 1.50
+  "fecha_sorteo": "2025-05-23",
+  "precio_ticket": 1.00,
+  "numero_sorteo_correlativo": 1,
+  "ultimo_numero_ticket": 0,
+  "ultima_fecha_resultados_zulia": null,
+  "admin_whatsapp_numbers": [
+    "584124723776",
+    "584126083355",
+    "584143630488"
+  ],
+  "mail_config": {
+    "host": "smtp.gmail.com",
+    "port": 465,
+    "secure": true,
+    "user": "tu_correo_de_envio@gmail.com",
+    "pass": "tu_contraseña_de_aplicacion_de_gmail",
+    "senderName": "Sistema de Rifas"
+  },
+  "admin_email_for_reports": "SkyFall7k@gmail.com"
 }

@@ -1,10 +1,12 @@
 const express = require('express');
 const fileUpload = require('express-fileupload');
-const fs = require('fs').promises; // Usar la versión de promesas de fs
+const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
 const XLSX = require('xlsx');
 const fetch = require('node-fetch');
+const nodemailer = require('nodemailer');
+const cron = require('node-cron'); // <-- Añadido: Importar node-cron
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -25,7 +27,6 @@ app.use(express.json());
 app.use(fileUpload());
 
 // Servir archivos estáticos (para los comprobantes subidos)
-// Asegúrate de que la carpeta 'uploads' exista en la raíz de tu backend
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Rutas de Archivos de Datos ---
@@ -33,7 +34,7 @@ const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
-const TERMINOS_CONDICIONES_FILE = path.join(__dirname, 'terminos_condiciones.txt'); // Nuevo archivo para TyC
+const TERMINOS_CONDICIONES_FILE = path.join(__dirname, 'terminos_condiciones.txt');
 
 // Función para leer archivos JSON
 async function leerArchivo(filePath, defaultValue) {
@@ -61,6 +62,182 @@ async function escribirArchivo(filePath, data) {
     }
 }
 
+// --- Función para generar el enlace de WhatsApp ---
+/**
+ * Genera un enlace de WhatsApp para el administrador con los detalles de una nueva venta.
+ * @param {object} venta - Objeto de la venta.
+ * @param {string} adminPhoneNumber - Número de teléfono del administrador con código de país (ej. '584121234567').
+ * @returns {string} El enlace wa.me o null si falta el número del administrador.
+ */
+function generarEnlaceWhatsApp(venta, adminPhoneNumber) {
+    if (!adminPhoneNumber) {
+        console.warn('Número de teléfono del administrador para WhatsApp no configurado.');
+        return null;
+    }
+
+    const { numeroTicket, numeros, comprador, telefono, valorTotalUsd, fechaSorteo } = venta;
+    const mensaje = encodeURIComponent(
+        `¡Nueva Venta Pendiente!%0A` +
+        `Ticket #: *${numeroTicket}*%0A` +
+        `Comprador: *${comprador}*%0A` +
+        `Teléfono: ${telefono}%0A` +
+        `Números: ${numeros.join(', ')}%0A` +
+        `Monto USD: $${valorTotalUsd.toFixed(2)}%0A` +
+        `Sorteo: ${fechaSorteo}%0A%0A` +
+        `Por favor, verifica el pago y confirma la venta.`
+    );
+
+    return `https://wa.me/${adminPhoneNumber}?text=${mensaje}`;
+}
+
+// --- Función para enviar el reporte por correo ---
+/**
+ * Envía un reporte de ventas por correo electrónico.
+ * @param {object} mailConfig - Configuración del correo (host, port, user, pass).
+ * @param {string} toEmail - Dirección de correo del destinatario.
+ * @param {string} subject - Asunto del correo.
+ * @param {string} htmlContent - Contenido HTML del correo.
+ * @param {Buffer} [excelBuffer] - Buffer del archivo Excel adjunto.
+ * @param {string} [fileName] - Nombre del archivo Excel.
+ */
+async function enviarReportePorCorreo(mailConfig, toEmail, subject, htmlContent, excelBuffer = null, fileName = 'reporte.xlsx') {
+    if (!mailConfig || !mailConfig.host || !mailConfig.port || !mailConfig.user || !mailConfig.pass || !toEmail) {
+        console.error('Configuración de correo incompleta o destinatario no especificado. No se puede enviar el correo.');
+        return { success: false, message: 'Configuración de correo incompleta.' };
+    }
+
+    try {
+        const transporter = nodemailer.createTransport({
+            host: mailConfig.host,
+            port: mailConfig.port,
+            secure: mailConfig.secure,
+            auth: {
+                user: mailConfig.user,
+                pass: mailConfig.pass
+            },
+            tls: {
+                rejectUnauthorized: false
+            }
+        });
+
+        const mailOptions = {
+            from: `"${mailConfig.senderName || 'Sistema de Ventas'}" <${mailConfig.user}>`,
+            to: toEmail,
+            subject: subject,
+            html: htmlContent,
+            attachments: []
+        };
+
+        if (excelBuffer && fileName) {
+            mailOptions.attachments.push({
+                filename: fileName,
+                content: excelBuffer,
+                contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            });
+        }
+
+        const info = await transporter.sendMail(mailOptions);
+        console.log('Correo enviado: %s', info.messageId);
+        return { success: true, message: 'Correo enviado con éxito.' };
+    } catch (error) {
+        console.error('Error al enviar el correo:', error);
+        return { success: false, message: `Error al enviar el correo: ${error.message}` };
+    }
+}
+
+// --- Función para enviar el corte automático ---
+async function enviarCorteAutomatico() {
+    console.log(`[Corte Automático] Iniciando envío de corte a las ${new Date().toLocaleString()}`);
+    try {
+        const config = await leerArchivo(CONFIG_FILE, {});
+        const ventas = await leerArchivo(VENTAS_FILE, []);
+
+        // Obtenemos el número de sorteo y fecha actual para el corte
+        const fechaCorte = config.fecha_sorteo || new Date().toISOString().split('T')[0];
+        const numeroSorteoCorte = config.numero_sorteo_correlativo;
+
+        // Filtrar solo las ventas del sorteo actual que estén pendientes o confirmadas
+        const ventasParaCorte = ventas.filter(venta =>
+            venta.fechaSorteo === fechaCorte &&
+            venta.numeroSorteoCorrelativo === numeroSorteoCorte &&
+            ['pendiente', 'confirmado'].includes(venta.estado)
+        );
+
+        let totalVentasUSD = 0;
+        let totalVentasBS = 0;
+        ventasParaCorte.forEach(venta => {
+            totalVentasUSD += venta.valorTotalUsd || 0;
+            totalVentasBS += venta.valorTotalBs || 0;
+        });
+
+        // 1. Envío de notificación por WhatsApp a todos los números configurados
+        const adminWhatsappNumbers = config.admin_whatsapp_numbers; // Ahora es un array
+        if (Array.isArray(adminWhatsappNumbers) && adminWhatsappNumbers.length > 0) {
+            const mensajeWhatsApp = encodeURIComponent(
+                `*Corte Automático de Ventas*\n` +
+                `Fecha del Sorteo: *${fechaCorte}*\n` +
+                `Sorteo #: *${numeroSorteoCorte}*\n` +
+                `Ventas Registradas: *${ventasParaCorte.length}*\n` +
+                `Total USD: *$${totalVentasUSD.toFixed(2)}*\n` +
+                `Total BS: *Bs. ${totalVentasBS.toFixed(2)}*\n` +
+                `\nPara más detalles, revisa tu correo.`
+            );
+
+            for (const phoneNumber of adminWhatsappNumbers) {
+                const whatsappLink = `https://wa.me/${phoneNumber}?text=${mensajeWhatsApp}`;
+                console.log(`[Corte Automático] Enlace WhatsApp para ${phoneNumber}: ${whatsappLink}`);
+                // En un entorno real, aquí podrías integrar una API de WhatsApp para enviar el mensaje directamente.
+                // Por ahora, solo se imprime el enlace en la consola.
+            }
+        } else {
+            console.warn('[Corte Automático] Números de WhatsApp de administrador no configurados para el envío de cortes.');
+        }
+
+        // 2. Envío del reporte por correo
+        const mailConfig = config.mail_config;
+        const adminEmail = config.admin_email_for_reports;
+        let emailSentStatus = { success: false, message: 'Correo de reporte no enviado.' };
+
+        if (adminEmail && mailConfig && mailConfig.user && mailConfig.pass) {
+            const emailSubject = `Corte de Ventas - Sorteo #${numeroSorteoCorte} - ${fechaCorte}`;
+            const emailHtml = `
+                <p>Estimado Administrador,</p>
+                <p>Este es un reporte de corte automático de ventas para el sorteo:</p>
+                <ul>
+                    <li><strong>Sorteo #:</strong> ${numeroSorteoCorte}</li>
+                    <li><strong>Fecha del Sorteo:</strong> ${fechaCorte}</li>
+                    <li><strong>Ventas Registradas:</strong> ${ventasParaCorte.length}</li>
+                    <li><strong>Total en USD:</strong> $${totalVentasUSD.toFixed(2)}</li>
+                    <li><strong>Total en Bs:</strong> Bs. ${totalVentasBS.toFixed(2)}</li>
+                </ul>
+                <p>Adjunto encontrará el detalle de las ventas en formato Excel.</p>
+                <p>Saludos cordiales,</p>
+                <p>Su Sistema de Rifas</p>
+            `;
+
+            let excelBuffer = null;
+            let excelFileName = `Corte_Ventas_Sorteo_${numeroSorteoCorte}_${fechaCorte}.xlsx`;
+            if (ventasParaCorte.length > 0) {
+                const workbook = XLSX.utils.book_new();
+                const worksheet = XLSX.utils.json_to_sheet(ventasParaCorte);
+                XLSX.utils.book_append_sheet(workbook, worksheet, `Ventas Sorteo ${numeroSorteoCorte}`);
+                excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+            } else {
+                console.log(`[Corte Automático] No hay ventas para el sorteo #${numeroSorteoCorte} - No se generará reporte Excel.`);
+            }
+
+            emailSentStatus = await enviarReportePorCorreo(mailConfig, adminEmail, emailSubject, emailHtml, excelBuffer, excelFileName);
+            console.log(`[Corte Automático] Estado del envío de correo: ${emailSentStatus.message}`);
+        } else {
+            console.warn('[Corte Automático] Configuración de correo o dirección de admin para reportes incompleta. No se pudo enviar el reporte por correo.');
+        }
+
+    } catch (error) {
+        console.error('[Corte Automático] Error al procesar y enviar el corte automático:', error);
+    }
+}
+
+
 // Inicialización de archivos si no existen
 async function inicializarArchivos() {
     await leerArchivo(CONFIG_FILE, {
@@ -70,19 +247,29 @@ async function inicializarArchivos() {
         precio_ticket: 1.00,
         numero_sorteo_correlativo: 1,
         ultimo_numero_ticket: 0,
-        ultima_fecha_resultados_zulia: null
+        ultima_fecha_resultados_zulia: null,
+        // --- Cambiado a array para múltiples números de WhatsApp ---
+        admin_whatsapp_numbers: [], // Formato: ['584121234567', '584149876543']
+        mail_config: {
+            host: 'smtp.tuservidor.com',
+            port: 587,
+            secure: false,
+            user: 'tu_correo@ejemplo.com',
+            pass: 'tu_contraseña_de_correo',
+            senderName: 'Notificaciones de Rifas'
+        },
+        // --- Dirección de correo actualizada ---
+        admin_email_for_reports: 'SkyFall7k@gmail.com'
     });
     await leerArchivo(VENTAS_FILE, []);
     await leerArchivo(HORARIOS_ZULIA_FILE, { horarios_zulia: ["12:00 PM", "04:00 PM", "07:00 PM"] });
     await leerArchivo(RESULTADOS_ZULIA_FILE, []);
-    // No inicializamos TERMINOS_CONDICIONES_FILE aquí porque esperamos que exista con el texto ya dentro.
-    // Si no existe, la ruta /api/terminos-condiciones lo manejará con un 404.
 }
 
 // Llama a la inicialización al arrancar el servidor
 inicializarArchivos().catch(err => {
     console.error('Error durante la inicialización de archivos:', err);
-    process.exit(1); // Sale si hay un error crítico al inicializar
+    process.exit(1);
 });
 
 // --- Rutas de Configuración y Horarios (Panel de Administración) ---
@@ -99,7 +286,7 @@ app.get('/api/admin/configuracion', async (req, res) => {
 
 app.put('/api/admin/configuracion', async (req, res) => {
     try {
-        const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket } = req.body;
+        const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket, admin_whatsapp_numbers, mail_config, admin_email_for_reports } = req.body; // <-- admin_whatsapp_numbers ahora es un array
 
         const config = await leerArchivo(CONFIG_FILE, {});
 
@@ -110,6 +297,9 @@ app.put('/api/admin/configuracion', async (req, res) => {
         if (precio_ticket !== undefined) config.precio_ticket = parseFloat(precio_ticket);
         if (numero_sorteo_correlativo !== undefined) config.numero_sorteo_correlativo = parseInt(numero_sorteo_correlativo);
         if (ultimo_numero_ticket !== undefined) config.ultimo_numero_ticket = parseInt(ultimo_numero_ticket);
+        if (admin_whatsapp_numbers !== undefined) config.admin_whatsapp_numbers = admin_whatsapp_numbers; // <-- Actualiza el array de números de WhatsApp
+        if (mail_config !== undefined) config.mail_config = mail_config;
+        if (admin_email_for_reports !== undefined) config.admin_email_for_reports = admin_email_for_reports;
 
         // Validaciones
         if (isNaN(config.precio_ticket) || config.precio_ticket < 0) config.precio_ticket = 1.00;
@@ -163,7 +353,6 @@ app.get('/api/admin/ventas', async (req, res) => {
 app.get('/api/admin/ventas/exportar-excel', async (req, res) => {
     try {
         const ventas = await leerArchivo(VENTAS_FILE, []);
-        console.log('Contenido de ventas para exportar:', ventas);
         const workbook = XLSX.utils.book_new();
         const worksheet = XLSX.utils.json_to_sheet(ventas);
         XLSX.utils.book_append_sheet(workbook, worksheet, 'Ventas');
@@ -233,9 +422,7 @@ app.put('/api/admin/ventas/:numeroTicket/cancelar', async (req, res) => {
     }
 });
 
-
 // --- Rutas de Usuarios y Rifas (Placeholders) ---
-// (Estas rutas no interactúan con los archivos JSON en este momento)
 app.post('/api/admin/usuarios', async (req, res) => {
     res.status(501).json({ message: 'Ruta de usuarios: Crear - No implementada' });
 });
@@ -272,7 +459,7 @@ app.delete('/api/admin/rifas/:id', async (req, res) => {
 app.get('/api/numeros-disponibles', async (req, res) => {
     try {
         const config = await leerArchivo(CONFIG_FILE, {});
-        const fechaSorteoActual = config.fecha_sorteo; //YYYY-MM-DD
+        const fechaSorteoActual = config.fecha_sorteo;
         const numeroSorteoCorrelativo = config.numero_sorteo_correlativo;
         const paginaBloqueada = config.pagina_bloqueada;
 
@@ -414,12 +601,11 @@ app.post('/api/ventas', async (req, res) => {
         }
 
         // --- Generar el número de ticket correlativo ---
-        // Se carga la configuración, se actualiza y se guarda
         const config = await leerArchivo(CONFIG_FILE, {});
         config.ultimo_numero_ticket++;
         await escribirArchivo(CONFIG_FILE, config);
 
-        const numeroTicketGenerado = String(config.ultimo_numero_ticket).padStart(4, '0'); // Formatea a 4 dígitos
+        const numeroTicketGenerado = String(config.ultimo_numero_ticket).padStart(4, '0');
 
         const nuevaVenta = {
             numeroTicket: numeroTicketGenerado,
@@ -436,16 +622,35 @@ app.post('/api/ventas', async (req, res) => {
             fechaCompra: fechaCompra || new Date().toISOString(),
             fechaSorteo: fechaSorteo,
             comprobanteUrl: comprobanteUrl,
-            estado: 'pendiente', // Estado inicial
+            estado: 'pendiente',
             numeroSorteoCorrelativo: currentConfig.numero_sorteo_correlativo
         };
 
         const ventas = await leerArchivo(VENTAS_FILE, []);
         ventas.push(nuevaVenta);
-        await escribirArchivo(VENTAS_FILE, ventas); // Guarda la nueva venta
+        await escribirArchivo(VENTAS_FILE, ventas);
 
         console.log('Venta guardada exitosamente:', nuevaVenta.numeroTicket);
-        res.status(201).json({ message: '¡Venta registrada con éxito!', venta: nuevaVenta });
+
+        // --- Notificación de nueva venta por WhatsApp (solo al primer número configurado, si existe) ---
+        // Se mantiene la notificación inmediata de nueva venta.
+        const adminWhatsappNumbersForInstant = config.admin_whatsapp_numbers;
+        if (Array.isArray(adminWhatsappNumbersForInstant) && adminWhatsappNumbersForInstant.length > 0) {
+            const whatsappLink = generarEnlaceWhatsApp(nuevaVenta, adminWhatsappNumbersForInstant[0]); // Solo al primer número
+            if (whatsappLink) {
+                console.log('Enlace de notificación WhatsApp (nueva venta) para el administrador:', whatsappLink);
+            } else {
+                console.warn('No se pudo generar el enlace de WhatsApp (número de admin para notificación de nueva venta no configurado).');
+            }
+        } else {
+            console.warn('No hay números de WhatsApp de administrador configurados para notificación de nueva venta.');
+        }
+
+
+        res.status(201).json({
+            message: '¡Venta registrada con éxito!',
+            venta: nuevaVenta
+        });
 
     } catch (error) {
         console.error('Error al registrar la venta:', error);
@@ -533,6 +738,7 @@ app.post('/api/admin/guardar-numeros-ganadores-zulia', async (req, res) => {
 });
 
 // NUEVA RUTA: Cerrar el sorteo actual y preparar el siguiente (ADMIN)
+// Esta ruta ya NO enviará el reporte de cierre. Ese trabajo lo hace la tarea programada.
 app.post('/api/admin/cerrar-sorteo-actual', async (req, res) => {
     const { siguiente_fecha_sorteo } = req.body;
 
@@ -569,19 +775,12 @@ app.post('/api/admin/cerrar-sorteo-actual', async (req, res) => {
     }
 });
 
----
 
-
-
-```javascript
 // --- Archivo de Términos y Condiciones ---
-const TERMINOS_CONDICIONES_FILE = path.join(__dirname, 'terminos_condiciones.txt');
-
-// Nueva ruta para obtener los términos y condiciones (accesible para el cliente)
 app.get('/api/terminos-condiciones', async (req, res) => {
     try {
         const data = await fs.readFile(TERMINOS_CONDICIONES_FILE, 'utf8');
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8'); // Indica que el contenido es texto plano
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.send(data);
     } catch (error) {
         if (error.code === 'ENOENT') {
@@ -591,4 +790,23 @@ app.get('/api/terminos-condiciones', async (req, res) => {
         console.error('Error al leer el archivo de términos y condiciones:', error);
         res.status(500).json({ error: 'Error interno del servidor al obtener los términos y condiciones.' });
     }
+});
+
+
+// --- Programar la tarea de envío de cortes cada 55 minutos ---
+// La sintaxis de cron es: `* * * * * *` (segundo, minuto, hora, día del mes, mes, día de la semana)
+// `*/55 * * * *` significa "cada 55 minutos"
+cron.schedule('*/55 * * * *', () => {
+    console.log('Ejecutando tarea programada: envío de corte automático...');
+    enviarCorteAutomatico();
+}, {
+    scheduled: true,
+    timezone: "America/Caracas" // Asegúrate de usar la zona horaria correcta, o tu zona horaria local
+});
+
+
+// Iniciar el servidor
+app.listen(port, () => {
+    console.log(`Servidor escuchando en http://localhost:${port}`);
+    console.log(`Tarea de cortes automáticos programada para ejecutarse cada 55 minutos.`);
 });
