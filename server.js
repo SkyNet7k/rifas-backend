@@ -15,6 +15,9 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Definición de API_BASE_URL para los correos (puedes configurarlo como variable de entorno en Render)
+const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
+
 // --- Configuración de CORS ---
 const corsOptions = {
     origin: [
@@ -87,7 +90,7 @@ async function escribirArchivo(filePath, data) {
     await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// Configuración de Nodemailer (mantener igual)
+// Configuración de Nodemailer
 const transporter = nodemailer.createTransport({
     service: 'gmail', // o tu servicio de correo
     auth: {
@@ -96,11 +99,106 @@ const transporter = nodemailer.createTransport({
     },
 });
 
+// Función de corte de ventas (DEBES ASEGURARTE DE QUE ESTA FUNCIÓN ESTÉ DEFINIDA EN ALGÚN LUGAR DE TU CÓDIGO)
+async function executeSalesCut(auto = false) {
+    console.log(`Ejecutando corte de ventas (automático: ${auto}) en ${moment().tz("America/Caracas").format()}`);
+    try {
+        const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
+        const numerosData = await leerArchivo(NUMEROS_PATH, { numeros: [] });
+        const cortesData = await leerArchivo(CORTES_PATH, { cortes: [] });
+
+        // Obtener la fecha del sorteo actual de la configuración
+        const config = await leerArchivo(CONFIG_PATH, {});
+        const fechaSorteoActual = config.fecha_sorteo;
+
+        if (!fechaSorteoActual) {
+            console.warn('No hay fecha de sorteo actual configurada para realizar el corte.');
+            return; // O manejar como error
+        }
+
+        // Filtra las ventas para el sorteo actual que no han sido cortadas
+        const ventasDelSorteoActual = ventasData.ventas.filter(venta =>
+            moment(venta.fechaSorteo).format('YYYY-MM-DD') === moment(fechaSorteoActual).format('YYYY-MM-DD')
+        );
+
+        // Si no hay ventas para el sorteo actual, no hay nada que cortar
+        if (ventasDelSorteoActual.length === 0) {
+            console.log('No hay ventas para el sorteo actual, no se realiza corte.');
+            return;
+        }
+
+        // Crear un nuevo registro de corte
+        const nuevoCorte = {
+            id: Date.now(),
+            fechaCorte: moment().tz("America/Caracas").toISOString(),
+            fechaSorteo: fechaSorteoActual,
+            ventas: ventasDelSorteoActual, // Guardar las ventas de este corte
+            totalTickets: ventasDelSorteoActual.length,
+            totalUsd: ventasDelSorteoActual.reduce((sum, venta) => sum + venta.valorTotalUsd, 0),
+            totalBs: ventasDelSorteoActual.reduce((sum, venta) => sum + venta.valorTotalBs, 0),
+            tipo: auto ? 'automatico' : 'manual'
+        };
+
+        cortesData.cortes.push(nuevoCorte);
+        await escribirArchivo(CORTES_PATH, cortesData);
+
+        // Limpiar ventas y resetear números disponibles
+        await escribirArchivo(VENTAS_PATH, { ventas: [] }); // Eliminar ventas pasadas
+
+        const numerosReset = Array.from({ length: 100 }, (_, i) => ({ numero: (i + 1).toString().padStart(2, '0'), disponible: true }));
+        await escribirArchivo(NUMEROS_PATH, { numeros: numerosReset });
+
+        // Opcional: Avanzar la fecha del sorteo o reiniciarla, y reiniciar el correlativo
+        // Esto depende de cómo quieras manejar los sorteos futuros
+        config.fecha_sorteo = null; // Reiniciar la fecha de sorteo
+        config.numero_sorteo_correlativo = 1; // Reiniciar el correlativo de tickets
+        await escribirArchivo(CONFIG_PATH, config);
+
+        console.log(`✅ Corte de ventas para el sorteo del ${fechaSorteoActual} realizado exitosamente.`);
+
+        // Lógica de envío de correo de reporte de corte al admin (similar a la de ventas)
+        const adminEmailForReports = config.admin_email_for_reports;
+        if (adminEmailForReports) {
+            const mailOptions = {
+                from: process.env.EMAIL_USER,
+                to: adminEmailForReports,
+                subject: `REPORTE DE CORTE DE VENTAS - Sorteo ${moment(fechaSorteoActual).format('DD/MM/YYYY')}`,
+                html: `
+                    <h2>Reporte de Corte de Ventas</h2>
+                    <p>Se ha realizado un corte de ventas para el sorteo del día <strong>${moment(fechaSorteoActual).format('DD/MM/YYYY')}</strong>.</p>
+                    <p><strong>Fecha y Hora del Corte:</strong> ${moment(nuevoCorte.fechaCorte).format('DD/MM/YYYY HH:mm')}</p>
+                    <p><strong>Tipo de Corte:</strong> ${nuevoCorte.tipo}</p>
+                    <h3>Resumen del Sorteo</h3>
+                    <ul>
+                        <li>Total de Tickets Vendidos: <strong>${nuevoCorte.totalTickets}</strong></li>
+                        <li>Total Recaudado (USD): <strong>$${nuevoCorte.totalUsd.toFixed(2)}</strong></li>
+                        <li>Total Recaudado (Bs): <strong>Bs ${nuevoCorte.totalBs.toFixed(2)}</strong></li>
+                    </ul>
+                    <p>Los números han sido reseteados y las ventas correspondientes han sido archivadas.</p>
+                    <p>Saludos cordiales,</p>
+                    <p>Tu Equipo de Rifas</p>
+                `
+            };
+            transporter.sendMail(mailOptions, (error, info) => {
+                if (error) {
+                    console.error('Error al enviar reporte de corte al administrador:', error);
+                } else {
+                    console.log('Reporte de corte enviado al administrador:', info.response);
+                }
+            });
+        }
+
+    } catch (error) {
+        console.error('❌ Error en executeSalesCut:', error);
+        // Manejar el error apropiadamente, quizás notificar al administrador
+    }
+}
+
+
 // ========================================================================
 // === INICIO DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
 // ========================================================================
 // Este bloque es fundamental para la inicialización.
-// Ya lo tienes, pero es importante que siga ahí y se ejecute correctamente.
 app.listen(port, async () => {
     console.log(`Servidor escuchando en el puerto ${port}`);
     console.log('ℹ️ Iniciando verificación y posible reparación de archivos .json...');
@@ -129,14 +227,13 @@ app.listen(port, async () => {
     }
     console.log('--- Verificación de archivos .json completada. ---');
 
-    // Iniciar el cron job para el corte de ventas (si lo tienes configurado)
-    // Este código debe estar aquí para asegurarse de que los archivos estén listos
-    // cron.schedule('0 0 * * *', async () => { // Todos los días a medianoche (00:00)
-    //     console.log('✨ Ejecutando tarea programada de corte de ventas...');
-    //     await executeSalesCut(true); // Llamar a la función de corte con 'true' para indicar que es automático
-    // }, {
-    //     timezone: "America/Caracas" // Asegúrate de que tu timezone sea el correcto
-    // });
+    // Iniciar el cron job para el corte de ventas
+    cron.schedule('0 0 * * *', async () => { // Todos los días a medianoche (00:00)
+        console.log('✨ Ejecutando tarea programada de corte de ventas...');
+        await executeSalesCut(true); // Llamar a la función de corte con 'true' para indicar que es automático
+    }, {
+        timezone: "America/Caracas" // Asegúrate de que tu timezone sea el correcto
+    });
 });
 // ========================================================================
 // === FIN DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
@@ -187,17 +284,16 @@ app.get('/api/horarios-zulia', async (req, res) => {
 });
 
 
-// Ruta para registrar una nueva venta (¡Aquí vamos a enfocarnos!)
+// Ruta para registrar una nueva venta
 app.post('/api/ventas', async (req, res) => {
-    // AÑADIDO PARA DEPURACIÓN INICIAL
     console.log('--- Nueva solicitud POST /api/ventas ---');
-    console.log('req.body:', req.body); // Contiene campos de texto
-    console.log('req.files:', req.files); // Contiene el archivo subido
+    console.log('req.body:', req.body);
+    console.log('req.files:', req.files);
 
     try {
-        const config = await leerArchivo(CONFIG_PATH, {}); // Cargar configuración actualizada
+        const config = await leerArchivo(CONFIG_PATH, {});
         const { comprador, telefono, codigoPais, cedula, email, metodoPago, referenciaPago, numeros, valorTotalUsd, valorTotalBs, tasaAplicada, fechaSorteo } = req.body;
-        const comprobanteAdjunto = req.files && req.files.comprobante; // Obtener el archivo si existe
+        const comprobanteAdjunto = req.files && req.files.comprobante;
 
         // ==========================================
         // === VALIDACIONES (CRÍTICO PARA EL 400) ===
@@ -212,8 +308,6 @@ app.post('/api/ventas', async (req, res) => {
             return res.status(400).json({ message: 'No hay una fecha de sorteo configurada por el administrador.' });
         }
 
-        // Convertir la fecha del frontend a un formato comparable (YYYY-MM-DD)
-        // Asegúrate de que fechaSorteo del frontend venga en ISO (YYYY-MM-DD)
         const fechaSorteoFrontend = moment.tz(fechaSorteo, "America/Caracas").format('YYYY-MM-DD');
         const fechaSorteoBackend = moment.tz(config.fecha_sorteo, "America/Caracas").format('YYYY-MM-DD');
 
@@ -317,72 +411,68 @@ app.post('/api/ventas', async (req, res) => {
         // ==========================================
         // === ENVÍO DE CORREOS Y WHATSAPP ===
         // ==========================================
-        // (El código para el envío de correos es el mismo que tenías, asumiendo que funciona)
-        // Puedes añadir aquí la lógica para el envío de WhatsApp.
-        // Asegúrate de que las credenciales de correo (`EMAIL_USER`, `EMAIL_PASS`) estén en tus variables de entorno en Render.com.
-
         // Simulación de envío de correo (adapta esto a tu lógica real)
-        // const mailOptions = {
-        //     from: process.env.EMAIL_USER,
-        //     to: email, // Correo del comprador
-        //     subject: `Confirmación de Compra de Ticket ${numeroTicketCorrelativo}`,
-        //     html: `
-        //         <h1>¡Gracias por tu compra!</h1>
-        //         <p>Tu número de ticket es: <strong>${numeroTicketCorrelativo}</strong></p>
-        //         <p>Comprobante de referencia: <strong>${numeroComprobante}</strong></p>
-        //         <p>Números seleccionados: <strong>${numeros.join(', ')}</strong></p>
-        //         <p>Total pagado: <strong>$${nuevaVenta.valorTotalUsd.toFixed(2)} / Bs ${nuevaVenta.valorTotalBs.toFixed(2)}</strong></p>
-        //         <p>Fecha del sorteo: <strong>${moment(nuevaVenta.fechaSorteo).format('DD/MM/YYYY')}</strong></p>
-        //         <p>Te deseamos mucha suerte!</p>
-        //         <p>Atentamente, Tu Equipo de Rifas</p>
-        //     `,
-        //     attachments: comprobantePath ? [{ path: path.join(__dirname, 'uploads', path.basename(comprobantePath)) }] : []
-        // };
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email, // Correo del comprador
+            subject: `Confirmación de Compra de Ticket ${numeroTicketCorrelativo}`,
+            html: `
+                <h1>¡Gracias por tu compra!</h1>
+                <p>Tu número de ticket es: <strong>${numeroTicketCorrelativo}</strong></p>
+                <p>Comprobante de referencia: <strong>${numeroComprobante}</strong></p>
+                <p>Números seleccionados: <strong>${numeros.join(', ')}</strong></p>
+                <p>Total pagado: <strong>$${nuevaVenta.valorTotalUsd.toFixed(2)} / Bs ${nuevaVenta.valorTotalBs.toFixed(2)}</strong></p>
+                <p>Fecha del sorteo: <strong>${moment(nuevaVenta.fechaSorteo).format('DD/MM/YYYY')}</strong></p>
+                <p>Te deseamos mucha suerte!</p>
+                <p>Atentamente, Tu Equipo de Rifas</p>
+            `,
+            attachments: comprobantePath ? [{ path: path.join(__dirname, 'uploads', path.basename(comprobantePath)) }] : []
+        };
 
-        // // Envía el correo al comprador
-        // transporter.sendMail(mailOptions, (error, info) => {
-        //     if (error) {
-        //         console.error('Error al enviar correo al comprador:', error);
-        //     } else {
-        //         console.log('Correo al comprador enviado:', info.response);
-        //     }
-        // });
+        // Envía el correo al comprador
+        transporter.sendMail(mailOptions, (error, info) => {
+            if (error) {
+                console.error('Error al enviar correo al comprador:', error);
+            } else {
+                console.log('Correo al comprador enviado:', info.response);
+            }
+        });
 
-        // // Envía un correo al administrador (si configurado)
-        // if (config.admin_email_for_reports && config.admin_email_for_reports.length > 0) {
-        //     const adminMailOptions = {
-        //         from: process.env.EMAIL_USER,
-        //         to: config.admin_email_for_reports,
-        //         subject: `NUEVA VENTA REGISTRADA: Ticket ${numeroTicketCorrelativo} de ${comprador}`,
-        //         html: `
-        //             <h2>Nueva Venta Registrada</h2>
-        //             <p><strong>Comprador:</strong> ${comprador}</p>
-        //             <p><strong>Teléfono:</strong> ${nuevaVenta.telefono}</p>
-        //             <p><strong>Cédula:</strong> ${cedula}</p>
-        //             <p><strong>Email:</strong> ${email}</p>
-        //             <p><strong>Ticket #:</strong> ${numeroTicketCorrelativo}</p>
-        //             <p><strong>Referencia #:</strong> ${numeroComprobante}</p>
-        //             <p><strong>Números:</strong> ${numeros.join(', ')}</p>
-        //             <p><strong>Método de Pago:</strong> ${metodoPago}</p>
-        //             <p><strong>Ref. Pago:</strong> ${referenciaPago}</p>
-        //             <p><strong>Total USD:</strong> $${nuevaVenta.valorTotalUsd.toFixed(2)}</p>
-        //             <p><strong>Total Bs:</strong> Bs ${nuevaVenta.valorTotalBs.toFixed(2)}</p>
-        //             <p><strong>Tasa Aplicada:</strong> ${nuevaVenta.tasaAplicada.toFixed(2)}</p>
-        //             <p><strong>Fecha Compra:</strong> ${moment(nuevaVenta.fechaCompra).format('DD/MM/YYYY HH:mm')}</p>
-        //             <p><strong>Fecha Sorteo:</strong> ${moment(nuevaVenta.fechaSorteo).format('DD/MM/YYYY')}</p>
-        //             ${comprobantePath ? `<p><a href="${API_BASE_URL}${comprobantePath}" target="_blank">Ver Comprobante Adjunto</a></p>` : '<p>No se adjuntó comprobante.</p>'}
-        //         `,
-        //         attachments: comprobantePath ? [{ path: path.join(__dirname, 'uploads', path.basename(comprobantePath)) }] : []
-        //     };
+        // Envía un correo al administrador (si configurado)
+        if (config.admin_email_for_reports && config.admin_email_for_reports.length > 0) {
+            const adminMailOptions = {
+                from: process.env.EMAIL_USER,
+                to: config.admin_email_for_reports,
+                subject: `NUEVA VENTA REGISTRADA: Ticket ${numeroTicketCorrelativo} de ${comprador}`,
+                html: `
+                    <h2>Nueva Venta Registrada</h2>
+                    <p><strong>Comprador:</strong> ${comprador}</p>
+                    <p><strong>Teléfono:</strong> ${nuevaVenta.telefono}</p>
+                    <p><strong>Cédula:</strong> ${cedula}</p>
+                    <p><strong>Email:</strong> ${email}</p>
+                    <p><strong>Ticket #:</strong> ${numeroTicketCorrelativo}</p>
+                    <p><strong>Referencia #:</strong> ${numeroComprobante}</p>
+                    <p><strong>Números:</strong> ${numeros.join(', ')}</p>
+                    <p><strong>Método de Pago:</strong> ${metodoPago}</p>
+                    <p><strong>Ref. Pago:</strong> ${referenciaPago}</p>
+                    <p><strong>Total USD:</strong> $${nuevaVenta.valorTotalUsd.toFixed(2)}</p>
+                    <p><strong>Total Bs:</strong> Bs ${nuevaVenta.valorTotalBs.toFixed(2)}</p>
+                    <p><strong>Tasa Aplicada:</strong> ${nuevaVenta.tasaAplicada.toFixed(2)}</p>
+                    <p><strong>Fecha Compra:</strong> ${moment(nuevaVenta.fechaCompra).format('DD/MM/YYYY HH:mm')}</p>
+                    <p><strong>Fecha Sorteo:</strong> ${moment(nuevaVenta.fechaSorteo).format('DD/MM/YYYY')}</p>
+                    ${comprobantePath ? `<p><a href="${API_BASE_URL}${comprobantePath}" target="_blank">Ver Comprobante Adjunto</a></p>` : '<p>No se adjuntó comprobante.</p>'}
+                `,
+                attachments: comprobantePath ? [{ path: path.join(__dirname, 'uploads', path.basename(comprobantePath)) }] : []
+            };
 
-        //     transporter.sendMail(adminMailOptions, (error, info) => {
-        //         if (error) {
-        //             console.error('Error al enviar correo al administrador:', error);
-        //         } else {
-        //             console.log('Correo al administrador enviado:', info.response);
-        //         }
-        //     });
-        // }
+            transporter.sendMail(adminMailOptions, (error, info) => {
+                if (error) {
+                    console.error('Error al enviar correo al administrador:', error);
+                } else {
+                    console.log('Correo al administrador enviado:', info.response);
+                }
+            });
+        }
 
         res.status(201).json({
             message: 'Compra confirmada exitosamente!',
@@ -398,10 +488,103 @@ app.post('/api/ventas', async (req, res) => {
     }
 });
 
-// Admin routes (mantener igual)
-// app.get('/api/admin/configuracion', ...);
-// app.put('/api/admin/configuracion', ...);
-// app.get('/api/admin/horarios-zulia', ...);
-// app.put('/api/admin/horarios-zulia', ...);
-// app.get('/api/admin/ventas', ...);
-// app.post('/api/admin/execute-sales-cut', ...);
+// Admin routes (¡Descomentadas!)
+// Ruta para obtener configuración de administración (todos los detalles)
+app.get('/api/admin/configuracion', async (req, res) => {
+    try {
+        const config = await leerArchivo(CONFIG_PATH, {});
+        // Aquí puedes devolver la configuración completa, ya que es para el admin
+        res.json(config);
+    } catch (error) {
+        console.error('❌ Error al obtener configuración para el administrador:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener configuración de administración.' });
+    }
+});
+
+// Ruta para actualizar configuración de administración
+app.put('/api/admin/configuracion', async (req, res) => {
+    try {
+        const newConfig = req.body;
+        // Validación básica (ajusta según tus necesidades)
+        if (!newConfig || Object.keys(newConfig).length === 0) {
+            return res.status(400).json({ message: 'Datos de configuración inválidos.' });
+        }
+
+        let currentConfig = await leerArchivo(CONFIG_PATH, {});
+        // Fusionar la configuración existente con la nueva
+        currentConfig = { ...currentConfig, ...newConfig };
+
+        await escribirArchivo(CONFIG_PATH, currentConfig);
+        res.json({ message: 'Configuración actualizada exitosamente!', config: currentConfig });
+    } catch (error) {
+        console.error('❌ Error al actualizar configuración:', error);
+        res.status(500).json({ message: 'Error interno del servidor al actualizar configuración.' });
+    }
+});
+
+// Ruta para obtener horarios del Zulia (para el admin, puede ser la misma que para el cliente)
+app.get('/api/admin/horarios-zulia', async (req, res) => {
+    try {
+        const horariosData = await leerArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia: [] });
+        res.json(horariosData.horarios_zulia);
+    } catch (error) {
+        console.error('❌ Error al obtener horarios del Zulia (admin):', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener horarios del Zulia.' });
+    }
+});
+
+// Ruta para actualizar horarios del Zulia
+app.put('/api/admin/horarios-zulia', async (req, res) => {
+    try {
+        const { horarios_zulia } = req.body;
+        if (!Array.isArray(horarios_zulia)) {
+            return res.status(400).json({ message: 'El formato de horarios_zulia debe ser un array.' });
+        }
+        await escribirArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia });
+        res.json({ message: 'Horarios del Zulia actualizados exitosamente!' });
+    } catch (error) {
+        console.error('❌ Error al actualizar horarios del Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al actualizar horarios del Zulia.' });
+    }
+});
+
+// Ruta para obtener todas las ventas (para el admin)
+app.get('/api/admin/ventas', async (req, res) => {
+    try {
+        const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
+        res.json(ventasData.ventas);
+    } catch (error) {
+        console.error('❌ Error al obtener ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener ventas.' });
+    }
+});
+
+// Ruta para ejecutar el corte de ventas (solo admin)
+app.post('/api/admin/execute-sales-cut', async (req, res) => {
+    try {
+        const { auto } = req.body; // Puedes pasar 'true' para indicar que es un corte automático (aunque aquí sea manual)
+        await executeSalesCut(auto);
+        res.json({ message: 'Corte de ventas ejecutado exitosamente!' });
+    } catch (error) {
+        console.error('❌ Error al ejecutar corte de ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al ejecutar corte de ventas.', error: error.message });
+    }
+});
+
+// Middleware para servir archivos estáticos (¡Importante para los comprobantes!)
+// Asegúrate de que la carpeta 'uploads' exista en tu proyecto.
+// Render automáticamente la crea si la subes con tu código.
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Middleware para manejar rutas no encontradas (404)
+// Este middleware DEBE ir después de todas tus rutas definidas
+app.use((req, res, next) => {
+    res.status(404).json({ message: 'Ruta no encontrada.', path: req.path, method: req.method });
+});
+
+// Manejador de errores general
+// Este middleware DEBE ir al final de todos los middlewares y rutas
+app.use((err, req, res, next) => {
+    console.error('❌ Error general del servidor:', err.stack);
+    res.status(500).json({ message: 'Algo salió mal en el servidor!', error: err.message });
+});
