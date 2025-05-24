@@ -1,4 +1,1 @@
-[
-    { "id": 1, "comprador": "Juan Perez", "telefono": "123456789", "numeros_seleccionados": "10,25", "valor_usd": 5, "valor_bs": 180, "tasa_aplicada": 36, "fecha_compra": "2025-05-18", "fecha_sorteo": "2025-05-20" },
-    { "id": 2, "comprador": "Maria Lopez", "telefono": "987654321", "numeros_seleccionados": "05", "valor_usd": 2, "valor_bs": 72, "tasa_aplicada": 36, "fecha_compra": "2025-05-17", "fecha_sorteo": "2025-05-20" }
-]
+
