@@ -9,7 +9,7 @@ const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
 
-// Cargar variables de entorno al inicio. ¡Este es el primer paso!
+// Cargar variables de entorno al inicio. Si no hay .env, no pasa nada si las credenciales de correo están en JSON.
 dotenv.config();
 
 const app = express();
@@ -43,7 +43,7 @@ app.use(fileUpload({
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Rutas de Archivos de Configuración y Datos Locales (JSON) ---
-const CONFIG_PATH = path.join(__dirname, 'config.json');
+const CONFIG_PATH = path.join(__dirname, 'configuracion.json'); // <-- ¡NOMBRE DE ARCHIVO CORREGIDO AQUÍ!
 const NUMEROS_PATH = path.join(__dirname, 'numeros.json');
 const VENTAS_PATH = path.join(__dirname, 'ventas.json');
 const CORTES_PATH = path.join(__dirname, 'cortes.json');
@@ -81,28 +81,53 @@ async function escribirArchivo(filePath, data) {
 }
 
 // --- Configuración del Transportador de Correo Electrónico (Nodemailer) ---
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: parseInt(process.env.EMAIL_PORT, 10),
-    secure: process.env.EMAIL_SECURE === 'true',
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    },
-});
+// Declaramos la variable transporter aquí, pero la inicializamos más tarde
+let transporter; 
 
-transporter.verify(function(error, success) {
-    if (error) {
-        console.error('⚠️ Error al configurar el transportador de correo. Revisa tus credenciales en .env:', error.message);
-    } else {
-        console.log('✅ Servidor de correo listo para enviar mensajes.');
+// Nueva función asíncrona para inicializar el transporter
+async function initializeTransporter() {
+    try {
+        // Leemos la configuración global, que contiene la sección de mail_config
+        const config = await leerArchivo(CONFIG_PATH, { /* Puedes poner un defaultValue más específico si quieres */ });
+        const mailConfig = config.mail_config;
+
+        if (!mailConfig || !mailConfig.host || !mailConfig.user || !mailConfig.pass || mailConfig.port === undefined || mailConfig.secure === undefined) {
+            console.error('⚠️ Configuración de correo incompleta o inválida en configuracion.json. No se pudo inicializar el transportador de correo.');
+            return;
+        }
+
+        transporter = nodemailer.createTransport({
+            host: mailConfig.host,
+            port: parseInt(mailConfig.port, 10), // Asegurarse de que el puerto sea un número
+            secure: mailConfig.secure,
+            auth: {
+                user: mailConfig.user,
+                pass: mailConfig.pass
+            },
+        });
+
+        transporter.verify(function(error, success) {
+            if (error) {
+                console.error('⚠️ Error al configurar el transportador de correo. Revisa la sección "mail_config" en configuracion.json:', error.message);
+            } else {
+                console.log('✅ Servidor de correo listo para enviar mensajes.');
+            }
+        });
+    } catch (error) {
+        console.error('❌ Error al inicializar el transportador de correo desde configuracion.json:', error);
     }
-});
+}
+
 
 // --- Función para Enviar Correo de Corte de Ventas Automático ---
 async function enviarCorteAutomatico() {
+    // Asegurarse de que el transporter esté inicializado antes de intentar enviar
+    if (!transporter) {
+        console.error('❌ Transportador de correo no inicializado. No se puede enviar el corte automático.');
+        return;
+    }
     try {
-        const config = await leerArchivo(CONFIG_PATH, { fecha_sorteo: null, precio_ticket: 0, tasa_dolar: 0, pagina_bloqueada: false, numero_sorteo_correlativo: 1 });
+        const config = await leerArchivo(CONFIG_PATH); // Volver a leer la configuración para obtener la última versión
         const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
         const cortesData = await leerArchivo(CORTES_PATH, { cortes: [] });
 
@@ -148,8 +173,10 @@ async function enviarCorteAutomatico() {
         console.log(`✅ Corte de ventas del ${fechaCorte} generado y guardado. Total Bs: ${nuevoCorte.totalVentasBs}, Total USD: ${nuevoCorte.totalVentasUsd}`);
 
         const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: process.env.EMAIL_RECEIVER,
+            // Usar el nombre del remitente y la dirección de correo de configuracion.json
+            from: config.mail_config.senderName ? `${config.mail_config.senderName} <${config.mail_config.user}>` : config.mail_config.user,
+            // Usar la dirección de correo de los reportes del JSON
+            to: config.admin_email_for_reports, 
             subject: `Corte Automático de Ventas - ${fechaCorte}`,
             html: `
                 <h2>Corte Automático de Ventas - ${fechaCorte}</h2>
@@ -199,6 +226,7 @@ async function enviarCorteAutomatico() {
 }
 
 // --- Tareas Programadas (Cron Jobs) ---
+// El cron job llamará a enviarCorteAutomatico, que ahora verifica si el transporter está inicializado
 cron.schedule('59 23 * * *', () => {
     console.log('⏳ Ejecutando tarea programada: Envío de corte automático de ventas...');
     enviarCorteAutomatico();
@@ -585,7 +613,8 @@ app.get('/api/horarios-zulia', async (req, res) => {
 
 
 // --- Inicio del Servidor ---
-app.listen(port, () => {
+// Convertimos la función de escucha a async para poder esperar a la carga de archivos y la inicialización del transporter
+app.listen(port, async () => { 
     console.log(`✨ Servidor escuchando en http://localhost:${port}`);
     console.log('--- Rutas de la API ---');
     console.log(`➡️ Cliente:`);
@@ -603,9 +632,13 @@ app.listen(port, () => {
     console.log(`   - POST /api/admin/horarios-zulia (para actualizar)`);
 
     // Asegurarse de que los archivos JSON existan al inicio
-    leerArchivo(CONFIG_PATH);
-    leerArchivo(NUMEROS_PATH);
-    leerArchivo(VENTAS_PATH);
-    leerArchivo(CORTES_PATH);
-    leerArchivo(HORARIOS_ZULIA_PATH);
+    // Esperamos a que configuracion.json se cargue para poder inicializar el transporter
+    await leerArchivo(CONFIG_PATH); //
+    await leerArchivo(NUMEROS_PATH); //
+    await leerArchivo(VENTAS_PATH); //
+    await leerArchivo(CORTES_PATH); //
+    await leerArchivo(HORARIOS_ZULIA_PATH); //
+
+    // Inicializar el transporter después de que todos los archivos de configuración iniciales estén listos
+    await initializeTransporter(); //
 });
