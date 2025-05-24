@@ -4,7 +4,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
 const XLSX = require('xlsx');
-const fetch = require('node-fetch'); // Asegúrate de que node-fetch esté instalado (npm install node-fetch)
+const fetch = require('node-fetch');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 
@@ -27,10 +27,11 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json()); // Middleware para parsear JSON en el cuerpo de la solicitud
-app.use(fileUpload({
-    limits: { fileSize: 50 * 1024 * 1024 }, // Limite de 50MB para archivos
-    debug: true // Para depuración de fileUpload
-}));
+
+// NOTA IMPORTANTE:
+// fileUpload AHORA se aplica solo a la ruta específica que lo necesita (/api/ventas)
+// NO lo aplicamos globalmente con app.use(fileUpload(...));
+// Esto evita la advertencia "Request is not eligible for file upload!" en otras rutas.
 
 // Servir archivos estáticos (para los comprobantes subidos)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -209,7 +210,8 @@ app.get('/api/numeros-disponibles', async (req, res) => {
 
 
 // Ruta para registrar una venta (POST)
-app.post('/api/ventas', async (req, res) => {
+// NOTA: Aquí es donde aplicamos fileUpload, ya que esta ruta puede recibir un archivo.
+app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, debug: true }), async (req, res) => {
     try {
         const {
             numeros,
@@ -290,7 +292,10 @@ app.post('/api/ventas', async (req, res) => {
         let comprobanteUrl = null;
         if (req.files && req.files.comprobante) {
             const comprobante = req.files.comprobante;
-            const uploadPath = path.join(__dirname, 'uploads', `${numeroTicket}-${comprobante.name}`);
+            const uploadDir = path.join(__dirname, 'uploads');
+            // Asegúrate de que el directorio 'uploads' exista
+            await fs.mkdir(uploadDir, { recursive: true });
+            const uploadPath = path.join(uploadDir, `${numeroTicket}-${comprobante.name}`);
             await comprobante.mv(uploadPath);
             comprobanteUrl = `/uploads/${numeroTicket}-${comprobante.name}`;
             console.log(`Comprobante subido: ${comprobanteUrl}`);
@@ -304,7 +309,7 @@ app.post('/api/ventas', async (req, res) => {
             comprador,
             cedula: cedula || '', // Si no se envió, guarda cadena vacía
             telefono,
-            email: email || '',     // Si no se envió, guarda cadena vacía
+            email: email || '',    // Si no se envió, guarda cadena vacía
             metodoPago,
             referenciaPago,
             valorTotalUsd: parseFloat(valorTotalUsd),
@@ -386,11 +391,11 @@ app.post('/api/admin/configuracion', async (req, res) => {
 
             // Opcional: limpiar números de sorteos COMPLETADOS anteriores
             if (fecha_sorteo) { // Solo limpiar si se está configurando un nuevo sorteo
-                 const numerosData = await leerArchivo(NUMEROS_PATH, { numeros: [] });
-                 // Mantener solo los números de la nueva fecha de sorteo
-                 numerosData.numeros = numerosData.numeros.filter(n => n.fecha_sorteo === fecha_sorteo);
-                 await escribirArchivo(NUMEROS_PATH, numerosData);
-                 console.log(`Números no coincidentes con la nueva fecha de sorteo (${fecha_sorteo}) limpiados.`);
+                   const numerosData = await leerArchivo(NUMEROS_PATH, { numeros: [] });
+                   // Mantener solo los números de la nueva fecha de sorteo
+                   numerosData.numeros = numerosData.numeros.filter(n => n.fecha_sorteo === fecha_sorteo);
+                   await escribirArchivo(NUMEROS_PATH, numerosData);
+                   console.log(`Números no coincidentes con la nueva fecha de sorteo (${fecha_sorteo}) limpiados.`);
             }
         }
 
@@ -468,8 +473,8 @@ app.put('/api/admin/ventas/:numeroTicket', async (req, res) => {
             numerosData.numeros = numerosData.numeros.filter(n => !(n.numeroTicket === numeroTicket && n.fecha_sorteo === venta.fechaSorteo));
             await escribirArchivo(NUMEROS_PATH, numerosData);
         } else {
-             // Si el estado es el mismo que se intenta poner
-             return res.status(400).json({ message: `La venta ya tiene el estado '${estado}'.` });
+              // Si el estado es el mismo que se intenta poner
+              return res.status(400).json({ message: `La venta ya tiene el estado '${estado}'.` });
         }
 
         await escribirArchivo(VENTAS_PATH, ventasData);
