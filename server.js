@@ -216,7 +216,7 @@ app.post('/api/ventas', async (req, res) => {
         // Asegúrate de que fechaSorteo del frontend venga en ISO (YYYY-MM-DD)
         const fechaSorteoFrontend = moment.tz(fechaSorteo, "America/Caracas").format('YYYY-MM-DD');
         const fechaSorteoBackend = moment.tz(config.fecha_sorteo, "America/Caracas").format('YYYY-MM-DD');
-        
+
         console.log(`Comparando fechas: Frontend='${fechaSorteoFrontend}' vs Backend='${fechaSorteoBackend}'`);
         if (fechaSorteoFrontend !== fechaSorteoBackend) {
             console.log('❌ VALIDACION FALLIDA: Fechas de sorteo no coinciden.');
