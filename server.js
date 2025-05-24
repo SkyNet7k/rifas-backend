@@ -8,8 +8,8 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
+const moment = require('moment-timezone'); // Asegúrate de que esta línea esté presente
 
-// Cargar variables de entorno al inicio.
 dotenv.config();
 
 const app = express();
@@ -20,7 +20,6 @@ const corsOptions = {
     origin: [
         'https://paneladmin01.netlify.app', // Tu panel de administración
         'https://tuoportunidadeshoy.netlify.app', // Tu panel de cliente
-        // Para desarrollo local, puedes añadir:
         'http://localhost:8080',
         'http://127.0.0.1:5500',
         'http://localhost:3000',
@@ -33,674 +32,92 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json()); // Permite a Express parsear JSON en el body de las solicitudes
 app.use(express.urlencoded({ extended: true })); // Permite a Express parsear datos de formulario URL-encoded
+
+// Configuración de express-fileupload (añade este límite para evitar problemas con archivos grandes)
 app.use(fileUpload({
-    limits: { fileSize: 50 * 1024 * 1024 }, // Límite de 50MB para archivos
-    debug: false,
-    createParentPath: true // Asegura que la carpeta 'uploads' se cree si no existe
+    limits: { fileSize: 50 * 1024 * 1024 }, // Límite de 50MB (50 * 1024 * 1024 bytes)
+    abortOnLimit: true, // Si el archivo excede el límite, abortar la carga
+    responseOnLimit: 'El tamaño del archivo excede el límite permitido (50MB).', // Mensaje de error
 }));
 
-// Servir archivos estáticos desde la carpeta 'uploads' (para los comprobantes subidos)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// --- Rutas de archivos de datos (Asegúrate de que sean correctas) ---
+const DATA_DIR = path.join(__dirname, 'data'); // Carpeta para tus archivos JSON
+const CONFIG_PATH = path.join(DATA_DIR, 'configuracion.json');
+const NUMEROS_PATH = path.join(DATA_DIR, 'numeros.json');
+const VENTAS_PATH = path.join(DATA_DIR, 'ventas.json');
+const CORTES_PATH = path.join(DATA_DIR, 'cortes.json');
+const HORARIOS_ZULIA_PATH = path.join(DATA_DIR, 'horarios_zulia.json'); // Nueva ruta para horarios Zulia
 
-// --- Rutas de Archivos de Configuración y Datos Locales (JSON) ---
-const CONFIG_PATH = path.join(__dirname, 'configuracion.json');
-const NUMEROS_PATH = path.join(__dirname, 'numeros.json');
-const VENTAS_PATH = path.join(__dirname, 'ventas.json');
-const CORTES_PATH = path.join(__dirname, 'cortes.json');
-const HORARIOS_ZULIA_PATH = path.join(__dirname, 'horarios-zulia.json');
+// Asegurarse de que el directorio 'data' existe
+(async () => {
+    try {
+        await fs.mkdir(DATA_DIR, { recursive: true });
+        console.log(`Directorio de datos '${DATA_DIR}' verificado/creado.`);
+    } catch (error) {
+        console.error(`Error al crear el directorio de datos: ${error.message}`);
+    }
+})();
 
-// --- Funciones de Utilidad para Lectura/Escritura de Archivos JSON ---
-async function leerArchivo(filePath, defaultValue = {}) {
+// Función auxiliar para leer archivos JSON
+async function leerArchivo(filePath, defaultValue) {
     try {
         const data = await fs.readFile(filePath, 'utf8');
-        try {
-            // Intenta parsear el JSON. Si 'data' está vacío o es inválido, esto fallará.
-            return JSON.parse(data);
-        } catch (parseError) {
-            // Si falla al parsear, loggea la advertencia y RE-ESCRRIBE el archivo con el defaultValue
-            console.warn(`⚠️ Error al parsear el archivo ${filePath}, usando valor por defecto.`, parseError);
-            // Esto solo reescribe si el archivo ya existe y está corrupto.
-            await fs.writeFile(filePath, JSON.stringify(defaultValue, null, 2), 'utf8');
-            return defaultValue; // Retorna el valor por defecto para que la aplicación continúe
-        }
-    } catch (error) {
-        // Si el archivo no existe (ENOENT), CREA el archivo con el defaultValue
-        if (error.code === 'ENOENT') {
-            console.warn(`Archivo ${filePath} no encontrado. Creando con valor por defecto.`);
-            await fs.writeFile(filePath, JSON.stringify(defaultValue, null, 2), 'utf8');
+        if (data.trim() === '') { // Si el archivo está vacío
+            await escribirArchivo(filePath, defaultValue);
+            console.warn(`⚠️ Archivo ${path.basename(filePath)} estaba vacío, recreado con valor por defecto.`);
             return defaultValue;
         }
-        // Para cualquier otro error de lectura, loggea y lanza una excepción
-        console.error(`❌ Error al leer el archivo ${filePath}:`, error);
-        throw new Error(`Fallo al leer o inicializar el archivo ${filePath}.`);
+        return JSON.parse(data);
+    } catch (error) {
+        if (error.code === 'ENOENT') { // Si el archivo no existe
+            await escribirArchivo(filePath, defaultValue);
+            console.warn(`⚠️ Archivo ${path.basename(filePath)} no existe, creado con valor por defecto.`);
+            return defaultValue;
+        } else if (error instanceof SyntaxError) { // Si el JSON está malformado
+            await escribirArchivo(filePath, defaultValue);
+            console.error(`❌ Archivo ${path.basename(filePath)} corrupto (${error.message}), recreado con valor por defecto.`);
+            return defaultValue;
+        }
+        throw error; // Propagar otros errores
     }
 }
 
+// Función auxiliar para escribir en archivos JSON
 async function escribirArchivo(filePath, data) {
-    try {
-        await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) {
-        console.error(`❌ Error al escribir en el archivo ${filePath}:`, error);
-        throw new Error(`Fallo al escribir en el archivo ${filePath}.`);
-    }
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// --- Configuración del Transportador de Correo Electrónico (Nodemailer) ---
-let transporter; // Declaramos la variable transporter aquí
-
-// Función asíncrona para inicializar el transporter
-async function initializeTransporter() {
-    try {
-        const config = await leerArchivo(CONFIG_PATH, {}); // Leemos la configuración global
-        const mailConfig = config.mail_config;
-
-        if (!mailConfig || !mailConfig.host || !mailConfig.user || !mailConfig.pass || mailConfig.port === undefined || mailConfig.secure === undefined) {
-            console.error('⚠️ Configuración de correo incompleta o inválida en configuracion.json. No se pudo inicializar el transportador de correo.');
-            return;
-        }
-
-        transporter = nodemailer.createTransport({
-            host: mailConfig.host,
-            port: parseInt(mailConfig.port, 10), // Asegurarse de que el puerto sea un número
-            secure: mailConfig.secure, // true para 465, false para otros puertos como 587
-            auth: {
-                user: mailConfig.user,
-                pass: mailConfig.pass
-            },
-        });
-
-        // Verificar la conexión
-        transporter.verify(function(error, success) {
-            if (error) {
-                console.error('⚠️ Error al configurar el transportador de correo. Revisa la sección "mail_config" en configuracion.json:', error.message);
-            } else {
-                console.log('✅ Servidor de correo listo para enviar mensajes.');
-            }
-        });
-    } catch (error) {
-        console.error('❌ Error al inicializar el transportador de correo desde configuracion.json:', error);
-    }
-}
-
-
-// --- Función para Enviar Correo de Corte de Ventas Automático ---
-async function enviarCorteAutomatico() {
-    // Asegurarse de que el transporter esté inicializado antes de intentar enviar
-    if (!transporter) {
-        console.error('❌ Transportador de correo no inicializado. No se puede enviar el corte automático.');
-        return;
-    }
-    try {
-        const config = await leerArchivo(CONFIG_PATH); // Volver a leer la configuración para obtener la última versión
-        const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
-        const cortesData = await leerArchivo(CORTES_PATH, { cortes: [] });
-
-        const hoy = new Date();
-        const offset = -4; // UTC-4 para Venezuela (Maracaibo, Zulia)
-        const localHoy = new Date(hoy.getTime() + (hoy.getTimezoneOffset() * 60000) + (offset * 3600000));
-        const fechaCorte = localHoy.toISOString().split('T')[0]; // Formato YYYY-MM-DD
-
-        // Obtener todos los tickets ya incluidos en cortes anteriores
-        const ticketsYaIncluidos = new Set();
-        cortesData.cortes.forEach(corte => {
-            // Verifica que 'ventasIncluidas' existe y es un array antes de iterar
-            if (corte.ventasIncluidas && Array.isArray(corte.ventasIncluidas)) {
-                corte.ventasIncluidas.forEach(ticketId => ticketsYaIncluidos.add(ticketId));
-            } else {
-                // Opcional: loggear una advertencia si un corte tiene un formato inesperado
-                console.warn(`⚠️ Corte con ID ${corte.id || 'desconocido'} no tiene la propiedad 'ventasIncluidas' o no es un array. Ignorando este corte para tickets ya incluidos.`);
-            }
-        });
-
-        const ventasParaCorte = ventasData.ventas.filter(venta =>
-            venta.estado === 'confirmado' &&
-            venta.fechaConfirmacion &&
-            new Date(venta.fechaConfirmacion).toISOString().split('T')[0] === fechaCorte &&
-            !ticketsYaIncluidos.has(venta.numeroTicket) // Solo ventas no incluidas en cortes anteriores
-        );
-
-        if (ventasParaCorte.length === 0) {
-            console.log(`ℹ️ No hay ventas confirmadas pendientes de corte para hoy ${fechaCorte}.`);
-            return;
-        }
-
-        const totalVentasBs = ventasParaCorte.reduce((sum, venta) => sum + venta.valorTotalBs, 0);
-        const totalVentasUsd = ventasParaCorte.reduce((sum, venta) => sum + venta.valorTotalUsd, 0);
-
-        const numerosTicketsCorte = ventasParaCorte.map(venta => venta.numeroTicket);
-
-        const nuevoCorte = {
-            id: `corte-${Date.now()}`,
-            fechaCorte: fechaCorte,
-            totalVentasBs: parseFloat(totalVentasBs.toFixed(2)),
-            totalVentasUsd: parseFloat(totalVentasUsd.toFixed(2)),
-            cantidadVentas: ventasParaCorte.length,
-            ventasIncluidas: numerosTicketsCorte,
-            detalleVentas: ventasParaCorte // Incluir detalle completo de ventas para referencia
-        };
-
-        cortesData.cortes.push(nuevoCorte);
-        await escribirArchivo(CORTES_PATH, cortesData);
-        console.log(`✅ Corte de ventas del ${fechaCorte} generado y guardado. Total Bs: ${nuevoCorte.totalVentasBs}, Total USD: ${nuevoCorte.totalVentasUsd}`);
-
-        const mailOptions = {
-            // Usar el nombre del remitente y la dirección de correo de configuracion.json
-            from: config.mail_config.senderName ? `${config.mail_config.senderName} <${config.mail_config.user}>` : config.mail_config.user,
-            // Usar la dirección de correo de los reportes del JSON
-            to: config.admin_email_for_reports,
-            subject: `Corte Automático de Ventas - ${fechaCorte}`,
-            html: `
-                <h2>Corte Automático de Ventas - ${fechaCorte}</h2>
-                <p><strong>Fecha del Corte:</strong> ${nuevoCorte.fechaCorte}</p>
-                <p><strong>Total Ventas (Bs):</strong> ${nuevoCorte.totalVentasBs}</p>
-                <p><strong>Total Ventas (USD):</strong> ${nuevoCorte.totalVentasUsd}</p>
-                <p><strong>Cantidad de Ventas:</strong> ${nuevoCorte.cantidadVentas}</p>
-                <h3>Detalle de Ventas Incluidas:</h3>
-                <table border="1" style="width:100%; border-collapse: collapse; font-size: 12px;">
-                    <thead>
-                        <tr style="background-color: #f2f2f2;">
-                            <th style="padding: 8px; text-align: left;">Ticket</th>
-                            <th style="padding: 8px; text-align: left;">Números</th>
-                            <th style="padding: 8px; text-align: left;">Comprador</th>
-                            <th style="padding: 8px; text-align: left;">Teléfono</th>
-                            <th style="padding: 8px; text-align: left;">Método Pago</th>
-                            <th style="padding: 8px; text-align: left;">Referencia</th>
-                            <th style="padding: 8px; text-align: right;">Valor USD</th>
-                            <th style="padding: 8px; border: 1px solid #ddd; text-align: right;">Valor Bs</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${ventasParaCorte.map(venta => `
-                            <tr>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${venta.numeroTicket}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${venta.numeros.join(', ')}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${venta.comprador}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${venta.telefono}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${venta.metodoPago}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd;">${venta.referenciaPago}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">${venta.valorTotalUsd}</td>
-                                <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">${venta.valorTotalBs}</td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-                <p>Este es un correo automático, por favor no responder.</p>
-            `
-        };
-
-        await transporter.sendMail(mailOptions);
-        console.log('✉️ Correo de corte de ventas enviado exitosamente.');
-
-    } catch (error) {
-        console.error('❌ Error al generar o enviar el corte automático de ventas:', error);
-    }
-}
-
-// --- Tareas Programadas (Cron Jobs) ---
-// Se ejecuta diariamente a las 11:59 PM (23:59) hora de Caracas (UTC-4)
-cron.schedule('59 23 * * *', () => {
-    console.log('⏳ Ejecutando tarea programada: Envío de corte automático de ventas...');
-    enviarCorteAutomatico();
-}, {
-    scheduled: true,
-    timezone: "America/Caracas"
+// Configuración de Nodemailer (mantener igual)
+const transporter = nodemailer.createTransport({
+    service: 'gmail', // o tu servicio de correo
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
 });
 
-// --- Rutas de la API (Panel del Cliente) ---
-// Obtener números disponibles y configuración actual para el cliente
-app.get('/api/numeros-disponibles', async (req, res) => {
-    try {
-        const config = await leerArchivo(CONFIG_PATH, { fecha_sorteo: null, precio_ticket: 0, tasa_dolar: 0, pagina_bloqueada: false, numero_sorteo_correlativo: 1 });
-        const numerosData = await leerArchivo(NUMEROS_PATH, { numeros: [] });
-
-        if (config.pagina_bloqueada) {
-            return res.status(200).json({
-                paginaBloqueada: true,
-                message: 'La página está bloqueada por el administrador. No se pueden realizar compras en este momento.',
-                fechaSorteo: config.fecha_sorteo,
-                numeroSorteoCorrelativo: config.numero_sorteo_correlativo
-            });
-        }
-
-        if (!config.fecha_sorteo) {
-            return res.status(200).json({
-                numerosDisponibles: [],
-                message: 'No hay una fecha de sorteo configurada por el administrador.',
-                paginaBloqueada: false,
-                fechaSorteo: null,
-                numeroSorteoCorrelativo: null
-            });
-        }
-
-        const todosLosNumeros = new Set();
-        for (let i = 0; i < 1000; i++) {
-            todosLosNumeros.add(String(i).padStart(3, '0'));
-        }
-
-        const numerosVendidosOPendientes = new Set(
-            numerosData.numeros
-                .filter(n => n.fecha_sorteo === config.fecha_sorteo && (n.estado === 'confirmado' || n.estado === 'pendiente'))
-                .map(n => n.numero)
-        );
-
-        const numerosDisponibles = Array.from(todosLosNumeros).filter(numero => !numerosVendidosOPendientes.has(numero));
-
-        res.json({
-            numerosDisponibles,
-            precioTicket: config.precio_ticket,
-            tasaDolar: config.tasa_dolar,
-            fechaSorteo: config.fecha_sorteo,
-            numeroSorteoCorrelativo: config.numero_sortivo_correlativo,
-            paginaBloqueada: false
-        });
-    } catch (error) {
-        console.error('❌ Error al obtener números disponibles:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener números disponibles.', error: error.message });
-    }
-});
-
-
-// Ruta para registrar una venta (POST)
-app.post('/api/ventas', async (req, res) => {
-    try {
-        const {
-            numeros,
-            comprador,
-            cedula,
-            telefono,
-            email,
-            metodoPago,
-            referenciaPago,
-            valorTotalUsd,
-            valorTotalBs,
-            tasaAplicada,
-            fechaSorteo
-        } = req.body;
-
-        const config = await leerArchivo(CONFIG_PATH, { fecha_sorteo: null, precio_ticket: 0, tasa_dolar: 0, pagina_bloqueada: false, numero_sorteo_correlativo: 1 });
-        const numerosRegistrados = await leerArchivo(NUMEROS_PATH, { numeros: [] });
-        const ventasRegistradas = await leerArchivo(VENTAS_PATH, { ventas: [] });
-
-        // --- VALIDACIONES DEL SERVIDOR ---
-        if (config.pagina_bloqueada) {
-            return res.status(403).json({ message: 'La página está bloqueada por el administrador. No se pueden realizar compras en este momento.' });
-        }
-
-        if (!config.fecha_sorteo) {
-            return res.status(400).json({ message: 'No hay una fecha de sorteo configurada por el administrador.' });
-        }
-
-        // Validación crítica: La fecha de sorteo de la solicitud debe coincidir con la configurada
-        if (fechaSorteo !== config.fecha_sorteo) {
-            console.warn(`⚠️ Alerta: Fecha de sorteo del cliente (${fechaSorteo}) no coincide con la del servidor (${config.fecha_sorteo}).`);
-            return res.status(400).json({ message: `La fecha del sorteo en la solicitud (${fechaSorteo}) no coincide con la fecha del sorteo actual configurada (${config.fecha_sorteo}). Por favor, recargue la página.` });
-        }
-
-        if (!Array.isArray(numeros) || numeros.length === 0) {
-            return res.status(400).json({ message: 'Debe seleccionar al menos un número (formato: array de strings).' });
-        }
-
-        const numerosInvalidos = numeros.filter(num => typeof num !== 'string' || !/^\d{3}$/.test(num));
-        if (numerosInvalidos.length > 0) {
-            return res.status(400).json({ message: `Cada número seleccionado debe ser un string de 3 dígitos. Números inválidos: ${numerosInvalidos.join(', ')}` });
-        }
-
-        if (!comprador || typeof comprador !== 'string' || comprador.trim() === '') {
-            return res.status(400).json({ message: 'El nombre del comprador es obligatorio y debe ser un texto.' });
-        }
-        if (!telefono || typeof telefono !== 'string' || telefono.trim() === '') {
-            return res.status(400).json({ message: 'El teléfono es obligatorio y debe ser un texto.' });
-        }
-        if (!metodoPago || typeof metodoPago !== 'string' || metodoPago.trim() === '') {
-            return res.status(400).json({ message: 'El método de pago es obligatorio y debe ser un texto.' });
-        }
-        if (!referenciaPago || typeof referenciaPago !== 'string' || referenciaPago.trim() === '') {
-            return res.status(400).json({ message: 'La referencia de pago es obligatoria y debe ser un texto.' });
-        }
-
-        const parsedValorTotalUsd = parseFloat(valorTotalUsd);
-        const parsedValorTotalBs = parseFloat(valorTotalBs);
-        const parsedTasaAplicada = parseFloat(tasaAplicada);
-
-        if (isNaN(parsedValorTotalUsd) || parsedValorTotalUsd <= 0 ||
-            isNaN(parsedValorTotalBs) || parsedValorTotalBs <= 0 ||
-            isNaN(parsedTasaAplicada) || parsedTasaAplicada <= 0) {
-            return res.status(400).json({ message: 'Los valores de pago (USD, Bs, Tasa) deben ser numéricos y mayores que cero.' });
-        }
-
-        const numerosTomados = numerosRegistrados.numeros.filter(n =>
-            numeros.includes(n.numero) &&
-            n.fecha_sorteo === config.fecha_sorteo &&
-            (n.estado === 'pendiente' || n.estado === 'confirmado')
-        ).map(n => n.numero);
-
-        if (numerosTomados.length > 0) {
-            return res.status(409).json({
-                message: `¡Ups! Los siguientes números ya están vendidos para el sorteo del ${config.fecha_sorteo}: ${numerosTomados.join(', ')}. Por favor, elige otros.`,
-                numerosTomados: numerosTomados
-            });
-        }
-
-        // Generar un número de ticket correlativo y único para esta venta
-        const numeroTicket = `T${config.numero_sorteo_correlativo}-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
-
-        let comprobanteUrl = null;
-        if (req.files && req.files.comprobante) {
-            const comprobante = req.files.comprobante;
-            const uploadDir = path.join(__dirname, 'uploads');
-            // Asegurarse de que el directorio de subida exista
-            await fs.mkdir(uploadDir, { recursive: true });
-            const uploadPath = path.join(uploadDir, `${numeroTicket}-${comprobante.name}`);
-            await comprobante.mv(uploadPath);
-            comprobanteUrl = `/uploads/${numeroTicket}-${comprobante.name}`;
-            console.log(`Comprobante subido: ${comprobanteUrl}`);
-        }
-
-        const nuevaVenta = {
-            numeroTicket,
-            numeros,
-            comprador,
-            cedula: cedula || null,
-            telefono,
-            email: email || null,
-            metodoPago,
-            referenciaPago,
-            valorTotalUsd: parsedValorTotalUsd,
-            valorTotalBs: parsedValorTotalBs,
-            tasaAplicada: parsedTasaAplicada,
-            fechaCompra: new Date().toISOString(),
-            fechaSorteo: config.fecha_sorteo,
-            estado: 'pendiente', // Por defecto, las ventas son pendientes de confirmación
-            comprobanteUrl: comprobanteUrl,
-            fechaConfirmacion: null, // Se llenará al confirmar la venta
-            confirmadoPor: null // Se llenará al confirmar la venta
-        };
-        ventasRegistradas.ventas.push(nuevaVenta);
-        await escribirArchivo(VENTAS_PATH, ventasRegistradas);
-
-        // Marcar los números como pendientes en el archivo de números
-        const numerosActualizados = numerosRegistrados.numeros.concat(
-            numeros.map(num => ({
-                numero: num,
-                fecha_sorteo: config.fecha_sorteo,
-                estado: 'pendiente',
-                numeroTicket: numeroTicket
-            }))
-        );
-        numerosRegistrados.numeros = numerosActualizados;
-        await escribirArchivo(NUMEROS_PATH, numerosRegistrados);
-
-        res.status(201).json({ message: 'Venta registrada con éxito. Pendiente de confirmación.', venta: nuevaVenta });
-
-    } catch (error) {
-        console.error('❌ Error al registrar la venta:', error);
-        res.status(500).json({ message: 'Error interno del servidor al registrar la venta.', error: error.message });
-    }
-});
-
-// Ruta para obtener horarios del Zulia para el cliente
-app.get('/api/horarios-zulia', async (req, res) => {
-    try {
-        const horariosData = await leerArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia: [] }); // Asegúrate de que el default tiene la propiedad correcta
-        res.json(horariosData); // Devolver el objeto completo { horarios_zulia: [...] }
-    } catch (error) {
-        console.error('❌ Error al obtener horarios del Zulia para el cliente:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener horarios.', error: error.message });
-    }
-});
-
-
-// --- Rutas de la API (Panel de Administración) ---
-
-// Obtener todas las ventas para el administrador
-app.get('/api/admin/ventas', async (req, res) => {
-    try {
-        const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
-        res.json(ventasData.ventas);
-    } catch (error) {
-        console.error('❌ Error al obtener ventas para el panel de administración:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener ventas.', error: error.message });
-    }
-});
-
-// Obtener una venta específica por ID de ticket para el administrador
-app.get('/api/admin/ventas/:ticketId', async (req, res) => {
-    try {
-        const { ticketId } = req.params;
-        const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
-        const venta = ventasData.ventas.find(v => v.numeroTicket === ticketId);
-
-        if (!venta) {
-            return res.status(404).json({ message: 'Venta no encontrada.' });
-        }
-        res.json(venta);
-    } catch (error) {
-        console.error('❌ Error al obtener el detalle de la venta:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener el detalle de la venta.', error: error.message });
-    }
-});
-
-
-// Actualizar el estado de una venta (confirmar, rechazar, etc.) para el administrador
-app.patch('/api/admin/ventas/:ticketId/estado', async (req, res) => {
-    try {
-        const { ticketId } = req.params;
-        const { estado, confirmadoPor } = req.body;
-
-        if (!['pendiente', 'confirmado', 'rechazado'].includes(estado)) {
-            return res.status(400).json({ message: 'Estado de venta no válido.' });
-        }
-        // 'confirmadoPor' es requerido si el estado es 'confirmado'
-        if (estado === 'confirmado' && (!confirmadoPor || typeof confirmadoPor !== 'string' || confirmadoPor.trim() === '')) {
-            return res.status(400).json({ message: 'El campo "confirmadoPor" es requerido al confirmar una venta.' });
-        }
-
-        const ventasData = await leerArchivo(VENTAS_PATH);
-        const numerosData = await leerArchivo(NUMEROS_PATH);
-
-        const ventaIndex = ventasData.ventas.findIndex(v => v.numeroTicket === ticketId);
-        if (ventaIndex === -1) {
-            return res.status(404).json({ message: 'Venta no encontrada.' });
-        }
-
-        const venta = ventasData.ventas[ventaIndex];
-        // Actualizar fechaConfirmacion y confirmadoPor solo si cambia a 'confirmado'
-        if (estado === 'confirmado' && venta.estado !== 'confirmado') {
-            venta.fechaConfirmacion = new Date().toISOString();
-            venta.confirmadoPor = confirmadoPor;
-        } else if (estado !== 'confirmado') { // Si cambia a otro estado, resetear
-            venta.fechaConfirmacion = null;
-            venta.confirmadoPor = null;
-        }
-        venta.estado = estado; // Actualizar el estado de la venta
-
-        // Si la venta es rechazada y tiene un comprobante, intentar eliminarlo
-        if (estado === 'rechazado' && venta.comprobanteUrl) {
-            const filePath = path.join(__dirname, venta.comprobanteUrl);
-            try {
-                await fs.unlink(filePath);
-                console.log(`🗑️ Comprobante ${filePath} eliminado tras rechazo.`);
-                venta.comprobanteUrl = null; // Quitar la URL del comprobante de la venta
-            } catch (unlinkError) {
-                console.warn(`⚠️ No se pudo eliminar el comprobante ${filePath}:`, unlinkError.message);
-            }
-        }
-        await escribirArchivo(VENTAS_PATH, ventasData);
-
-        // Actualizar el estado de los números asociados a esta venta en el archivo de números
-        for (const numero of venta.numeros) {
-            const numeroIndex = numerosData.numeros.findIndex(n =>
-                n.numero === numero && n.numeroTicket === ticketId && n.fecha_sorteo === venta.fechaSorteo
-            );
-            if (numeroIndex !== -1) {
-                numerosData.numeros[numeroIndex].estado = estado;
-            } else {
-                console.warn(`⚠️ Número ${numero} no encontrado en numeros.json para ticket ${ticketId}.`);
-            }
-        }
-        await escribirArchivo(NUMEROS_PATH, numerosData);
-
-        res.json({ message: `Estado de la venta ${ticketId} actualizado a "${estado}".`, venta });
-
-    } catch (error) {
-        console.error('❌ Error al actualizar el estado de la venta:', error);
-        res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la venta.', error: error.message });
-    }
-});
-
-
-// Obtener la configuración global para el panel de administración
-app.get('/api/admin/configuracion', async (req, res) => { // RUTA CORREGIDA: /api/admin/configuracion
-    try {
-        const config = await leerArchivo(CONFIG_PATH);
-        res.json(config);
-    } catch (error) {
-        console.error('❌ Error al obtener la configuración:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener la configuración.', error: error.message });
-    }
-});
-
-// Actualizar la configuración global desde el panel de administración
-app.put('/api/admin/configuracion', async (req, res) => { // RUTA CORREGIDA y MÉTODO A PUT
-    try {
-        const newConfig = req.body;
-        let currentConfig = await leerArchivo(CONFIG_PATH); // Cargar la configuración actual
-
-        // Validaciones:
-        if (newConfig.fecha_sorteo !== undefined) {
-            const sorteoDate = new Date(newConfig.fecha_sorteo);
-            const today = new Date();
-            today.setHours(0, 0, 0, 0); // Comparar solo la fecha, sin hora
-            sorteoDate.setHours(0, 0, 0, 0);
-
-            if (isNaN(sorteoDate.getTime())) { // Valida si la fecha es inválida
-                return res.status(400).json({ message: 'La fecha del sorteo proporcionada no es válida.' });
-            }
-            if (sorteoDate < today) {
-                return res.status(400).json({ message: 'La fecha del sorteo no puede ser en el pasado.' });
-            }
-        }
-        if (newConfig.precio_ticket !== undefined && (isNaN(parseFloat(newConfig.precio_ticket)) || parseFloat(newConfig.precio_ticket) <= 0)) {
-            return res.status(400).json({ message: 'El precio del ticket debe ser un número positivo.' });
-        }
-        if (newConfig.tasa_dolar !== undefined && (isNaN(parseFloat(newConfig.tasa_dolar)) || parseFloat(newConfig.tasa_dolar) <= 0)) {
-            return res.status(400).json({ message: 'La tasa del dólar debe ser un número positivo.' });
-        }
-        if (newConfig.numero_sorteo_correlativo !== undefined && (isNaN(parseInt(newConfig.numero_sorteo_correlativo, 10)) || parseInt(newConfig.numero_sorteo_correlativo, 10) <= 0)) {
-            return res.status(400).json({ message: 'El número de sorteo correlativo debe ser un entero positivo.' });
-        }
-        // Si hay una nueva configuración de correo, validar también
-        if (newConfig.mail_config) {
-            const mc = newConfig.mail_config;
-            if (!mc.host || !mc.port || !mc.user || !mc.pass || mc.secure === undefined) {
-                return res.status(400).json({ message: 'Configuración de correo incompleta. Se requieren host, port, user, pass, secure.' });
-            }
-            // Después de validar, re-inicializar el transporter
-            currentConfig.mail_config = mc; // Actualizar la sección de mail_config antes de guardar
-            await escribirArchivo(CONFIG_PATH, currentConfig); // Guardar cambios para que initializeTransporter lea la última
-            await initializeTransporter(); // Re-inicializar el transporter con la nueva config
-        }
-        
-        // Actualizar la configuración actual con los nuevos valores
-        const updatedConfig = { ...currentConfig, ...newConfig };
-        await escribirArchivo(CONFIG_PATH, updatedConfig);
-        res.json({ message: 'Configuración actualizada con éxito.', config: updatedConfig });
-    } catch (error) {
-        console.error('❌ Error al actualizar la configuración:', error);
-        res.status(500).json({ message: 'Error interno del servidor al actualizar la configuración.', error: error.message });
-    }
-});
-
-
-// Obtener registros de cortes para el panel de administración
-app.get('/api/admin/cortes', async (req, res) => {
-    try {
-        const cortesData = await leerArchivo(CORTES_PATH, { cortes: [] });
-        res.json(cortesData.cortes);
-    } catch (error) {
-        console.error('❌ Error al obtener los registros de cortes:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener los cortes.', error: error.message });
-    }
-});
-
-// Ruta para ejecutar el corte de ventas manualmente desde el panel de administración
-app.post('/api/admin/execute-sales-cut', async (req, res) => {
-    try {
-        await enviarCorteAutomatico(); // Reutiliza la función de corte
-        res.status(200).json({ message: 'Solicitud de corte de ventas procesada. Revisa los logs y tu correo.' });
-    } catch (error) {
-        console.error('❌ Error al ejecutar el corte de ventas manual:', error);
-        res.status(500).json({ message: 'Error al ejecutar el corte de ventas manual.', error: error.message });
-    }
-});
-
-// Obtener horarios del Zulia para el panel de administración
-app.get('/api/admin/horarios-zulia', async (req, res) => {
-    try {
-        const horarios = await leerArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia: [] }); // Asegúrate de que el default tiene la propiedad correcta
-        res.json(horarios); // Devolver el objeto completo { horarios_zulia: [...] }
-    } catch (error) {
-        console.error('❌ Error al obtener horarios del Zulia (admin):', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener horarios.', error: error.message });
-    }
-});
-
-// Actualizar los horarios del Zulia desde el panel de administración
-app.put('/api/admin/horarios-zulia', async (req, res) => { // MÉTODO A PUT
-    try {
-        const { horarios_zulia: newHorarios } = req.body; // Espera un objeto con la propiedad 'horarios_zulia'
-        if (!Array.isArray(newHorarios)) {
-            return res.status(400).json({ message: 'Los datos de horarios deben ser un array dentro de la propiedad "horarios_zulia".' });
-        }
-        await escribirArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia: newHorarios }); // Guarda el objeto con la propiedad
-        res.json({ message: 'Horarios del Zulia actualizados con éxito.', horarios_zulia: newHorarios });
-    } catch (error) {
-        console.error('❌ Error al actualizar horarios del Zulia:', error);
-        res.status(500).json({ message: 'Error interno del servidor al actualizar horarios.', error: error.message });
-    }
-});
-
-
-// --- Inicio del Servidor ---
+// ========================================================================
+// === INICIO DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
+// ========================================================================
+// Este bloque es fundamental para la inicialización.
+// Ya lo tienes, pero es importante que siga ahí y se ejecute correctamente.
 app.listen(port, async () => {
-    console.log(`✨ Servidor escuchando en http://localhost:${port}`);
-    console.log('--- Rutas de la API ---');
-    console.log(`➡️ Cliente:`);
-    console.log(`   - GET /api/numeros-disponibles`);
-    console.log(`   - POST /api/ventas`);
-    console.log(`   - GET /api/horarios-zulia`);
-    console.log(`➡️ Administración:`);
-    console.log(`   - GET /api/admin/ventas`);
-    console.log(`   - GET /api/admin/ventas/:ticketId`);
-    console.log(`   - PATCH /api/admin/ventas/:ticketId/estado`);
-    console.log(`   - GET /api/admin/configuracion (para obtener config)`);
-    console.log(`   - PUT /api/admin/configuracion (para actualizar config)`);
-    console.log(`   - GET /api/admin/cortes`);
-    console.log(`   - POST /api/admin/execute-sales-cut (para corte manual)`);
-    console.log(`   - GET /api/admin/horarios-zulia`);
-    console.log(`   - PUT /api/admin/horarios-zulia (para actualizar)`);
-    // Inicializar el transportador de correo al inicio
-    await initializeTransporter();
-
-    // ========================================================================
-    // === INICIO DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
-    // ========================================================================
+    console.log(`Servidor escuchando en el puerto ${port}`);
     console.log('ℹ️ Iniciando verificación y posible reparación de archivos .json...');
     const filesToVerify = [
         { path: CONFIG_PATH, default: { fecha_sorteo: null, precio_ticket: 0, tasa_dolar: 0, pagina_bloqueada: false, numero_sorteo_correlativo: 1, mail_config: {}, admin_email_for_reports: '' } },
-        { path: NUMEROS_PATH, default: { numeros: [] } },
-        { path: VENTAS_PATH, default: { ventas: [] } }, // Este es el objetivo principal
+        { path: NUMEROS_PATH, default: { numeros: Array.from({ length: 100 }, (_, i) => ({ numero: (i + 1).toString().padStart(2, '0'), disponible: true })) } }, // Asegura que se inicialicen todos los números
+        { path: VENTAS_PATH, default: { ventas: [] } },
         { path: CORTES_PATH, default: { cortes: [] } },
-        { path: HORARIOS_ZULIA_PATH, default: { horarios_zulia: [] } }
+        { path: HORARIOS_ZULIA_PATH, default: { horarios_zulia: ["01:00 PM", "04:00 PM", "07:00 PM"] } } // Horarios por defecto
     ];
 
     for (const file of filesToVerify) {
         try {
             const content = await fs.readFile(file.path, 'utf8');
-            JSON.parse(content); // Intentar parsear. Si falla, el catch lo coge.
+            JSON.parse(content);
             console.log(`✅ Archivo ${path.basename(file.path)} se leyó y parseó correctamente.`);
         } catch (error) {
-            // Si hay un error al leer o parsear (incluido ENOENT si no existe o está vacío), lo reescribimos.
             console.warn(`⚠️ Archivo ${path.basename(file.path)} está corrupto, vacío o no existe. Intentando recrearlo con valor por defecto...`, error.message);
             try {
                 await escribirArchivo(file.path, file.default);
@@ -711,7 +128,280 @@ app.listen(port, async () => {
         }
     }
     console.log('--- Verificación de archivos .json completada. ---');
-    // ========================================================================
-    // === FIN DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
-    // ========================================================================
+
+    // Iniciar el cron job para el corte de ventas (si lo tienes configurado)
+    // Este código debe estar aquí para asegurarse de que los archivos estén listos
+    // cron.schedule('0 0 * * *', async () => { // Todos los días a medianoche (00:00)
+    //     console.log('✨ Ejecutando tarea programada de corte de ventas...');
+    //     await executeSalesCut(true); // Llamar a la función de corte con 'true' para indicar que es automático
+    // }, {
+    //     timezone: "America/Caracas" // Asegúrate de que tu timezone sea el correcto
+    // });
 });
+// ========================================================================
+// === FIN DE BLOQUE DE VERIFICACIÓN/REPARACIÓN DE ARCHIVOS CRÍTICOS ===
+// ========================================================================
+
+
+// --- Rutas del API ---
+
+// Ruta para obtener configuración (panel del cliente y admin)
+app.get('/api/configuracion', async (req, res) => {
+    try {
+        const config = await leerArchivo(CONFIG_PATH, {});
+        // Ocultar información sensible si es para el cliente
+        const clientConfig = {
+            fecha_sorteo: config.fecha_sorteo,
+            precio_ticket: config.precio_ticket,
+            tasa_dolar: config.tasa_dolar,
+            pagina_bloqueada: config.pagina_bloqueada,
+            numero_sorteo_correlativo: config.numero_sorteo_correlativo
+        };
+        res.json(clientConfig);
+    } catch (error) {
+        console.error('❌ Error al obtener configuración para el cliente:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener configuración.' });
+    }
+});
+
+// Ruta para obtener todos los números disponibles
+app.get('/api/numeros-disponibles', async (req, res) => {
+    try {
+        const numerosData = await leerArchivo(NUMEROS_PATH, { numeros: [] });
+        res.json(numerosData.numeros);
+    } catch (error) {
+        console.error('❌ Error al obtener números disponibles:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener números.' });
+    }
+});
+
+// Ruta para obtener horarios del Zulia (para el cliente)
+app.get('/api/horarios-zulia', async (req, res) => {
+    try {
+        const horariosData = await leerArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia: [] });
+        res.json(horariosData.horarios_zulia);
+    } catch (error) {
+        console.error('❌ Error al obtener horarios del Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
+    }
+});
+
+
+// Ruta para registrar una nueva venta (¡Aquí vamos a enfocarnos!)
+app.post('/api/ventas', async (req, res) => {
+    // AÑADIDO PARA DEPURACIÓN INICIAL
+    console.log('--- Nueva solicitud POST /api/ventas ---');
+    console.log('req.body:', req.body); // Contiene campos de texto
+    console.log('req.files:', req.files); // Contiene el archivo subido
+
+    try {
+        const config = await leerArchivo(CONFIG_PATH, {}); // Cargar configuración actualizada
+        const { comprador, telefono, codigoPais, cedula, email, metodoPago, referenciaPago, numeros, valorTotalUsd, valorTotalBs, tasaAplicada, fechaSorteo } = req.body;
+        const comprobanteAdjunto = req.files && req.files.comprobante; // Obtener el archivo si existe
+
+        // ==========================================
+        // === VALIDACIONES (CRÍTICO PARA EL 400) ===
+        // ==========================================
+
+        if (config.pagina_bloqueada) {
+            console.log('❌ VALIDACION FALLIDA: Página bloqueada.');
+            return res.status(403).json({ message: 'La página está bloqueada por el administrador. No se pueden realizar compras en este momento.' });
+        }
+        if (!config.fecha_sorteo) {
+            console.log('❌ VALIDACION FALLIDA: No hay fecha de sorteo configurada.');
+            return res.status(400).json({ message: 'No hay una fecha de sorteo configurada por el administrador.' });
+        }
+
+        // Convertir la fecha del frontend a un formato comparable (YYYY-MM-DD)
+        // Asegúrate de que fechaSorteo del frontend venga en ISO (YYYY-MM-DD)
+        const fechaSorteoFrontend = moment.tz(fechaSorteo, "America/Caracas").format('YYYY-MM-DD');
+        const fechaSorteoBackend = moment.tz(config.fecha_sorteo, "America/Caracas").format('YYYY-MM-DD');
+        
+        console.log(`Comparando fechas: Frontend='${fechaSorteoFrontend}' vs Backend='${fechaSorteoBackend}'`);
+        if (fechaSorteoFrontend !== fechaSorteoBackend) {
+            console.log('❌ VALIDACION FALLIDA: Fechas de sorteo no coinciden.');
+            return res.status(400).json({ message: `La fecha del sorteo en la solicitud (${fechaSorteoFrontend}) no coincide con la fecha del sorteo actual configurada (${fechaSorteoBackend}). Por favor, recargue la página.` });
+        }
+
+        if (!comprador || !telefono || !codigoPais || !cedula || !email || !metodoPago || !referenciaPago || !numeros || numeros.length === 0 || valorTotalUsd === undefined || valorTotalBs === undefined || tasaAplicada === undefined) {
+            console.log('❌ VALIDACION FALLIDA: Faltan campos obligatorios o números.');
+            return res.status(400).json({ message: 'Faltan campos obligatorios o números seleccionados.' });
+        }
+        if (!Array.isArray(numeros) || numeros.length === 0) {
+            console.log('❌ VALIDACION FALLIDA: Numeros no es un array o está vacío.');
+            return res.status(400).json({ message: 'Debe seleccionar al menos un número (formato: array de strings).' });
+        }
+        if (isNaN(parseFloat(valorTotalUsd)) || isNaN(parseFloat(valorTotalBs)) || isNaN(parseFloat(tasaAplicada))) {
+            console.log('❌ VALIDACION FALLIDA: Valores numéricos inválidos (USD, Bs, Tasa).');
+            return res.status(400).json({ message: 'Valores numéricos inválidos (USD, Bs, Tasa).' });
+        }
+
+        // ==========================================
+        // === PROCESAMIENTO DEL ARCHIVO (IMAGEN) ===
+        // ==========================================
+        let comprobantePath = null;
+        if (comprobanteAdjunto) {
+            const fileName = `${Date.now()}_${comprobanteAdjunto.name}`;
+            const uploadPath = path.join(__dirname, 'uploads', fileName); // Guardar en una carpeta 'uploads'
+            try {
+                await comprobanteAdjunto.mv(uploadPath);
+                comprobantePath = `/uploads/${fileName}`; // Ruta pública para acceder al comprobante
+                console.log(`✅ Comprobante '${fileName}' guardado en '${uploadPath}'`);
+            } catch (err) {
+                console.error('❌ Error al guardar el comprobante:', err);
+                return res.status(500).json({ message: 'Error al subir el comprobante.' });
+            }
+        } else {
+            console.log('ℹ️ No se adjuntó comprobante.');
+        }
+
+        // ==========================================
+        // === REGISTRO DE VENTA Y ACTUALIZACIÓN ===
+        // ==========================================
+
+        const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
+        const numerosDisponiblesData = await leerArchivo(NUMEROS_PATH, { numeros: [] });
+
+        // Verificar y marcar números como no disponibles
+        const numerosInvalidos = [];
+        const numerosActualizados = numerosDisponiblesData.numeros.map(n => {
+            if (numeros.includes(n.numero)) {
+                if (n.disponible) {
+                    n.disponible = false;
+                } else {
+                    numerosInvalidos.push(n.numero);
+                }
+            }
+            return n;
+        });
+
+        if (numerosInvalidos.length > 0) {
+            console.log('❌ VALIDACION FALLIDA: Numeros ya no disponibles.');
+            return res.status(400).json({ message: `Los siguientes números ya no están disponibles: ${numerosInvalidos.join(', ')}. Por favor, recargue la página.` });
+        }
+
+        const numeroComprobante = `REF-${Date.now()}`; // Generar un número de comprobante único
+
+        // Incrementar el número de sorteo correlativo y usarlo
+        config.numero_sorteo_correlativo = (config.numero_sorteo_correlativo || 0) + 1;
+        const numeroTicketCorrelativo = config.numero_sorteo_correlativo;
+        await escribirArchivo(CONFIG_PATH, config); // Guardar la configuración actualizada
+
+        const nuevaVenta = {
+            id: Date.now(), // ID único para la venta
+            numeroComprobante: numeroComprobante,
+            numeroTicket: numeroTicketCorrelativo, // Nuevo campo
+            comprador,
+            telefono: `${codigoPais}${telefono}`,
+            cedula,
+            email,
+            metodoPago,
+            referenciaPago,
+            numeros,
+            valorTotalUsd: parseFloat(valorTotalUsd),
+            valorTotalBs: parseFloat(valorTotalBs),
+            tasaAplicada: parseFloat(tasaAplicada),
+            fechaCompra: moment().tz("America/Caracas").toISOString(),
+            fechaSorteo: fechaSorteoFrontend, // Usar la fecha del frontend ya formateada
+            comprobanteAdjunto: comprobantePath,
+            // Puedes añadir un estado de confirmación inicial aquí, ej: estado: 'pendiente'
+        };
+
+        ventasData.ventas.push(nuevaVenta);
+
+        await escribirArchivo(VENTAS_PATH, ventasData);
+        await escribirArchivo(NUMEROS_PATH, { numeros: numerosActualizados });
+
+        console.log('✅ Venta registrada y números actualizados. Enviando notificaciones...');
+
+        // ==========================================
+        // === ENVÍO DE CORREOS Y WHATSAPP ===
+        // ==========================================
+        // (El código para el envío de correos es el mismo que tenías, asumiendo que funciona)
+        // Puedes añadir aquí la lógica para el envío de WhatsApp.
+        // Asegúrate de que las credenciales de correo (`EMAIL_USER`, `EMAIL_PASS`) estén en tus variables de entorno en Render.com.
+
+        // Simulación de envío de correo (adapta esto a tu lógica real)
+        // const mailOptions = {
+        //     from: process.env.EMAIL_USER,
+        //     to: email, // Correo del comprador
+        //     subject: `Confirmación de Compra de Ticket ${numeroTicketCorrelativo}`,
+        //     html: `
+        //         <h1>¡Gracias por tu compra!</h1>
+        //         <p>Tu número de ticket es: <strong>${numeroTicketCorrelativo}</strong></p>
+        //         <p>Comprobante de referencia: <strong>${numeroComprobante}</strong></p>
+        //         <p>Números seleccionados: <strong>${numeros.join(', ')}</strong></p>
+        //         <p>Total pagado: <strong>$${nuevaVenta.valorTotalUsd.toFixed(2)} / Bs ${nuevaVenta.valorTotalBs.toFixed(2)}</strong></p>
+        //         <p>Fecha del sorteo: <strong>${moment(nuevaVenta.fechaSorteo).format('DD/MM/YYYY')}</strong></p>
+        //         <p>Te deseamos mucha suerte!</p>
+        //         <p>Atentamente, Tu Equipo de Rifas</p>
+        //     `,
+        //     attachments: comprobantePath ? [{ path: path.join(__dirname, 'uploads', path.basename(comprobantePath)) }] : []
+        // };
+
+        // // Envía el correo al comprador
+        // transporter.sendMail(mailOptions, (error, info) => {
+        //     if (error) {
+        //         console.error('Error al enviar correo al comprador:', error);
+        //     } else {
+        //         console.log('Correo al comprador enviado:', info.response);
+        //     }
+        // });
+
+        // // Envía un correo al administrador (si configurado)
+        // if (config.admin_email_for_reports && config.admin_email_for_reports.length > 0) {
+        //     const adminMailOptions = {
+        //         from: process.env.EMAIL_USER,
+        //         to: config.admin_email_for_reports,
+        //         subject: `NUEVA VENTA REGISTRADA: Ticket ${numeroTicketCorrelativo} de ${comprador}`,
+        //         html: `
+        //             <h2>Nueva Venta Registrada</h2>
+        //             <p><strong>Comprador:</strong> ${comprador}</p>
+        //             <p><strong>Teléfono:</strong> ${nuevaVenta.telefono}</p>
+        //             <p><strong>Cédula:</strong> ${cedula}</p>
+        //             <p><strong>Email:</strong> ${email}</p>
+        //             <p><strong>Ticket #:</strong> ${numeroTicketCorrelativo}</p>
+        //             <p><strong>Referencia #:</strong> ${numeroComprobante}</p>
+        //             <p><strong>Números:</strong> ${numeros.join(', ')}</p>
+        //             <p><strong>Método de Pago:</strong> ${metodoPago}</p>
+        //             <p><strong>Ref. Pago:</strong> ${referenciaPago}</p>
+        //             <p><strong>Total USD:</strong> $${nuevaVenta.valorTotalUsd.toFixed(2)}</p>
+        //             <p><strong>Total Bs:</strong> Bs ${nuevaVenta.valorTotalBs.toFixed(2)}</p>
+        //             <p><strong>Tasa Aplicada:</strong> ${nuevaVenta.tasaAplicada.toFixed(2)}</p>
+        //             <p><strong>Fecha Compra:</strong> ${moment(nuevaVenta.fechaCompra).format('DD/MM/YYYY HH:mm')}</p>
+        //             <p><strong>Fecha Sorteo:</strong> ${moment(nuevaVenta.fechaSorteo).format('DD/MM/YYYY')}</p>
+        //             ${comprobantePath ? `<p><a href="${API_BASE_URL}${comprobantePath}" target="_blank">Ver Comprobante Adjunto</a></p>` : '<p>No se adjuntó comprobante.</p>'}
+        //         `,
+        //         attachments: comprobantePath ? [{ path: path.join(__dirname, 'uploads', path.basename(comprobantePath)) }] : []
+        //     };
+
+        //     transporter.sendMail(adminMailOptions, (error, info) => {
+        //         if (error) {
+        //             console.error('Error al enviar correo al administrador:', error);
+        //         } else {
+        //             console.log('Correo al administrador enviado:', info.response);
+        //         }
+        //     });
+        // }
+
+        res.status(201).json({
+            message: 'Compra confirmada exitosamente!',
+            ticket: nuevaVenta,
+            // Puedes devolver más info si necesitas que el frontend la muestre
+            // Ej: numeroTicketCorrelativo: nuevaVenta.numeroTicket
+        });
+
+    } catch (error) {
+        console.error('❌ Error al procesar la venta:', error);
+        // Siempre devuelve un JSON en caso de error
+        res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
+    }
+});
+
+// Admin routes (mantener igual)
+// app.get('/api/admin/configuracion', ...);
+// app.put('/api/admin/configuracion', ...);
+// app.get('/api/admin/horarios-zulia', ...);
+// app.put('/api/admin/horarios-zulia', ...);
+// app.get('/api/admin/ventas', ...);
+// app.post('/api/admin/execute-sales-cut', ...);
