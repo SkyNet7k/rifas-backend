@@ -1,10 +1,12 @@
+// server.js
+
 const express = require('express');
 const fileUpload = require('express-fileupload');
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
 const XLSX = require('xlsx');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // Asegúrate de que node-fetch esté instalado (npm install node-fetch)
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 
@@ -29,8 +31,9 @@ app.use(cors(corsOptions));
 app.use(express.json()); // Middleware para parsear JSON en el cuerpo de la solicitud
 
 // NOTA IMPORTANTE:
-// fileUpload AHORA se aplica solo a la ruta específica que lo necesita (/api/ventas)
-// NO lo aplicamos globalmente con app.use(fileUpload(...));
+// El middleware 'fileUpload' NO se aplica globalmente aquí con app.use(fileUpload(...));
+// En su lugar, se aplicará directamente a la ruta POST /api/ventas,
+// que es la única que se espera que reciba archivos (comprobantes).
 // Esto evita la advertencia "Request is not eligible for file upload!" en otras rutas.
 
 // Servir archivos estáticos (para los comprobantes subidos)
@@ -210,7 +213,7 @@ app.get('/api/numeros-disponibles', async (req, res) => {
 
 
 // Ruta para registrar una venta (POST)
-// NOTA: Aquí es donde aplicamos fileUpload, ya que esta ruta puede recibir un archivo.
+// CAMBIO CLAVE: fileUpload se aplica aquí, solo para esta ruta.
 app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, debug: true }), async (req, res) => {
     try {
         const {
@@ -220,7 +223,7 @@ app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, deb
             telefono,
             email,    // Campo opcional
             metodoPago,
-            referenciaPago, // Antes numeroComprobante
+            referenciaPago,
             valorTotalUsd,
             valorTotalBs,
             tasaAplicada,
@@ -240,7 +243,9 @@ app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, deb
             return res.status(400).json({ message: 'No hay una fecha de sorteo configurada por el administrador.' });
         }
 
+        // Validación CRÍTICA: Asegura que la fecha del sorteo del cliente coincida con la del servidor
         if (fechaSorteo !== config.fecha_sorteo) {
+            console.warn(`Alerta: Fecha de sorteo del cliente (${fechaSorteo}) no coincide con la del servidor (${config.fecha_sorteo}).`);
             return res.status(400).json({ message: `La fecha del sorteo en la solicitud (${fechaSorteo}) no coincide con la fecha del sorteo actual configurada (${config.fecha_sorteo}). Por favor, recargue la página.` });
         }
 
@@ -279,7 +284,7 @@ app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, deb
         ).map(n => n.numero);
 
         if (numerosTomados.length > 0) {
-            return res.status(409).json({
+            return res.status(409).json({ // 409 Conflict si los números ya están ocupados
                 message: `¡Ups! Los siguientes números ya están vendidos para el sorteo del ${config.fecha_sorteo}: ${numerosTomados.join(', ')}. Por favor, elige otros.`,
                 numerosTomados: numerosTomados
             });
@@ -293,7 +298,7 @@ app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, deb
         if (req.files && req.files.comprobante) {
             const comprobante = req.files.comprobante;
             const uploadDir = path.join(__dirname, 'uploads');
-            // Asegúrate de que el directorio 'uploads' exista
+            // CAMBIO: Asegúrate de que el directorio 'uploads' exista antes de mover el archivo
             await fs.mkdir(uploadDir, { recursive: true });
             const uploadPath = path.join(uploadDir, `${numeroTicket}-${comprobante.name}`);
             await comprobante.mv(uploadPath);
@@ -307,9 +312,10 @@ app.post('/api/ventas', fileUpload({ limits: { fileSize: 50 * 1024 * 1024 }, deb
             numeroTicket,
             numeros,
             comprador,
-            cedula: cedula || '', // Si no se envió, guarda cadena vacía
+            // CAMBIO: Guardar cedula y email como null si vienen vacíos (o cadena vacía, como prefieras)
+            cedula: cedula || null, // Si no se envió, guarda null
             telefono,
-            email: email || '',    // Si no se envió, guarda cadena vacía
+            email: email || null,    // Si no se envió, guarda null
             metodoPago,
             referenciaPago,
             valorTotalUsd: parseFloat(valorTotalUsd),
