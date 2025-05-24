@@ -137,9 +137,17 @@ async function enviarCorteAutomatico() {
 
         // Obtener todos los tickets ya incluidos en cortes anteriores
         const ticketsYaIncluidos = new Set();
+        // === INICIO DE LA CORRECCIÓN ===
         cortesData.cortes.forEach(corte => {
-            corte.ventasIncluidas.forEach(ticketId => ticketsYaIncluidos.add(ticketId));
+            // Verifica que 'ventasIncluidas' existe y es un array antes de iterar
+            if (corte.ventasIncluidas && Array.isArray(corte.ventasIncluidas)) {
+                corte.ventasIncluidas.forEach(ticketId => ticketsYaIncluidos.add(ticketId));
+            } else {
+                // Opcional: loggear una advertencia si un corte tiene un formato inesperado
+                console.warn(`⚠️ Corte con ID ${corte.id || 'desconocido'} no tiene la propiedad 'ventasIncluidas' o no es un array. Ignorando este corte para tickets ya incluidos.`);
+            }
         });
+        // === FIN DE LA CORRECCIÓN ===
 
         const ventasParaCorte = ventasData.ventas.filter(venta =>
             venta.estado === 'confirmado' &&
@@ -279,7 +287,7 @@ app.get('/api/numeros-disponibles', async (req, res) => {
             precioTicket: config.precio_ticket,
             tasaDolar: config.tasa_dolar,
             fechaSorteo: config.fecha_sorteo,
-            numeroSorteoCorrelativo: config.numero_sorteo_correlativo,
+            numeroSorteoCorrelativo: config.numero_sortivo_correlativo,
             paginaBloqueada: false
         });
     } catch (error) {
@@ -662,20 +670,12 @@ app.listen(port, async () => {
     console.log(`   - GET /api/admin/ventas`);
     console.log(`   - GET /api/admin/ventas/:ticketId`);
     console.log(`   - PATCH /api/admin/ventas/:ticketId/estado`);
-    console.log(`   - GET /api/admin/configuracion (para obtener config)`); // RUTA ACTUALIZADA
-    console.log(`   - PUT /api/admin/configuracion (para actualizar config)`); // RUTA ACTUALIZADA
+    console.log(`   - GET /api/admin/configuracion (para obtener config)`);
+    console.log(`   - PUT /api/admin/configuracion (para actualizar config)`);
     console.log(`   - GET /api/admin/cortes`);
-    console.log(`   - POST /api/admin/execute-sales-cut (para corte manual)`); // NUEVA RUTA
+    console.log(`   - POST /api/admin/execute-sales-cut (para corte manual)`);
     console.log(`   - GET /api/admin/horarios-zulia`);
-    console.log(`   - PUT /api/admin/horarios-zulia (para actualizar)`); // RUTA Y MÉTODO ACTUALIZADOS
-
-    // Asegurarse de que los archivos JSON existan al inicio (y carguen los valores por defecto si no están)
-    await leerArchivo(CONFIG_PATH, { fecha_sorteo: null, precio_ticket: 1.00, tasa_dolar: 36.00, pagina_bloqueada: false, numero_sorteo_correlativo: 1, admin_email_for_reports: "tu_correo@example.com", mail_config: { host: "smtp.example.com", port: 587, secure: false, user: "tu_correo@example.com", pass: "tu_contraseña", senderName: "Rifas T Loterias" } });
-    await leerArchivo(NUMEROS_PATH, { numeros: [] });
-    await leerArchivo(VENTAS_PATH, { ventas: [] });
-    await leerArchivo(CORTES_PATH, { cortes: [] });
-    await leerArchivo(HORARIOS_ZULIA_PATH, { horarios_zulia: [] }); // Default con la propiedad correcta
-
-    // Inicializar el transporter DESPUÉS de que todos los archivos de configuración iniciales estén listos
+    console.log(`   - PUT /api/admin/horarios-zulia (para actualizar)`);
+    // Inicializar el transportador de correo al inicio
     await initializeTransporter();
 });
