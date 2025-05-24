@@ -254,8 +254,8 @@ async function inicializarArchivos() {
             host: 'smtp.tuservidor.com',
             port: 587,
             secure: false,
-            user: 'tu_correo@ejemplo.com',
-            pass: 'tu_contraseña_de_correo',
+            user: 'SkyFall7k@gmail.com',
+            pass: 'xpxb obes ekzq ogew',
             senderName: 'Notificaciones de Rifas'
         },
         // Dirección de correo actualizada
