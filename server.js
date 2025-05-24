@@ -46,8 +46,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const NUMEROS_PATH = path.join(__dirname, 'numeros.json');
 const VENTAS_PATH = path.join(__dirname, 'ventas.json');
-const CORTES_PATH = path.join(__dirname, 'cortes.json'); // Mantenemos este archivo
-const HORARIOS_ZULIA_PATH = path.join(__dirname, 'horarios-zulia.json'); // Mantenemos este archivo
+const CORTES_PATH = path.join(__dirname, 'cortes.json');
+const HORARIOS_ZULIA_PATH = path.join(__dirname, 'horarios-zulia.json');
 
 // --- Funciones de Utilidad para Lectura/Escritura de Archivos JSON ---
 async function leerArchivo(filePath, defaultValue = {}) {
@@ -104,27 +104,24 @@ async function enviarCorteAutomatico() {
     try {
         const config = await leerArchivo(CONFIG_PATH, { fecha_sorteo: null, precio_ticket: 0, tasa_dolar: 0, pagina_bloqueada: false, numero_sorteo_correlativo: 1 });
         const ventasData = await leerArchivo(VENTAS_PATH, { ventas: [] });
-        const cortesData = await leerArchivo(CORTES_PATH, { cortes: [] }); // Leemos los cortes existentes
+        const cortesData = await leerArchivo(CORTES_PATH, { cortes: [] });
 
         const hoy = new Date();
         const offset = -4; // UTC-4 para Venezuela (Maracaibo, Zulia)
         const localHoy = new Date(hoy.getTime() + (hoy.getTimezoneOffset() * 60000) + (offset * 3600000));
-        const fechaCorte = localHoy.toISOString().split('T')[0]; // Formato YYYY-MM-DD
+        const fechaCorte = localHoy.toISOString().split('T')[0];
 
-        // Obtener los IDs de tickets ya incluidos en cortes previos para evitar duplicados
         const ticketsYaIncluidos = new Set();
         cortesData.cortes.forEach(corte => {
             corte.ventasIncluidas.forEach(ticketId => ticketsYaIncluidos.add(ticketId));
         });
 
-        // Filtrar ventas confirmadas que NO han sido incluidas en ningún corte anterior
         const ventasParaCorte = ventasData.ventas.filter(venta =>
             venta.estado === 'confirmado' &&
-            venta.fechaConfirmacion && // Asegura que la fecha de confirmación exista
-            new Date(venta.fechaConfirmacion).toISOString().split('T')[0] === fechaCorte && // Venta confirmada hoy
-            !ticketsYaIncluidos.has(venta.numeroTicket) // Y no incluida en un corte anterior
+            venta.fechaConfirmacion &&
+            new Date(venta.fechaConfirmacion).toISOString().split('T')[0] === fechaCorte &&
+            !ticketsYaIncluidos.has(venta.numeroTicket)
         );
-
 
         if (ventasParaCorte.length === 0) {
             console.log(`ℹ️ No hay ventas confirmadas pendientes de corte para hoy ${fechaCorte}.`);
@@ -137,17 +134,17 @@ async function enviarCorteAutomatico() {
         const numerosTicketsCorte = ventasParaCorte.map(venta => venta.numeroTicket);
 
         const nuevoCorte = {
-            id: `corte-${Date.now()}`, // ID único para el corte
+            id: `corte-${Date.now()}`,
             fechaCorte: fechaCorte,
             totalVentasBs: parseFloat(totalVentasBs.toFixed(2)),
             totalVentasUsd: parseFloat(totalVentasUsd.toFixed(2)),
             cantidadVentas: ventasParaCorte.length,
             ventasIncluidas: numerosTicketsCorte,
-            detalleVentas: ventasParaCorte // Detalle completo para el correo
+            detalleVentas: ventasParaCorte
         };
 
         cortesData.cortes.push(nuevoCorte);
-        await escribirArchivo(CORTES_PATH, cortesData); // Guardamos el corte en el archivo
+        await escribirArchivo(CORTES_PATH, cortesData);
         console.log(`✅ Corte de ventas del ${fechaCorte} generado y guardado. Total Bs: ${nuevoCorte.totalVentasBs}, Total USD: ${nuevoCorte.totalVentasUsd}`);
 
         const mailOptions = {
@@ -202,7 +199,6 @@ async function enviarCorteAutomatico() {
 }
 
 // --- Tareas Programadas (Cron Jobs) ---
-// Se ejecutará todos los días a las 23:59 (11:59 PM).
 cron.schedule('59 23 * * *', () => {
     console.log('⏳ Ejecutando tarea programada: Envío de corte automático de ventas...');
     enviarCorteAutomatico();
@@ -211,11 +207,7 @@ cron.schedule('59 23 * * *', () => {
     timezone: "America/Caracas"
 });
 
----
-
-## Rutas de la API (Panel del Cliente)
-
-```javascript
+// --- Rutas de la API (Panel del Cliente) ---
 // Obtener números disponibles (para el panel del cliente)
 app.get('/api/numeros-disponibles', async (req, res) => {
     try {
@@ -402,11 +394,7 @@ app.post('/api/ventas', async (req, res) => {
     }
 });
 
----
-
-## Rutas de la API (Panel de Administración)
-
-```javascript
+// --- Rutas de la API (Panel de Administración) ---
 // Obtener todas las ventas
 app.get('/api/admin/ventas', async (req, res) => {
     try {
@@ -512,9 +500,9 @@ app.get('/api/admin/config', async (req, res) => {
     }
 });
 
-// **CORRECCIÓN para el error PUT /api/admin/configuracion 404**
+// CORRECCIÓN para el error PUT /api/admin/configuracion 404
 // Esta ruta ahora coincide con lo que tu cliente está enviando
-app.put('/api/admin/configuracion', async (req, res) => { // CAMBIADO de POST /api/admin/config a PUT /api/admin/configuracion
+app.put('/api/admin/configuracion', async (req, res) => {
     try {
         const newConfig = req.body;
         if (newConfig.fecha_sorteo) {
@@ -556,11 +544,11 @@ app.get('/api/admin/cortes', async (req, res) => {
     }
 });
 
-// **CORRECCIÓN para el error GET /api/admin/horarios-zulia 404**
+// CORRECCIÓN para el error GET /api/admin/horarios-zulia 404
 // Agregada esta ruta para que tu cliente pueda cargar los horarios
 app.get('/api/admin/horarios-zulia', async (req, res) => {
     try {
-        const horarios = await leerArchivo(HORARIOS_ZULIA_PATH, { horarios: [] }); // Inicializa con un array vacío si no existe
+        const horarios = await leerArchivo(HORARIOS_ZULIA_PATH, { horarios: [] });
         res.json(horarios);
     } catch (error) {
         console.error('❌ Error al obtener horarios del Zulia:', error);
@@ -609,9 +597,9 @@ app.listen(port, () => {
     console.log(`   - GET /api/admin/ventas/:ticketId`);
     console.log(`   - PATCH /api/admin/ventas/:ticketId/estado`);
     console.log(`   - GET /api/admin/config`);
-    console.log(`   - PUT /api/admin/configuracion (para actualizar config)`); // RUTA CAMBIADA
+    console.log(`   - PUT /api/admin/configuracion (para actualizar config)`);
     console.log(`   - GET /api/admin/cortes`);
-    console.log(`   - GET /api/admin/horarios-zulia`); // RUTA AGREGADA
+    console.log(`   - GET /api/admin/horarios-zulia`);
     console.log(`   - POST /api/admin/horarios-zulia (para actualizar)`);
 
     // Asegurarse de que los archivos JSON existan al inicio
