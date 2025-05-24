@@ -6,7 +6,7 @@ const cors = require('cors');
 const XLSX = require('xlsx');
 const fetch = require('node-fetch');
 const nodemailer = require('nodemailer');
-const cron = require('node-cron'); // <-- Añadido: Importar node-cron
+const cron = require('node-cron'); // Importar node-cron
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -248,7 +248,7 @@ async function inicializarArchivos() {
         numero_sorteo_correlativo: 1,
         ultimo_numero_ticket: 0,
         ultima_fecha_resultados_zulia: null,
-        // --- Cambiado a array para múltiples números de WhatsApp ---
+        // Cambiado a array para múltiples números de WhatsApp
         admin_whatsapp_numbers: [], // Formato: ['584121234567', '584149876543']
         mail_config: {
             host: 'smtp.tuservidor.com',
@@ -258,7 +258,7 @@ async function inicializarArchivos() {
             pass: 'tu_contraseña_de_correo',
             senderName: 'Notificaciones de Rifas'
         },
-        // --- Dirección de correo actualizada ---
+        // Dirección de correo actualizada
         admin_email_for_reports: 'SkyFall7k@gmail.com'
     });
     await leerArchivo(VENTAS_FILE, []);
@@ -286,7 +286,7 @@ app.get('/api/admin/configuracion', async (req, res) => {
 
 app.put('/api/admin/configuracion', async (req, res) => {
     try {
-        const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket, admin_whatsapp_numbers, mail_config, admin_email_for_reports } = req.body; // <-- admin_whatsapp_numbers ahora es un array
+        const { tasa_dolar, pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo, ultimo_numero_ticket, admin_whatsapp_numbers, mail_config, admin_email_for_reports } = req.body; // admin_whatsapp_numbers ahora es un array
 
         const config = await leerArchivo(CONFIG_FILE, {});
 
@@ -297,7 +297,7 @@ app.put('/api/admin/configuracion', async (req, res) => {
         if (precio_ticket !== undefined) config.precio_ticket = parseFloat(precio_ticket);
         if (numero_sorteo_correlativo !== undefined) config.numero_sorteo_correlativo = parseInt(numero_sorteo_correlativo);
         if (ultimo_numero_ticket !== undefined) config.ultimo_numero_ticket = parseInt(ultimo_numero_ticket);
-        if (admin_whatsapp_numbers !== undefined) config.admin_whatsapp_numbers = admin_whatsapp_numbers; // <-- Actualiza el array de números de WhatsApp
+        if (admin_whatsapp_numbers !== undefined) config.admin_whatsapp_numbers = admin_whatsapp_numbers; // Actualiza el array de números de WhatsApp
         if (mail_config !== undefined) config.mail_config = mail_config;
         if (admin_email_for_reports !== undefined) config.admin_email_for_reports = admin_email_for_reports;
 
@@ -421,6 +421,19 @@ app.put('/api/admin/ventas/:numeroTicket/cancelar', async (req, res) => {
         res.status(500).json({ error: 'Error interno del servidor al cancelar la venta.' });
     }
 });
+
+// --- NUEVA RUTA: Endpoint para ejecutar el corte de ventas manualmente ---
+app.post('/api/admin/execute-sales-cut', async (req, res) => {
+    try {
+        console.log('Solicitud POST recibida para /api/admin/execute-sales-cut');
+        await enviarCorteAutomatico(); // Llama a la función existente
+        res.json({ message: 'Corte de ventas ejecutado con éxito. Revisa tu correo y WhatsApp.' });
+    } catch (error) {
+        console.error('Error al ejecutar el corte de ventas manualmente:', error);
+        res.status(500).json({ error: 'Error al ejecutar el corte de ventas. Por favor, revisa los logs del servidor.' });
+    }
+});
+
 
 // --- Rutas de Usuarios y Rifas (Placeholders) ---
 app.post('/api/admin/usuarios', async (req, res) => {
@@ -729,84 +742,58 @@ app.post('/api/admin/guardar-numeros-ganadores-zulia', async (req, res) => {
         config.ultima_fecha_resultados_zulia = fecha_sorteo;
         await escribirArchivo(CONFIG_FILE, config);
 
-        res.json({ success: true, message: 'Resultados de Zulia guardados/actualizados con éxito.', resultado: nuevoResultado });
-
+        res.json({ success: true, message: 'Resultados de Zulia guardados/actualizados con éxito.', resultados: nuevoResultado });
     } catch (error) {
-        console.error('Error al guardar/actualizar resultados de Zulia:', error);
-        res.status(500).json({ error: 'Error interno del servidor al procesar resultados de Zulia.' });
-    }
-});
-
-// NUEVA RUTA: Cerrar el sorteo actual y preparar el siguiente (ADMIN)
-// Esta ruta ya NO enviará el reporte de cierre. Ese trabajo lo hace la tarea programada.
-app.post('/api/admin/cerrar-sorteo-actual', async (req, res) => {
-    const { siguiente_fecha_sorteo } = req.body;
-
-    if (!siguiente_fecha_sorteo) {
-        return res.status(400).json({ message: 'Debe proporcionar la fecha del siguiente sorteo (YYYY-MM-DD).' });
-    }
-
-    try {
-        const config = await leerArchivo(CONFIG_FILE, {});
-
-        // 1. Incrementar el número correlativo del sorteo
-        config.numero_sorteo_correlativo++;
-
-        // 2. Reiniciar el contador de tickets para el nuevo sorteo
-        config.ultimo_numero_ticket = 0;
-
-        // 3. Establecer la nueva fecha del sorteo
-        config.fecha_sorteo = siguiente_fecha_sorteo;
-
-        // 4. Desbloquear la página (si estuviera bloqueada por el cierre del sorteo)
-        config.pagina_bloqueada = false;
-
-        await escribirArchivo(CONFIG_FILE, config); // Guarda los cambios en la configuración
-
-        res.json({
-            success: true,
-            message: `Sorteo actual cerrado y siguiente sorteo preparado. Nuevo Sorteo #: ${config.numero_sorteo_correlativo}, Fecha: ${config.fecha_sorteo}.`,
-            nuevaConfig: config
-        });
-
-    } catch (error) {
-        console.error('Error al cerrar el sorteo actual:', error);
-        res.status(500).json({ error: 'Error interno del servidor al cerrar el sorteo.' });
+        console.error('Error al guardar los números ganadores del Zulia:', error);
+        res.status(500).json({ success: false, message: `Error al guardar los resultados: ${error.message}` });
     }
 });
 
 
-// --- Archivo de Términos y Condiciones ---
+// --- API para Obtener Términos y Condiciones ---
 app.get('/api/terminos-condiciones', async (req, res) => {
     try {
-        const data = await fs.readFile(TERMINOS_CONDICIONES_FILE, 'utf8');
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.send(data);
+        const terminos = await fs.readFile(TERMINOS_CONDICIONES_FILE, 'utf8');
+        res.send(terminos);
     } catch (error) {
         if (error.code === 'ENOENT') {
-            console.warn(`Archivo de términos y condiciones no encontrado: ${TERMINOS_CONDICIONES_FILE}.`);
-            return res.status(404).json({ message: 'Términos y condiciones no encontrados en el servidor.' });
+            return res.status(404).send('Archivo de términos y condiciones no encontrado.');
         }
-        console.error('Error al leer el archivo de términos y condiciones:', error);
-        res.status(500).json({ error: 'Error interno del servidor al obtener los términos y condiciones.' });
+        console.error('Error al leer términos y condiciones:', error);
+        res.status(500).send('Error interno del servidor al obtener términos y condiciones.');
+    }
+});
+
+// --- API para Actualizar Términos y Condiciones (Panel de Administración) ---
+app.put('/api/admin/terminos-condiciones', async (req, res) => {
+    const { content } = req.body;
+    if (typeof content !== 'string') {
+        return res.status(400).json({ message: 'El contenido debe ser una cadena de texto.' });
+    }
+    try {
+        await fs.writeFile(TERMINOS_CONDICIONES_FILE, content, 'utf8');
+        res.json({ message: 'Términos y condiciones actualizados exitosamente.' });
+    } catch (error) {
+        console.error('Error al actualizar términos y condiciones:', error);
+        res.status(500).json({ message: 'Error interno del servidor al actualizar términos y condiciones.' });
     }
 });
 
 
-// --- Programar la tarea de envío de cortes cada 55 minutos ---
-// La sintaxis de cron es: `* * * * * *` (segundo, minuto, hora, día del mes, mes, día de la semana)
-// `*/55 * * * *` significa "cada 55 minutos"
-cron.schedule('*/55 * * * *', () => {
-    console.log('Ejecutando tarea programada: envío de corte automático...');
-    enviarCorteAutomatico();
+// --- Programador de Tareas (Cron Jobs) ---
+// Tarea programada para enviar el corte automático de ventas
+// Se ejecutará todos los días a las 00:00 (medianoche)
+// Puedes ajustar la hora según tus necesidades.
+// Ejemplo: '0 0 * * *' significa 0 minutos, 0 horas, cualquier día del mes, cualquier mes, cualquier día de la semana.
+cron.schedule('0 0 * * *', async () => {
+    console.log('Ejecutando tarea programada: enviarCorteAutomatico');
+    await enviarCorteAutomatico();
 }, {
-    scheduled: true,
-    timezone: "America/Caracas" // Asegúrate de usar la zona horaria correcta, o tu zona horaria local
+    timezone: "America/Caracas" // Asegúrate de ajustar la zona horaria a la de Venezuela
 });
 
 
 // Iniciar el servidor
 app.listen(port, () => {
-    console.log(`Servidor escuchando en http://localhost:${port}`);
-    console.log(`Tarea de cortes automáticos programada para ejecutarse cada 55 minutos.`);
+    console.log(`Servidor backend corriendo en http://localhost:${port}`);
 });
