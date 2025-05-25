@@ -21,7 +21,6 @@
     "node-schedule": "^2.1.1",
     "nodemailer": "^6.9.13",
     "pg": "^8.16.0",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz",
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0"  
   }
 }
