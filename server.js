@@ -261,21 +261,39 @@ app.post('/api/ventas/corte', async (req, res) => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Ventas');
 
-        // Añadir encabezados
-        worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
-            header: key,
-            key: key,
-            width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
-        }));
-
-        // Añadir datos
-        worksheet.addRows(dataToExport);
-
-        // Estilos para encabezados (opcional)
-        worksheet.getRow(1).eachCell((cell) => {
-            cell.font = { bold: true };
-            cell.alignment = { horizontal: 'center' };
-        });
+        // === INICIO DE LA CORRECCIÓN para /api/ventas/corte ===
+        if (dataToExport.length > 0) {
+            // Añadir encabezados
+            worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
+                header: key,
+                key: key,
+                width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
+            }));
+            // Añadir datos
+            worksheet.addRows(dataToExport);
+            // Estilos para encabezados (opcional)
+            worksheet.getRow(1).eachCell((cell) => {
+                cell.font = { bold: true };
+                cell.alignment = { horizontal: 'center' };
+            });
+        } else {
+            console.log('No hay ventas registradas para generar el reporte Excel (corte con reinicio). Se enviará un Excel con solo encabezados.');
+            worksheet.columns = [
+                { header: 'Fecha/Hora Compra', key: 'Fecha/Hora Compra', width: 20 },
+                { header: 'Fecha Sorteo', key: 'Fecha Sorteo', width: 15 },
+                { header: 'Nro. Sorteo', key: 'Nro. Sorteo', width: 15 },
+                { header: 'Nro. Ticket', key: 'Nro. Ticket', width: 15 },
+                { header: 'Comprador', key: 'Comprador', width: 15 },
+                { header: 'Teléfono', key: 'Teléfono', width: 20 },
+                { header: 'Números', key: 'Números', width: 15 },
+                { header: 'Valor USD', key: 'Valor USD', width: 15 },
+                { header: 'Valor Bs', key: 'Valor Bs', width: 15 },
+                { header: 'Método de Pago', key: 'Método de Pago', width: 15 },
+                { header: 'Referencia Pago', key: 'Referencia Pago', width: 15 },
+                { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
+            ];
+        }
+        // === FIN DE LA CORRECCIÓN para /api/ventas/corte ===
 
         // Crear el buffer del archivo Excel
         const excelBuffer = await workbook.xlsx.writeBuffer();
@@ -288,7 +306,7 @@ app.post('/api/ventas/corte', async (req, res) => {
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte y reinicio realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
                 <p>Las ventas y los números disponibles han sido reiniciados.</p>
-                <p>Total de ventas en este corte: ${ventas.length}</p>
+                ${dataToExport.length > 0 ? `<p>Total de ventas en este corte: ${ventas.length}</p>` : `<p>No se registraron ventas en este corte.</p>`}
                 <p>Gracias.</p>
             `,
             attachments: [{
@@ -350,21 +368,41 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Ventas');
 
-        // Añadir encabezados
-        worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
-            header: key,
-            key: key,
-            width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
-        }));
+        // === INICIO DE LA CORRECCIÓN para /api/ventas/corte-manual-solo-email ===
+        if (dataToExport.length > 0) {
+            // Añadir encabezados
+            worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
+                header: key,
+                key: key,
+                width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
+            }));
 
-        // Añadir datos
-        worksheet.addRows(dataToExport);
+            // Añadir datos
+            worksheet.addRows(dataToExport);
 
-        // Estilos para encabezados (opcional)
-        worksheet.getRow(1).eachCell((cell) => {
-            cell.font = { bold: true };
-            cell.alignment = { horizontal: 'center' };
-        });
+            // Estilos para encabezados (opcional)
+            worksheet.getRow(1).eachCell((cell) => {
+                cell.font = { bold: true };
+                cell.alignment = { horizontal: 'center' };
+            });
+        } else {
+            console.log('No hay ventas registradas para generar el reporte Excel (corte manual). Se enviará un Excel con solo encabezados.');
+            worksheet.columns = [
+                { header: 'Fecha/Hora Compra', key: 'Fecha/Hora Compra', width: 20 },
+                { header: 'Fecha Sorteo', key: 'Fecha Sorteo', width: 15 },
+                { header: 'Nro. Sorteo', key: 'Nro. Sorteo', width: 15 },
+                { header: 'Nro. Ticket', key: 'Nro. Ticket', width: 15 },
+                { header: 'Comprador', key: 'Comprador', width: 15 },
+                { header: 'Teléfono', key: 'Teléfono', width: 20 },
+                { header: 'Números', key: 'Números', width: 15 },
+                { header: 'Valor USD', key: 'Valor USD', width: 15 },
+                { header: 'Valor Bs', key: 'Valor Bs', width: 15 },
+                { header: 'Método de Pago', key: 'Método de Pago', width: 15 },
+                { header: 'Referencia Pago', key: 'Referencia Pago', width: 15 },
+                { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
+            ];
+        }
+        // === FIN DE LA CORRECCIÓN para /api/ventas/corte-manual-solo-email ===
 
         // Crear el buffer del archivo Excel
         const excelBuffer = await workbook.xlsx.writeBuffer();
@@ -376,8 +414,8 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
             subject: `Corte de Ventas Manual - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte manual realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
+                ${dataToExport.length > 0 ? `<p>Total de ventas registradas en este corte: ${ventas.length}</p>` : `<p>No se registraron ventas en este corte.</p>`}
                 <p>Este corte fue solicitado manualmente y las ventas NO han sido reiniciadas.</p>
-                <p>Total de ventas registradas en este corte: ${ventas.length}</p>
                 <p>Gracias.</p>
             `,
             attachments: [{
@@ -489,17 +527,36 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             const workbook = new ExcelJS.Workbook();
             const worksheet = workbook.addWorksheet('Ventas');
 
-            worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
-                header: key,
-                key: key,
-                width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
-            }));
-            worksheet.addRows(dataToExport);
-
-            worksheet.getRow(1).eachCell((cell) => {
-                cell.font = { bold: true };
-                cell.alignment = { horizontal: 'center' };
-            });
+            // === INICIO DE LA CORRECCIÓN para CRON JOB ===
+            if (dataToExport.length > 0) {
+                worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
+                    header: key,
+                    key: key,
+                    width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
+                }));
+                worksheet.addRows(dataToExport);
+                worksheet.getRow(1).eachCell((cell) => {
+                    cell.font = { bold: true };
+                    cell.alignment = { horizontal: 'center' };
+                });
+            } else {
+                console.log('No hay ventas registradas para generar el reporte Excel (cron job). Se enviará un Excel con solo encabezados.');
+                worksheet.columns = [
+                    { header: 'Fecha/Hora Compra', key: 'Fecha/Hora Compra', width: 20 },
+                    { header: 'Fecha Sorteo', key: 'Fecha Sorteo', width: 15 },
+                    { header: 'Nro. Sorteo', key: 'Nro. Sorteo', width: 15 },
+                    { header: 'Nro. Ticket', key: 'Nro. Ticket', width: 15 },
+                    { header: 'Comprador', key: 'Comprador', width: 15 },
+                    { header: 'Teléfono', key: 'Teléfono', width: 20 },
+                    { header: 'Números', key: 'Números', width: 15 },
+                    { header: 'Valor USD', key: 'Valor USD', width: 15 },
+                    { header: 'Valor Bs', key: 'Valor Bs', width: 15 },
+                    { header: 'Método de Pago', key: 'Método de Pago', width: 15 },
+                    { header: 'Referencia Pago', key: 'Referencia Pago', width: 15 },
+                    { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
+                ];
+            }
+            // === FIN DE LA CORRECCIÓN para CRON JOB ===
 
             const excelBuffer = await workbook.xlsx.writeBuffer();
 
@@ -510,7 +567,7 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
                 html: `
                     <p>Adjunto encontrarás el reporte de ventas del día, generado automáticamente.</p>
                     <p>El sistema de ventas y números disponibles ha sido reiniciado para el próximo sorteo.</p>
-                    <p>Total de ventas registradas en este corte: ${ventas.length}</p>
+                    ${dataToExport.length > 0 ? `<p>Total de ventas registradas en este corte: ${ventas.length}</p>` : `<p>No se registraron ventas en este corte.</p>`}
                     <p>Gracias.</p>
                 `,
                 attachments: [{
