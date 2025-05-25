@@ -45,19 +45,13 @@ const DATA_DIR = path.join(__dirname, 'data');
 const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes');
 
 // Rutas de archivos de datos
-const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json'); // ¡CORREGIDO AQUÍ!
 const NUMEROS_FILE = path.join(DATA_DIR, 'numeros.json');
 const VENTAS_FILE = path.join(DATA_DIR, 'ventas.json');
 const HORARIOS_ZULIA_FILE = path.join(DATA_DIR, 'horariosZulia.json');
 
-// Configuración de Nodemailer (Email para reportes)
-const transporter = nodemailer.createTransport({
-    service: 'gmail', // o tu proveedor de correo
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-    }
-});
+// Declarar transporter aquí, pero inicializarlo después de cargar la configuración
+let transporter;
 
 // Función para asegurar que los directorios existan
 async function ensureDataAndComprobantesDirs() {
@@ -104,12 +98,31 @@ async function loadInitialData() {
         ultimo_numero_ticket: 0,
         ultimo_numero_sorteo_correlativo: 1,
         pagina_bloqueada: false,
-        admin_whatsapp_numbers: ['584143630488'], // Ejemplo, deberían ser strings
-        horarios_zulia: []
+        admin_whatsapp_numbers: ['584143630488'],
+        horarios_zulia: [],
+        // Incluir la estructura completa de mail_config y admin_email_for_reports aquí
+        // para cuando el archivo configuracion.json no exista inicialmente
+        mail_config: {
+            host: "smtp.gmail.com",
+            port: 465,
+            secure: true,
+            user: "tu_email@gmail.com", // ¡IMPORTANTE! Cambia esto por tu EMAIL real en el archivo
+            pass: "tu_contraseña_de_aplicacion" // ¡IMPORTANTE! Cambia esto por tu CONTRASEÑA DE APLICACIÓN real
+        },
+        admin_email_for_reports: "tu_email_admin@gmail.com" // ¡IMPORTANTE! Cambia esto por el email del admin real
     });
     global.numeros = await readJsonFile(NUMEROS_FILE, initialNumbers);
     global.ventas = await readJsonFile(VENTAS_FILE, []);
     global.horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, []);
+
+    // Inicializar transporter después de que global.config esté disponible
+    transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            user: global.config.mail_config.user,
+            pass: global.config.mail_config.pass
+        }
+    });
 }
 
 // Servir archivos estáticos (comprobantes)
@@ -300,8 +313,8 @@ app.post('/api/ventas/corte', async (req, res) => {
 
         // Enviar el correo electrónico
         const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: process.env.EMAIL_ADMIN_RECIPIENT,
+            from: global.config.mail_config.user, // Usar la credencial del config
+            to: global.config.admin_email_for_reports, // Usar el email del admin del config
             subject: `Corte de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte y reinicio realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
@@ -409,8 +422,8 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
 
         // Enviar el correo electrónico
         const mailOptions = {
-            from: process.env.EMAIL_USER,
-            to: process.env.EMAIL_ADMIN_RECIPIENT, // Usar la variable de entorno para el destinatario
+            from: global.config.mail_config.user, // Usar la credencial del config
+            to: global.config.admin_email_for_reports, // Usar el email del admin del config
             subject: `Corte de Ventas Manual - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte manual realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
@@ -561,8 +574,8 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             const excelBuffer = await workbook.xlsx.writeBuffer();
 
             const mailOptions = {
-                from: process.env.EMAIL_USER,
-                to: process.env.EMAIL_ADMIN_RECIPIENT,
+                from: global.config.mail_config.user, // Usar la credencial del config
+                to: global.config.admin_email_for_reports, // Usar el email del admin del config
                 subject: `Reporte Automático de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
                 html: `
                     <p>Adjunto encontrarás el reporte de ventas del día, generado automáticamente.</p>
