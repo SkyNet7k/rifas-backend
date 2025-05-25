@@ -48,10 +48,10 @@ async function readJsonFile(filePath) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             console.warn(`Archivo no encontrado en ${filePath}. Creando archivo vacío.`);
-            if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json')) {
-                return [];
+            if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json') || filePath.includes('horarios_zulia.json')) { // MODIFICADO AQUI
+                return []; // Array vacío para ventas, números, cortes y horarios_zulia
             }
-            return {};
+            return {}; // Objeto vacío por defecto para configuración
         }
         console.error(`Error al leer el archivo ${filePath}:`, error);
         throw error;
@@ -268,12 +268,12 @@ app.get('/api/admin/ventas', async (req, res) => {
 
 // --- Rutas de API para Números (CLIENTE) ---
 // Obtener todos los números disponibles (asumiendo que numeros.json contiene los números)
-// *** RUTA MODIFICADA PARA COINCIDIR CON EL CLIENTE ***
 app.get('/api/numeros-disponibles', async (req, res) => {
     try {
         const numeros = await readJsonFile(NUMEROS_FILE);
         res.json(numeros);
-    } catch (error) {
+    }
+    catch (error) {
         console.error('Error al obtener números:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener números.' });
     }
@@ -340,7 +340,7 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
         column.eachCell({ includeEmpty: true }, cell => {
             const columnLength = cell.value ? cell.value.toString().length : 10;
             if (columnLength > maxLength) {
-                maxLength = columnLength;
+                maxLength = column++;
             }
         });
         column.width = maxLength < 10 ? 10 : maxLength + 2;
