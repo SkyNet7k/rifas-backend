@@ -8,7 +8,7 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
-const moment = require('moment-timezone'); // Asegúrate de que moment-timezone esté instalado
+const moment = require('moment-timezone');
 const ExcelJS = require('exceljs');
 
 dotenv.config();
@@ -20,7 +20,7 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onren
 
 const corsOptions = {
     origin: [
-        'https://paneladmin01.netlify.app',
+        'https://paneladmin01.netlify.app', // <--- ¡AÑADIDO ESTE ORIGEN!
         'https://tuoportunidadeshoy.netlify.app',
         'http://localhost:8080',
         'http://127.0.0.1:5500',
@@ -39,534 +39,643 @@ app.use(fileUpload());
 const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
-const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
+const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes');
 
-// --- Funciones de Utilidad para Leer/Escribir JSON ---
-async function readJsonFile(filePath, defaultContent = []) {
+// Función para leer archivos JSON
+async function readJsonFile(filePath, defaultContent = {}) {
     try {
         const data = await fs.readFile(filePath, 'utf8');
         return JSON.parse(data);
     } catch (error) {
         if (error.code === 'ENOENT') {
-            console.warn(`Archivo no encontrado: ${filePath}. Creando con contenido por defecto.`);
-            await fs.writeFile(filePath, JSON.stringify(defaultContent, null, 2), 'utf8');
+            await fs.writeFile(filePath, JSON.stringify(defaultContent, null, 2));
             return defaultContent;
         }
-        console.error(`Error leyendo archivo ${filePath}:`, error);
         throw error;
     }
 }
 
+// Función para escribir archivos JSON
 async function writeJsonFile(filePath, data) {
-    try {
-        await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-    } catch (error) {
-        console.error(`Error escribiendo archivo ${filePath}:`, error);
-        throw error;
-    }
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// --- Configuración de Nodemailer (Email) ---
-let transporter;
-let mailConfig;
-
-async function initializeEmailConfig() {
+// Asegurarse de que el directorio de comprobantes exista
+async function ensureComprobantesDir() {
     try {
-        const config = await readJsonFile(CONFIG_FILE);
-        mailConfig = config.mail_config;
-        if (mailConfig && mailConfig.host && mailConfig.user && mailConfig.pass) {
-            transporter = nodemailer.createTransport({
-                host: mailConfig.host,
-                port: mailConfig.port,
-                secure: mailConfig.secure, // true for 465, false for other ports
-                auth: {
-                    user: mailConfig.user,
-                    pass: mailConfig.pass,
-                },
-            });
-            console.log('Configuración de email cargada y transporter inicializado.');
-        } else {
-            console.warn('Configuración de email incompleta en configuracion.json. El envío de correos no funcionará.');
-        }
+        await fs.mkdir(COMPROBANTES_DIR, { recursive: true });
     } catch (error) {
-        console.error('Error al inicializar la configuración de email:', error);
-    }
-}
-
-async function sendEmail(to, subject, htmlContent) {
-    if (!transporter) {
-        console.error('Transporter de email no inicializado. No se puede enviar el correo.');
-        return;
-    }
-    const adminEmail = (await readJsonFile(CONFIG_FILE)).admin_email_for_reports || mailConfig.user; // Usar el correo del admin para reportes o el de auth
-
-    try {
-        let info = await transporter.sendMail({
-            from: `"${mailConfig.senderName || 'Sistema de Rifas'}" <${mailConfig.user}>`,
-            to: to,
-            subject: subject,
-            html: htmlContent,
-        });
-        console.log("Mensaje enviado: %s", info.messageId);
-        return info;
-    } catch (error) {
-        console.error("Error enviando correo:", error);
-        if (error.responseCode === 535) {
-            console.error("Error de autenticación: Verifica la contraseña de la aplicación de Gmail o las credenciales.");
+        if (error.code !== 'EEXIST') {
+            console.error('Error al crear directorio de comprobantes:', error);
         }
     }
 }
 
 // --- Rutas de la API ---
 
-// Ruta para obtener la configuración
+// Ruta para obtener y actualizar la configuración
 app.get('/api/configuracion', async (req, res) => {
     try {
-        const config = await readJsonFile(CONFIG_FILE, {});
-        // Obtener la hora actual en la zona horaria de Venezuela
-        const now = moment().tz('America/Caracas');
-        const fechaSorteo = moment.tz(config.fecha_sorteo, 'YYYY-MM-DD', 'America/Caracas');
-
-        let isSorteoActivo = true;
-        let mensajeSorteo = '';
-
-        // Si la fecha del sorteo ya pasó, el sorteo ha finalizado
-        if (now.isAfter(fechaSorteo, 'day')) {
-            isSorteoActivo = false;
-            mensajeSorteo = 'El sorteo ha finalizado. Espera el próximo evento.';
-        } else if (now.isSame(fechaSorteo, 'day')) {
-             // Si es el mismo día del sorteo, consideramos que está activo,
-             // pero podrías añadir lógica para horarios específicos si lo necesitas.
-             isSorteoActivo = true;
-             mensajeSorteo = `El sorteo está activo. Fecha del sorteo: ${fechaSorteo.format('DD-MM-YYYY')}`;
-        } else {
-            isSorteoActivo = true;
-            mensajeSorteo = `El sorteo está activo. Fecha del sorteo: ${fechaSorteo.format('DD-MM-YYYY')}`;
-        }
-
-
-        res.json({
-            ...config,
-            isSorteoActivo: isSorteoActivo,
-            mensajeSorteo: mensajeSorteo
-        });
+        const config = await readJsonFile(CONFIG_FILE);
+        res.json(config);
     } catch (error) {
-        console.error('Error al obtener la configuración:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener la configuración.' });
+        console.error('Error al leer configuración:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener configuración.' });
     }
 });
 
-
-// Ruta para actualizar la configuración
 app.post('/api/configuracion', async (req, res) => {
     try {
-        const newConfig = req.body;
-        let config = await readJsonFile(CONFIG_FILE, {});
+        let config = await readJsonFile(CONFIG_FILE);
+        const updatedConfig = req.body;
 
-        // Manejar el caso de bloqueo de página
-        if (typeof newConfig.pagina_bloqueada === 'boolean') {
-            config.pagina_bloqueada = newConfig.pagina_bloqueada;
-            console.log(`Página bloqueada: ${config.pagina_bloqueada}`);
+        // Validar y aplicar solo los campos permitidos
+        if (updatedConfig.hasOwnProperty('tasa_dolar')) {
+            config.tasa_dolar = parseFloat(updatedConfig.tasa_dolar);
+        }
+        if (updatedConfig.hasOwnProperty('pagina_bloqueada')) {
+            config.pagina_bloqueada = updatedConfig.pagina_bloqueada === 'true'; // Asegurarse que sea booleano
+        }
+        if (updatedConfig.hasOwnProperty('mensaje_bloqueo')) {
+            config.mensaje_bloqueo = updatedConfig.mensaje_bloqueo;
+        }
+        if (updatedConfig.hasOwnProperty('fecha_sorteo')) {
+            // Asegurarse que la fecha sea válida y esté en formato YYYY-MM-DD
+            const fechaValida = moment(updatedConfig.fecha_sorteo, 'YYYY-MM-DD').isValid();
+            if (fechaValida) {
+                config.fecha_sorteo = updatedConfig.fecha_sorteo;
+            } else {
+                return res.status(400).json({ message: 'Formato de fecha de sorteo inválido. Use YYYY-MM-DD.' });
+            }
+        }
+        if (updatedConfig.hasOwnProperty('precio_ticket')) {
+            config.precio_ticket = parseFloat(updatedConfig.precio_ticket);
+        }
+        if (updatedConfig.hasOwnProperty('numero_sorteo_correlativo')) {
+            config.numero_sorteo_correlativo = parseInt(updatedConfig.numero_sorteo_correlativo);
+        }
+        if (updatedConfig.hasOwnProperty('admin_whatsapp_numbers')) {
+            // Asegúrate de que los números sean un array de strings y estén limpios
+            const numbers = updatedConfig.admin_whatsapp_numbers
+                                .split(',')
+                                .map(n => n.trim())
+                                .filter(n => n.length > 0);
+            config.admin_whatsapp_numbers = numbers;
         }
 
-        // Actualizar otros campos si existen en el body
-        if (typeof newConfig.tasa_dolar === 'number') {
-            config.tasa_dolar = newConfig.tasa_dolar;
+        // Configuración de correo
+        if (updatedConfig.hasOwnProperty('mail_config')) {
+            config.mail_config = {
+                host: updatedConfig.mail_config.host,
+                port: parseInt(updatedConfig.mail_config.port),
+                secure: updatedConfig.mail_config.secure === 'true' || updatedConfig.mail_config.secure === true,
+                user: updatedConfig.mail_config.user,
+                pass: updatedConfig.mail_config.pass,
+                senderName: updatedConfig.mail_config.senderName
+            };
         }
-        if (typeof newConfig.fecha_sorteo === 'string') {
-            config.fecha_sorteo = newConfig.fecha_sorteo;
-        }
-        if (typeof newConfig.precio_ticket === 'number') {
-            config.precio_ticket = newConfig.precio_ticket;
-        }
-        if (typeof newConfig.numero_sorteo_correlativo === 'number') {
-            config.numero_sorteo_correlativo = newConfig.numero_sorteo_correlativo;
-        }
-        if (typeof newConfig.ultimo_numero_ticket === 'number') {
-            config.ultimo_numero_ticket = newConfig.ultimo_numero_ticket;
-        }
-        if (newConfig.ultima_fecha_resultados_zulia !== undefined) {
-            config.ultima_fecha_resultados_zulia = newConfig.ultima_fecha_resultados_zulia;
-        }
-        if (Array.isArray(newConfig.admin_whatsapp_numbers)) {
-            config.admin_whatsapp_numbers = newConfig.admin_whatsapp_numbers;
-        }
-        if (newConfig.admin_email_for_reports !== undefined) {
-            config.admin_email_for_reports = newConfig.admin_email_for_reports;
-        }
-        if (typeof newConfig.mail_config === 'object' && newConfig.mail_config !== null) {
-            config.mail_config = { ...config.mail_config, ...newConfig.mail_config };
-            // Re-initialize transporter if mail config changes
-            await initializeEmailConfig();
+        // Email para reportes
+        if (updatedConfig.hasOwnProperty('admin_email_for_reports')) {
+            config.admin_email_for_reports = updatedConfig.admin_email_for_reports;
         }
 
         await writeJsonFile(CONFIG_FILE, config);
-        res.json({ message: 'Configuración actualizada exitosamente.', config });
+        res.json({ message: 'Configuración actualizada con éxito.', config });
     } catch (error) {
-        console.error('Error al actualizar la configuración:', error);
-        res.status(500).json({ message: 'Error interno del servidor al actualizar la configuración.' });
+        console.error('Error al actualizar configuración:', error);
+        res.status(500).json({ message: 'Error interno del servidor al actualizar configuración.' });
     }
 });
 
-// Rutas para números disponibles (CRUD)
+// Rutas para números
 app.get('/api/numeros', async (req, res) => {
     try {
-        const numeros = await readJsonFile(NUMEROS_FILE);
+        const numeros = await readJsonFile(NUMEROS_FILE, Array.from({ length: 100 }, (_, i) => ({
+            numero: i.toString().padStart(2, '0'),
+            comprado: false
+        })));
         res.json(numeros);
     } catch (error) {
-        res.status(500).json({ message: 'Error al obtener números disponibles.' });
+        console.error('Error al leer números:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener números.' });
     }
 });
 
-app.post('/api/numeros', async (req, res) => {
+app.post('/api/numeros/reiniciar', async (req, res) => {
     try {
-        const newNumeros = req.body;
-        await writeJsonFile(NUMEROS_FILE, newNumeros);
-        res.status(201).json({ message: 'Números actualizados exitosamente.' });
-    } catch (error) {
-        res.status(500).json({ message: 'Error al actualizar números disponibles.' });
-    }
-});
-
-// Rutas para ventas (CRUD)
-app.get('/api/ventas', async (req, res) => {
-    try {
-        const ventas = await readJsonFile(VENTAS_FILE);
-        res.json(ventas);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener ventas.' });
-    }
-});
-
-app.post('/api/ventas', async (req, res) => {
-    try {
-        const nuevaVenta = req.body;
-        const ventas = await readJsonFile(VENTAS_FILE);
-        ventas.push(nuevaVenta);
-        await writeJsonFile(VENTAS_FILE, ventas);
-
-        // Actualizar ultimo_numero_ticket en la configuración
-        let config = await readJsonFile(CONFIG_FILE);
-        config.ultimo_numero_ticket = Math.max(config.ultimo_numero_ticket || 0, nuevaVenta.nro_ticket);
-        await writeJsonFile(CONFIG_FILE, config);
-
-        res.status(201).json({ message: 'Venta registrada exitosamente.', venta: nuevaVenta });
-    } catch (error) {
-        console.error('Error al registrar venta:', error);
-        res.status(500).json({ message: 'Error al registrar venta.', error: error.message });
-    }
-});
-
-
-// Rutas para comprobantes (CRUD)
-app.get('/api/comprobantes', async (req, res) => {
-    try {
-        const comprobantes = await readJsonFile(COMPROBANTES_FILE);
-        res.json(comprobantes);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener comprobantes.' });
-    }
-});
-
-app.post('/api/upload-comprobante', fileUpload(), async (req, res) => {
-    try {
-        if (!req.files || !req.files.comprobante) {
-            return res.status(400).json({ message: 'No se subió ningún archivo.' });
-        }
-
-        const comprobanteFile = req.files.comprobante;
-        const uploadDir = path.join(__dirname, 'uploads');
-        await fs.mkdir(uploadDir, { recursive: true }); // Asegura que la carpeta 'uploads' exista
-
-        const fileName = `${Date.now()}_${comprobanteFile.name}`;
-        const filePath = path.join(uploadDir, fileName);
-
-        await comprobanteFile.mv(filePath);
-
-        const comprobantes = await readJsonFile(COMPROBANTES_FILE);
-        const newComprobante = {
-            id: comprobantes.length > 0 ? Math.max(...comprobantes.map(c => c.id)) + 1 : 1,
-            comprobante_nombre: fileName,
-            comprobante_tipo: comprobanteFile.mimetype,
-            fecha_carga: new Date().toISOString()
-        };
-        comprobantes.push(newComprobante);
-        await writeJsonFile(COMPROBANTES_FILE, comprobantes);
-
-        res.status(201).json({ message: 'Comprobante subido exitosamente.', comprobante: newComprobante });
-    } catch (error) {
-        console.error('Error al subir comprobante:', error);
-        res.status(500).json({ message: 'Error interno del servidor al subir el comprobante.', error: error.message });
-    }
-});
-
-
-// Rutas para horarios de Zulia
-app.get('/api/horarios-zulia', async (req, res) => {
-    try {
-        const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
-        res.json(horarios);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener horarios de Zulia.' });
-    }
-});
-
-app.post('/api/horarios-zulia', async (req, res) => {
-    try {
-        const newHorarios = req.body;
-        await writeJsonFile(HORARIOS_ZULIA_FILE, newHorarios);
-        res.status(201).json({ message: 'Horarios de Zulia actualizados exitosamente.' });
-    } catch (error) {
-        res.status(500).json({ message: 'Error al actualizar horarios de Zulia.' });
-    }
-});
-
-// Rutas para resultados de Zulia
-app.get('/api/resultados-zulia', async (req, res) => {
-    try {
-        const resultados = await readJsonFile(RESULTADOS_ZULIA_FILE);
-        res.json(resultados);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener resultados de Zulia.' });
-    }
-});
-
-app.post('/api/resultados-zulia', async (req, res) => {
-    try {
-        const newResultado = req.body; // Se espera { fecha: 'YYYY-MM-DD', resultados: { '12:00 PM': 'XXX', '04:00 PM': 'YYY', '07:00 PM': 'ZZZ' } }
-        const resultados = await readJsonFile(RESULTADOS_ZULIA_FILE);
-
-        // Buscar si ya existe un resultado para esa fecha y actualizarlo
-        const index = resultados.findIndex(r => r.fecha === newResultado.fecha);
-        if (index > -1) {
-            resultados[index] = newResultado;
-        } else {
-            resultados.push(newResultado);
-        }
-        await writeJsonFile(RESULTADOS_ZULIA_FILE, resultados);
-
-        // Opcional: Actualizar ultima_fecha_resultados_zulia en la configuración
-        let config = await readJsonFile(CONFIG_FILE);
-        config.ultima_fecha_resultados_zulia = newResultado.fecha;
-        await writeJsonFile(CONFIG_FILE, config);
-
-        res.status(201).json({ message: 'Resultado de Zulia actualizado/guardado exitosamente.' });
-    } catch (error) {
-        console.error('Error al actualizar/guardar resultado de Zulia:', error);
-        res.status(500).json({ message: 'Error al actualizar/guardar resultado de Zulia.', error: error.message });
-    }
-});
-
-
-// Función para generar Excel de ventas
-async function generateSalesExcel(salesData, type = 'daily') {
-    const workbook = new ExcelJS.Workbook();
-    const worksheet = workbook.addWorksheet('Ventas');
-
-    // Add headers based on sales data structure
-    worksheet.columns = [
-        { header: 'Fecha/Hora Compra', key: 'fecha_hora_compra', width: 20 },
-        { header: 'Fecha Sorteo', key: 'fecha_sorteo', width: 15 },
-        { header: 'Número Comprobante', key: 'nro_comprobante', width: 20 },
-        { header: 'Número Ticket', key: 'nro_ticket', width: 15 },
-        { header: 'Comprador', key: 'nombre_comprador', width: 30 },
-        { header: 'Teléfono', key: 'telefono_comprador', width: 20 },
-        { header: 'Números Comprados', key: 'numeros_comprados', width: 40 },
-        { header: 'Valor USD', key: 'valor_usd', width: 15 },
-        { header: 'Valor Bs', key: 'valor_bs', width: 15 },
-        { header: 'Método Pago', key: 'metodo_pago', width: 20 },
-        { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
-        { header: 'Comprobante', key: 'comprobante_adjunto', width: 30 },
-    ];
-
-    salesData.forEach(sale => {
-        worksheet.addRow({
-            fecha_hora_compra: moment(sale.timestamp).tz('America/Caracas').format('DD-MM-YYYY HH:mm:ss'),
-            fecha_sorteo: moment(sale.fecha_sorteo).format('DD-MM-YYYY'),
-            nro_comprobante: sale.id_comprobante,
-            nro_ticket: sale.nro_ticket,
-            nombre_comprador: sale.nombre_comprador,
-            telefono_comprador: sale.telefono_comprador,
-            numeros_comprados: sale.numeros_comprados.join(', '),
-            valor_usd: sale.total_usd,
-            valor_bs: sale.total_bs,
-            metodo_pago: sale.metodo_pago,
-            referencia_pago: sale.referencia_pago,
-            comprobante_adjunto: sale.comprobante_adjunto_url || 'N/A' // Si tienes URL de comprobante
-        });
-    });
-
-    return await workbook.xlsx.writeBuffer();
-}
-
-// Ruta para el corte de ventas diario
-app.post('/api/corte-ventas-diario', async (req, res) => {
-    try {
-        const config = await readJsonFile(CONFIG_FILE);
-        const ventas = await readJsonFile(VENTAS_FILE);
-        const numeros = await readJsonFile(NUMEROS_FILE); // Leer números para reiniciar
-
-        const now = moment().tz('America/Caracas');
-        const yesterday = now.clone().subtract(1, 'days').format('YYYY-MM-DD'); // Fecha del día anterior para el corte
-
-        // Filtrar ventas del día actual o las que no tienen fecha_corte
-        const ventasParaCorte = ventas.filter(venta => {
-            const ventaDate = moment(venta.timestamp).tz('America/Caracas').format('YYYY-MM-DD');
-            return ventaDate === yesterday && !venta.fecha_corte; // Asegúrate de que no se haya cortado ya
-        });
-
-        if (ventasParaCorte.length === 0) {
-            return res.status(200).json({ message: 'No hay ventas para el corte de ayer.', ventas_cortadas_count: 0 });
-        }
-
-        // Marcar ventas como cortadas y asignar fecha de corte
-        const ventasActualizadas = ventas.map(venta => {
-            const ventaDate = moment(venta.timestamp).tz('America/Caracas').format('YYYY-MM-DD');
-            if (ventaDate === yesterday && !venta.fecha_corte) {
-                return { ...venta, fecha_corte: now.format('YYYY-MM-DD HH:mm:ss') };
-            }
-            return venta;
-        });
-
-        await writeJsonFile(VENTAS_FILE, ventasActualizadas);
-
-        // Generar Excel del corte
-        const buffer = await generateSalesExcel(ventasParaCorte, 'diario');
-
-        // Enviar correo con el informe
-        const adminEmail = config.admin_email_for_reports;
-        if (adminEmail) {
-            const htmlContent = `
-                <p>Estimado administrador,</p>
-                <p>Se ha realizado el corte de ventas diario para el día **${yesterday}**.</p>
-                <p>Se adjunta el informe de ventas correspondientes a este corte.</p>
-                <p>Total de ventas cortadas: ${ventasParaCorte.length}</p>
-                <p>Gracias por su atención.</p>
-                <p>Saludos cordiales,</p>
-                <p>El equipo de su Sistema de Rifas</p>
-            `;
-            await sendEmail(
-                adminEmail,
-                `Informe de Corte de Ventas Diario - ${yesterday}`,
-                htmlContent,
-                [{ filename: `Corte_Ventas_${yesterday}.xlsx`, content: buffer, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }]
-            );
-            console.log(`Correo de corte de ventas enviado a ${adminEmail}`);
-        } else {
-            console.warn('No se ha configurado un correo de administrador para reportes.');
-        }
-
-        // Reiniciar números disponibles para el próximo sorteo
         const numerosReiniciados = Array.from({ length: 100 }, (_, i) => ({
             numero: i.toString().padStart(2, '0'),
             comprado: false
         }));
         await writeJsonFile(NUMEROS_FILE, numerosReiniciados);
-        console.log('Números disponibles reiniciados para el próximo sorteo.');
-
-        // Actualizar la fecha del próximo sorteo a mañana
-        const nextDrawDate = now.clone().add(1, 'days').format('YYYY-MM-DD');
-        config.fecha_sorteo = nextDrawDate;
-        config.numero_sorteo_correlativo = (config.numero_sorteo_correlativo || 0) + 1; // Incrementa el número de sorteo
-        await writeJsonFile(CONFIG_FILE, config);
-        console.log(`Fecha del próximo sorteo actualizada a: ${nextDrawDate}`);
-
-        res.status(200).json({ message: 'Corte de ventas diario realizado y enviado por correo. Números reiniciados y fecha de sorteo actualizada.', ventas_cortadas_count: ventasParaCorte.length });
-
+        res.json({ message: 'Números reiniciados a disponibles con éxito.' });
     } catch (error) {
-        console.error('Error al realizar el corte de ventas diario:', error);
-        res.status(500).json({ message: 'Error interno del servidor al realizar el corte de ventas diario.', error: error.message });
+        console.error('Error al reiniciar números:', error);
+        res.status(500).json({ message: 'Error interno del servidor al reiniciar números.' });
     }
 });
 
-
-// Ruta para exportar todas las ventas a Excel
-app.get('/api/exportar-ventas-excel', async (req, res) => {
+app.post('/api/numeros/comprar', async (req, res) => {
     try {
-        const ventas = await readJsonFile(VENTAS_FILE);
-        const buffer = await generateSalesExcel(ventas, 'todas');
+        const { numerosSeleccionados, comprador, telefono, cedula, email, metodoPago, referenciaPago, valorTotalUsd, valorTotalBs, comprobanteNombre } = req.body;
 
-        res.setHeader('Content-Disposition', 'attachment; filename="Todas_Ventas_Sistema_Rifas.xlsx"');
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.send(buffer);
+        if (!numerosSeleccionados || numerosSeleccionados.length === 0) {
+            return res.status(400).json({ message: 'No se han seleccionado números para comprar.' });
+        }
 
-    } catch (error) {
-        console.error('Error al exportar ventas a Excel:', error);
-        res.status(500).json({ message: 'Error interno del servidor al exportar ventas a Excel.', error: error.message });
-    }
-});
+        let numeros = await readJsonFile(NUMEROS_FILE, Array.from({ length: 100 }, (_, i) => ({
+            numero: i.toString().padStart(2, '0'),
+            comprado: false
+        })));
+        let ventas = await readJsonFile(VENTAS_FILE, []);
+        let config = await readJsonFile(CONFIG_FILE);
+
+        const numerosNoDisponibles = numerosSeleccionados.filter(n => numeros.find(num => num.numero === n && num.comprado));
+        if (numerosNoDisponibles.length > 0) {
+            return res.status(400).json({ message: `Los números ${numerosNoDisponibles.join(', ')} ya han sido comprados.` });
+        }
+
+        // Incrementar el último número de ticket y el número de sorteo si es necesario
+        config.ultimo_numero_ticket = (config.ultimo_numero_ticket || 0) + 1;
+        const ticketId = config.ultimo_numero_ticket;
+
+        const fechaCompra = moment().tz('America/Caracas').format('YYYY-MM-DD HH:mm:ss');
+        const fechaSorteo = config.fecha_sorteo;
+        const numeroSorteoCorrelativo = config.numero_sorteo_correlativo;
 
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+        const nuevaVenta = {
+            id: Date.now(), // Un ID único para la venta
+            fecha_hora_compra: fechaCompra,
+            fecha_sorteo: fechaSorteo,
+            numero_sorteo_correlativo: numeroSorteoCorrelativo,
+            numero_ticket: ticketId,
+            comprador,
+            telefono,
+            cedula: cedula || null,
+            email: email || null,
+            numeros: numerosSeleccionados,
+            valor_usd: valorTotalUsd,
+            valor_bs: valorTotalBs,
+            metodo_pago: metodoPago,
+            referencia_pago: referenciaPago,
+            comprobante_nombre: comprobanteNombre || null
+        };
 
-app.use((req, res, next) => {
-    res.status(404).json({ message: 'Ruta no encontrada.', path: req.path, method: req.method });
-});
-
-app.use((err, req, res, next) => {
-    console.error('Unhandled Error:', err.stack);
-    res.status(500).json({ message: 'Ocurrió un error inesperado en el servidor.', error: err.message });
-});
-
-app.listen(port, async () => {
-    console.log(`Servidor de backend escuchando en http://localhost:${port}`);
-    await initializeEmailConfig();
-});
-
-// Programar la tarea de corte de ventas para que se ejecute a la medianoche (00:00) cada día
-cron.schedule('0 0 * * *', async () => { // Se ejecuta a las 00:00 (medianoche) todos los días
-    console.log('✨ Ejecutando tarea programada: Corte de ventas automático.');
-    try {
-        const config = await readJsonFile(CONFIG_FILE);
-        const ventas = await readJsonFile(VENTAS_FILE);
-        const numeros = await readJsonFile(NUMEROS_FILE); // Leer números para reiniciar
-
-        const now = moment().tz('America/Caracas');
-        const yesterday = now.clone().subtract(1, 'days').format('YYYY-MM-DD'); // Fecha del día anterior para el corte
-
-        // Filtrar ventas del día anterior que aún no han sido cortadas
-        const ventasParaCorte = ventas.filter(venta => {
-            const ventaDate = moment(venta.timestamp).tz('America/Caracas').format('YYYY-MM-DD');
-            return ventaDate === yesterday && !venta.fecha_corte;
+        // Marcar los números como comprados
+        numerosSeleccionados.forEach(numSel => {
+            const index = numeros.findIndex(n => n.numero === numSel);
+            if (index !== -1) {
+                numeros[index].comprado = true;
+                numeros[index].comprador_info = {
+                    nombre: comprador,
+                    telefono: telefono,
+                    fecha_compra: fechaCompra,
+                    numero_ticket: ticketId
+                };
+            }
         });
 
-        if (ventasParaCorte.length === 0) {
-            console.log('No hay ventas para el corte automático de ayer.');
+        ventas.push(nuevaVenta);
+
+        await writeJsonFile(NUMEROS_FILE, numeros);
+        await writeJsonFile(VENTAS_FILE, ventas);
+        await writeJsonFile(CONFIG_FILE, config); // Guardar la configuración actualizada con el nuevo ticketId
+
+        // Enviar correo de notificación (si la configuración de correo está presente)
+        if (config.mail_config && config.mail_config.user && config.mail_config.pass) {
+            try {
+                const transporter = nodemailer.createTransport({
+                    host: config.mail_config.host,
+                    port: config.mail_config.port,
+                    secure: config.mail_config.secure,
+                    auth: {
+                        user: config.mail_config.user,
+                        pass: config.mail_config.pass,
+                    },
+                });
+
+                const mailOptions = {
+                    from: `"${config.mail_config.senderName}" <${config.mail_config.user}>`,
+                    to: email, // Al cliente
+                    bcc: config.admin_email_for_reports || config.mail_config.user, // Al administrador (si está configurado)
+                    subject: `¡Confirmación de Compra de Rifa #${nuevaVenta.numero_ticket}!`,
+                    html: `
+                        <h2>¡Gracias por tu compra, ${comprador}!</h2>
+                        <p>Tu compra de ticket de rifa ha sido confirmada con los siguientes detalles:</p>
+                        <ul>
+                            <li><strong>ID de Comprobante:</strong> ${nuevaVenta.id}</li>
+                            <li><strong>Fecha y Hora de Compra:</strong> ${nuevaVenta.fecha_hora_compra}</li>
+                            <li><strong>Sorteo:</strong> #${nuevaVenta.numero_sorteo_correlativo} (Fecha: ${nuevaVenta.fecha_sorteo})</li>
+                            <li><strong>Número de Ticket:</strong> ${nuevaVenta.numero_ticket}</li>
+                            <li><strong>Números Adquiridos:</strong> ${numerosSeleccionados.join(', ')}</li>
+                            <li><strong>Total Pagado:</strong> $${nuevaVenta.valor_usd.toFixed(2)} (${nuevaVenta.valor_bs.toFixed(2)} Bs)</li>
+                            <li><strong>Método de Pago:</strong> ${nuevaVenta.metodo_pago}</li>
+                            <li><strong>Referencia de Pago:</strong> ${nuevaVenta.referencia_pago || 'N/A'}</li>
+                        </ul>
+                        <p>¡Mucha suerte en el sorteo!</p>
+                        <p>Saludos cordiales,<br>El equipo de Rifas y Loterías</p>
+                    `,
+                };
+
+                await transporter.sendMail(mailOptions);
+                console.log(`Correo de confirmación enviado a ${email}`);
+            } catch (mailError) {
+                console.error('Error al enviar correo de confirmación:', mailError);
+                // No bloquear la respuesta exitosa por un error de correo
+            }
+        }
+
+
+        res.status(201).json({ message: 'Compra realizada con éxito', venta: nuevaVenta });
+    } catch (error) {
+        console.error('Error al procesar compra:', error);
+        res.status(500).json({ message: 'Error interno del servidor al procesar la compra.' });
+    }
+});
+
+
+// Ruta para subir comprobantes
+app.post('/api/upload-comprobante', async (req, res) => {
+    try {
+        if (!req.files || Object.keys(req.files).length === 0) {
+            return res.status(400).json({ message: 'No se subió ningún archivo.' });
+        }
+
+        let comprobanteFile = req.files.comprobante;
+        const uploadPath = path.join(COMPROBANTES_DIR, comprobanteFile.name);
+
+        await comprobanteFile.mv(uploadPath);
+        res.json({ message: 'Archivo subido con éxito', fileName: comprobanteFile.name });
+    } catch (error) {
+        console.error('Error al subir el archivo:', error);
+        res.status(500).json({ message: 'Error interno del servidor al subir el archivo.' });
+    }
+});
+
+// Servir comprobantes estáticamente (IMPORTANTE para que el frontend pueda verlos)
+app.use('/comprobantes', express.static(COMPROBANTES_DIR));
+
+
+// Rutas para ventas
+app.get('/api/ventas', async (req, res) => {
+    try {
+        const ventas = await readJsonFile(VENTAS_FILE, []);
+        res.json(ventas);
+    } catch (error) {
+        console.error('Error al leer ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener ventas.' });
+    }
+});
+
+app.post('/api/ventas/corte', async (req, res) => {
+    try {
+        const ventas = await readJsonFile(VENTAS_FILE, []);
+        if (ventas.length === 0) {
+            return res.status(200).json({ message: 'No hay ventas para realizar el corte.' });
+        }
+
+        // Generar Excel y guardar/enviar
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Corte de Ventas');
+
+        // Definir columnas con cabeceras amigables
+        worksheet.columns = [
+            { header: 'Fecha/Hora Compra', key: 'fecha_hora_compra', width: 20 },
+            { header: 'Fecha Sorteo', key: 'fecha_sorteo', width: 15 },
+            { header: 'Nro. Sorteo', key: 'numero_sorteo_correlativo', width: 12 },
+            { header: 'Nro. Ticket', key: 'numero_ticket', width: 12 },
+            { header: 'Comprador', key: 'comprador', width: 25 },
+            { header: 'Teléfono', key: 'telefono', width: 15 },
+            { header: 'Cédula', key: 'cedula', width: 15 },
+            { header: 'Email', key: 'email', width: 30 },
+            { header: 'Números Comprados', key: 'numeros', width: 25 },
+            { header: 'Valor USD', key: 'valor_usd', width: 10 },
+            { header: 'Valor Bs', key: 'valor_bs', width: 15 },
+            { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
+            { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
+            { header: 'Comprobante', key: 'comprobante_nombre', width: 30 }
+        ];
+
+        ventas.forEach(venta => {
+            worksheet.addRow({
+                ...venta,
+                numeros: venta.numeros.join(', '), // Unir array de números para el Excel
+            });
+        });
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const timestamp = moment().tz('America/Caracas').format('YYYYMMDD_HHmmss');
+        const filename = `Corte_de_Ventas_${timestamp}.xlsx`;
+        const filepath = path.join(COMPROBANTES_DIR, filename); // Guardar en la carpeta de comprobantes
+
+        await fs.writeFile(filepath, buffer);
+        console.log(`Corte de ventas guardado en: ${filepath}`);
+
+        // Enviar por correo si está configurado
+        const config = await readJsonFile(CONFIG_FILE);
+        const adminEmail = config.admin_email_for_reports;
+        if (adminEmail && config.mail_config && config.mail_config.user && config.mail_config.pass) {
+            try {
+                const transporter = nodemailer.createTransport({
+                    host: config.mail_config.host,
+                    port: config.mail_config.port,
+                    secure: config.mail_config.secure,
+                    auth: {
+                        user: config.mail_config.user,
+                        pass: config.mail_config.pass,
+                    },
+                });
+
+                const mailOptions = {
+                    from: `"${config.mail_config.senderName}" <${config.mail_config.user}>`,
+                    to: adminEmail,
+                    subject: `Reporte de Corte de Ventas - ${moment().tz('America/Caracas').format('YYYY-MM-DD HH:mm')}`,
+                    html: `
+                        <p>Adjunto encontrarás el reporte de corte de ventas hasta la fecha y hora actual.</p>
+                        <p>Total de ventas en este corte: <strong>${ventas.length}</strong></p>
+                        <p>Este reporte incluye todas las ventas desde el último corte o el inicio del sistema.</p>
+                        <p>Saludos cordiales,<br>Sistema de Rifas</p>
+                    `,
+                    attachments: [
+                        {
+                            filename: filename,
+                            content: buffer,
+                            contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                        }
+                    ]
+                };
+                await transporter.sendMail(mailOptions);
+                console.log(`Correo de corte de ventas enviado a ${adminEmail}`);
+            } catch (mailError) {
+                console.error('Error al enviar correo de corte de ventas:', mailError);
+                // No detener el proceso de corte por un error de correo
+            }
+        }
+
+
+        // Reiniciar ventas.json a vacío
+        await writeJsonFile(VENTAS_FILE, []);
+
+        // Reiniciar números disponibles
+        const numerosReiniciados = Array.from({ length: 100 }, (_, i) => ({
+            numero: i.toString().padStart(2, '0'),
+            comprado: false
+        }));
+        await writeJsonFile(NUMEROS_FILE, numerosReiniciados);
+
+        // Incrementar el número de sorteo correlativo
+        let configActualizada = await readJsonFile(CONFIG_FILE);
+        configActualizada.numero_sorteo_correlativo = (configActualizada.numero_sorteo_correlativo || 0) + 1;
+        // Opcional: Si quieres que el corte también avance la fecha del sorteo a mañana
+        // configActualizada.fecha_sorteo = moment().tz('America/Caracas').add(1, 'day').format('YYYY-MM-DD');
+        await writeJsonFile(CONFIG_FILE, configActualizada);
+
+
+        res.json({ message: 'Corte de ventas realizado con éxito. Ventas y números reiniciados.' });
+    } catch (error) {
+        console.error('Error al realizar corte de ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al realizar corte de ventas.' });
+    }
+});
+
+
+app.get('/api/ventas/exportar-excel', async (req, res) => {
+    try {
+        const ventas = await readJsonFile(VENTAS_FILE, []);
+        if (ventas.length === 0) {
+            return res.status(404).json({ message: 'No hay ventas para exportar.' });
+        }
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Todas las Ventas');
+
+        worksheet.columns = [
+            { header: 'Fecha/Hora Compra', key: 'fecha_hora_compra', width: 20 },
+            { header: 'Fecha Sorteo', key: 'fecha_sorteo', width: 15 },
+            { header: 'Nro. Sorteo', key: 'numero_sorteo_correlativo', width: 12 },
+            { header: 'Nro. Ticket', key: 'numero_ticket', width: 12 },
+            { header: 'Comprador', key: 'comprador', width: 25 },
+            { header: 'Teléfono', key: 'telefono', width: 15 },
+            { header: 'Cédula', key: 'cedula', width: 15 },
+            { header: 'Email', key: 'email', width: 30 },
+            { header: 'Números Comprados', key: 'numeros', width: 25 },
+            { header: 'Valor USD', key: 'valor_usd', width: 10 },
+            { header: 'Valor Bs', key: 'valor_bs', width: 15 },
+            { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
+            { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
+            { header: 'Comprobante', key: 'comprobante_nombre', width: 30 }
+        ];
+
+        ventas.forEach(venta => {
+            worksheet.addRow({
+                ...venta,
+                numeros: venta.numeros.join(', '),
+            });
+        });
+
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename=' + 'Todas_Ventas_Sistema_Rifas.xlsx');
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (error) {
+        console.error('Error al exportar todas las ventas a Excel:', error);
+        res.status(500).json({ message: 'Error interno del servidor al exportar ventas.' });
+    }
+});
+
+
+// Rutas para horarios del Zulia
+app.get('/api/horarios', async (req, res) => {
+    try {
+        const horarios = await readJsonFile(HORARIOS_ZULIA_FILE, { horarios_zulia: [] });
+        res.json(horarios.horarios_zulia);
+    } catch (error) {
+        console.error('Error al leer horarios:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
+    }
+});
+
+app.post('/api/horarios', async (req, res) => {
+    try {
+        const { nuevoHorario } = req.body;
+        if (!nuevoHorario) {
+            return res.status(400).json({ message: 'El horario no puede estar vacío.' });
+        }
+        let horarios = await readJsonFile(HORARIOS_ZULIA_FILE, { horarios_zulia: [] });
+        if (!horarios.horarios_zulia.includes(nuevoHorario)) {
+            horarios.horarios_zulia.push(nuevoHorario);
+            await writeJsonFile(HORARIOS_ZULIA_FILE, horarios);
+            return res.status(201).json({ message: 'Horario añadido con éxito.', horarios: horarios.horarios_zulia });
+        }
+        res.status(409).json({ message: 'El horario ya existe.' });
+    } catch (error) {
+        console.error('Error al añadir horario:', error);
+        res.status(500).json({ message: 'Error interno del servidor al añadir horario.' });
+    }
+});
+
+app.delete('/api/horarios/:horario', async (req, res) => {
+    try {
+        const horarioAEliminar = req.params.horario;
+        let horarios = await readJsonFile(HORARIOS_ZULIA_FILE, { horarios_zulia: [] });
+        const initialLength = horarios.horarios_zulia.length;
+        horarios.horarios_zulia = horarios.horarios_zulia.filter(h => h !== horarioAEliminar);
+        if (horarios.horarios_zulia.length < initialLength) {
+            await writeJsonFile(HORARIOS_ZULIA_FILE, horarios);
+            return res.json({ message: 'Horario eliminado con éxito.', horarios: horarios.horarios_zulia });
+        }
+        res.status(404).json({ message: 'Horario no encontrado.' });
+    } catch (error) {
+        console.error('Error al eliminar horario:', error);
+        res.status(500).json({ message: 'Error interno del servidor al eliminar horario.' });
+    }
+});
+
+
+// Rutas para resultados del Zulia
+app.get('/api/resultados_zulia', async (req, res) => {
+    try {
+        const { fecha } = req.query;
+        let resultados = await readJsonFile(RESULTADOS_ZULIA_FILE, []);
+        if (fecha) {
+            resultados = resultados.filter(r => r.fecha === fecha);
+        }
+        res.json(resultados);
+    } catch (error) {
+        console.error('Error al leer resultados del Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener resultados.' });
+    }
+});
+
+app.post('/api/resultados_zulia', async (req, res) => {
+    try {
+        const { fecha, horario, resultado } = req.body;
+        if (!fecha || !horario || !resultado) {
+            return res.status(400).json({ message: 'Fecha, horario y resultado son obligatorios.' });
+        }
+        let resultados = await readJsonFile(RESULTADOS_ZULIA_FILE, []);
+
+        // Validar si ya existe un resultado para la misma fecha y horario
+        const existeResultado = resultados.some(r => r.fecha === fecha && r.horario === horario);
+        if (existeResultado) {
+            return res.status(409).json({ message: 'Ya existe un resultado para esta fecha y horario.' });
+        }
+
+        resultados.push({ fecha, horario, resultado });
+        await writeJsonFile(RESULTADOS_ZULIA_FILE, resultados);
+
+        // Actualizar la última fecha de resultados en la configuración
+        let config = await readJsonFile(CONFIG_FILE);
+        config.ultima_fecha_resultados_zulia = fecha;
+        await writeJsonFile(CONFIG_FILE, config);
+
+        res.status(201).json({ message: 'Resultado del Zulia guardado con éxito.' });
+    } catch (error) {
+        console.error('Error al guardar resultado del Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al guardar resultado.' });
+    }
+});
+
+app.delete('/api/resultados_zulia', async (req, res) => {
+    try {
+        const { fecha, horario } = req.body;
+        if (!fecha || !horario) {
+            return res.status(400).json({ message: 'Fecha y horario son obligatorios para eliminar.' });
+        }
+        let resultados = await readJsonFile(RESULTADOS_ZULIA_FILE, []);
+        const initialLength = resultados.length;
+        resultados = resultados.filter(r => !(r.fecha === fecha && r.horario === horario));
+        if (resultados.length < initialLength) {
+            await writeJsonFile(RESULTADOS_ZULIA_FILE, resultados);
+            return res.json({ message: 'Resultado del Zulia eliminado con éxito.' });
+        }
+        res.status(404).json({ message: 'Resultado no encontrado.' });
+    } catch (error) {
+        console.error('Error al eliminar resultado del Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al eliminar resultado.' });
+    }
+});
+
+
+// Tarea programada para realizar el corte de ventas automáticamente
+// Se ejecuta diariamente a la 01:00 AM (hora de Caracas)
+cron.schedule('0 1 * * *', async () => {
+    console.log('Ejecutando tarea programada de corte de ventas...');
+    try {
+        const now = moment().tz('America/Caracas');
+        const yesterday = now.clone().subtract(1, 'days').format('YYYYMMDD');
+
+        const ventas = await readJsonFile(VENTAS_FILE, []);
+        if (ventas.length === 0) {
+            console.log('No hay ventas para el corte automático.');
             return;
         }
 
-        // Marcar ventas como cortadas y asignar fecha de corte
-        const ventasActualizadas = ventas.map(venta => {
-            const ventaDate = moment(venta.timestamp).tz('America/Caracas').format('YYYY-MM-DD');
-            if (ventaDate === yesterday && !venta.fecha_corte) {
-                return { ...venta, fecha_corte: now.format('YYYY-MM-DD HH:mm:ss') };
-            }
-            return venta;
+        // Generar y guardar el Excel del corte automático
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet(`Corte de Ventas ${yesterday}`);
+
+        worksheet.columns = [
+            { header: 'Fecha/Hora Compra', key: 'fecha_hora_compra', width: 20 },
+            { header: 'Fecha Sorteo', key: 'fecha_sorteo', width: 15 },
+            { header: 'Nro. Sorteo', key: 'numero_sorteo_correlativo', width: 12 },
+            { header: 'Nro. Ticket', key: 'numero_ticket', width: 12 },
+            { header: 'Comprador', key: 'comprador', width: 25 },
+            { header: 'Teléfono', key: 'telefono', width: 15 },
+            { header: 'Cédula', key: 'cedula', width: 15 },
+            { header: 'Email', key: 'email', width: 30 },
+            { header: 'Números Comprados', key: 'numeros', width: 25 },
+            { header: 'Valor USD', key: 'valor_usd', width: 10 },
+            { header: 'Valor Bs', key: 'valor_bs', width: 15 },
+            { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
+            { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
+            { header: 'Comprobante', key: 'comprobante_nombre', width: 30 }
+        ];
+
+        ventas.forEach(venta => {
+            worksheet.addRow({
+                ...venta,
+                numeros: venta.numeros.join(', '),
+            });
         });
-        await writeJsonFile(VENTAS_FILE, ventasActualizadas);
 
-        // Generar Excel del corte
-        const buffer = await generateSalesExcel(ventasParaCorte, 'diario');
+        const buffer = await workbook.xlsx.writeBuffer();
+        const filepath = path.join(COMPROBANTES_DIR, `Corte_Ventas_Automatico_${yesterday}.xlsx`);
+        await fs.writeFile(filepath, buffer);
+        console.log(`Corte de ventas automático guardado en: ${filepath}`);
 
-        // Enviar correo con el informe
+        // Reiniciar ventas.json a vacío
+        await writeJsonFile(VENTAS_FILE, []);
+        console.log('Archivo de ventas reiniciado.');
+
+        // Enviar por correo el reporte automático
+        const config = await readJsonFile(CONFIG_FILE);
         const adminEmail = config.admin_email_for_reports;
-        if (adminEmail) {
-            const htmlContent = `
-                <p>Estimado administrador,</p>
-                <p>Se ha realizado el corte de ventas automático para el día **${yesterday}**.</p>
-                <p>Se adjunta el informe de ventas correspondientes a este corte.</p>
-                <p>Total de ventas cortadas: ${ventasParaCorte.length}</p>
-                <p>Gracias por su atención.</p>
-                <p>Saludos cordiales,</p>
-                <p>El equipo de su Sistema de Rifas</p>
-            `;
-            await sendEmail(
-                adminEmail,
-                `Informe de Corte de Ventas Automático - ${yesterday}`,
-                htmlContent,
-                [{ filename: `Corte_Ventas_${yesterday}.xlsx`, content: buffer, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }]
+        if (adminEmail && config.mail_config && config.mail_config.user && config.mail_config.pass) {
+            const transporter = nodemailer.createTransport({
+                host: config.mail_config.host,
+                port: config.mail_config.port,
+                secure: config.mail_config.secure,
+                auth: {
+                    user: config.mail_config.user,
+                    pass: config.mail_config.pass,
+                },
+            });
+
+            await transporter.sendMail({
+                from: `"${config.mail_config.senderName}" <${config.mail_config.user}>`,
+                to: adminEmail,
+                subject: `Corte de Ventas Automático - ${now.format('YYYY-MM-DD')}`,
+                html: `
+                    <p>Adjunto encontrarás el reporte de corte de ventas automático del día ${now.format('YYYY-MM-DD')}.</p>
+                    <p>Total de ventas en este corte: <strong>${ventas.length}</strong></p>
+                    <p>Saludos cordiales,<br>Sistema de Rifas</p>
+                `,
+                attachments:
+                    [{ filename: `Corte_Ventas_${yesterday}.xlsx`, content: buffer, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }]
             );
             console.log(`Correo de corte de ventas automático enviado a ${adminEmail}`);
         } else {
@@ -593,5 +702,13 @@ cron.schedule('0 0 * * *', async () => { // Se ejecuta a las 00:00 (medianoche) 
         console.error('Error en la tarea programada de corte de ventas:', error);
     }
 }, {
-    timezone: "America/Caracas" // Asegura que se ejecute en la zona horaria de Venezuela
+    timezone: "America/Caracas"
+});
+
+
+// Inicialización del servidor
+ensureComprobantesDir().then(() => {
+    app.listen(port, () => {
+        console.log(`Servidor backend escuchando en http://localhost:${port}`);
+    });
 });
