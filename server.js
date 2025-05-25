@@ -48,7 +48,8 @@ async function readJsonFile(filePath) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             console.warn(`Archivo no encontrado en ${filePath}. Creando archivo vacío.`);
-            if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json') || filePath.includes('horarios_zulia.json')) { // MODIFICADO AQUI
+            // MODIFICADO PREVIAMENTE: Ahora incluye horarios_zulia.json
+            if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json') || filePath.includes('horarios_zulia.json')) {
                 return []; // Array vacío para ventas, números, cortes y horarios_zulia
             }
             return {}; // Objeto vacío por defecto para configuración
@@ -192,7 +193,7 @@ app.put('/api/admin/configuracion', async (req, res) => {
 app.get('/api/horarios-zulia', async (req, res) => {
     try {
         const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
-        res.json(horarios);
+        res.json({ horarios_zulia: horarios }); // Envía el array dentro de un objeto
     } catch (error) {
         console.error('Error al obtener horarios de Zulia:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
@@ -203,7 +204,7 @@ app.get('/api/horarios-zulia', async (req, res) => {
 app.get('/api/admin/horarios-zulia', async (req, res) => {
     try {
         const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
-        res.json(horarios);
+        res.json({ horarios_zulia: horarios }); // Envía el array dentro de un objeto
     } catch (error) {
         console.error('Error al obtener horarios de Zulia:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
@@ -213,9 +214,13 @@ app.get('/api/admin/horarios-zulia', async (req, res) => {
 // Actualizar horarios de Zulia (ADMIN)
 app.put('/api/admin/horarios-zulia', async (req, res) => {
     try {
-        const newHorarios = req.body;
-        await writeJsonFile(HORARIOS_ZULIA_FILE, newHorarios);
-        res.json({ message: 'Horarios de Zulia actualizados exitosamente', horarios: newHorarios });
+        // Espera un objeto con la clave 'horarios_zulia'
+        const newHorariosObject = req.body;
+        if (!newHorariosObject || !Array.isArray(newHorariosObject.horarios_zulia)) {
+            return res.status(400).json({ message: 'Datos inválidos: se espera un objeto con la propiedad "horarios_zulia" que sea un array.' });
+        }
+        await writeJsonFile(HORARIOS_ZULIA_FILE, newHorariosObject.horarios_zulia); // Guarda solo el array
+        res.json({ message: 'Horarios de Zulia actualizados exitosamente', horarios_zulia: newHorariosObject.horarios_zulia });
     } catch (error) {
         console.error('Error al actualizar horarios de Zulia:', error);
         res.status(500).json({ message: 'Error interno del servidor al actualizar horarios.' });
@@ -340,7 +345,7 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
         column.eachCell({ includeEmpty: true }, cell => {
             const columnLength = cell.value ? cell.value.toString().length : 10;
             if (columnLength > maxLength) {
-                maxLength = column++;
+                maxLength = columnLength;
             }
         });
         column.width = maxLength < 10 ? 10 : maxLength + 2;
