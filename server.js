@@ -7,23 +7,21 @@ const path = require('path');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
-const dotenv = require('dotenv'); // Todavía lo mantenemos por si lo usas para otras cosas
+const dotenv = require('dotenv');
 const moment = require('moment-timezone');
 const ExcelJS = require('exceljs');
 
-dotenv.config(); // Carga las variables de entorno desde .env si estás en desarrollo
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Definición de API_BASE_URL para los correos (puedes configurarlo como variable de entorno en Render)
 const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
 
-// --- Configuración de CORS ---
 const corsOptions = {
     origin: [
-        'https://paneladmin01.netlify.app', // Tu panel de administración
-        'https://tuoportunidadeshoy.netlify.app', // Tu panel de cliente
+        'https://paneladmin01.netlify.app',
+        'https://tuoportunidadeshoy.netlify.app',
         'http://localhost:8080',
         'http://127.0.0.1:5500',
         'http://localhost:3000',
@@ -38,12 +36,11 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(fileUpload());
 
-// --- Rutas y lógica para archivos JSON (configuración, horarios, ventas) ---
 const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
+const NUMEROS_FILE = path.join(__dirname, 'numeros.json'); // Asegurarse de que esta constante esté definida
 
-// Función auxiliar para leer JSON
 async function readJsonFile(filePath) {
     try {
         const data = await fs.readFile(filePath, 'utf8');
@@ -51,18 +48,16 @@ async function readJsonFile(filePath) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             console.warn(`Archivo no encontrado en ${filePath}. Creando archivo vacío.`);
-            // IMPORTANTE: Devolver [] para ventas y {} para configuración/horarios si son esperados como tal.
             if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json')) {
-                return [];
+                return []; // Array vacío para ventas y números
             }
-            return {}; // Retorna un objeto vacío por defecto si el archivo no existe
+            return {}; // Objeto vacío por defecto para configuración y horarios
         }
         console.error(`Error al leer el archivo ${filePath}:`, error);
         throw error;
     }
 }
 
-// Función auxiliar para escribir JSON
 async function writeJsonFile(filePath, data) {
     try {
         await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
@@ -72,12 +67,9 @@ async function writeJsonFile(filePath, data) {
     }
 }
 
-// --- Configuración de Nodemailer (Transporter) ---
-// Ahora lee directamente del configuracion.json
-let transporter; // Declarar transporter aquí para que sea accesible globalmente o después de la carga
-let ADMIN_EMAIL_FOR_REPORTS; // Declarar aquí
+let transporter;
+let ADMIN_EMAIL_FOR_REPORTS;
 
-// Función para inicializar el transportador y las variables de correo desde configuracion.json
 async function initializeEmailConfig() {
     try {
         const config = await readJsonFile(CONFIG_FILE);
@@ -103,28 +95,24 @@ async function initializeEmailConfig() {
 
     } catch (error) {
         console.error('❌ Error al cargar la configuración de correo desde configuracion.json:', error);
-        // Establecer valores por defecto o log de error si la configuración no se puede cargar
-        transporter = null; // O un transporter dummy si no hay config
+        transporter = null;
         ADMIN_EMAIL_FOR_REPORTS = 'error@example.com';
     }
 }
 
-
-// Función para enviar correo electrónico con adjunto
 async function sendEmailWithAttachment(to, subject, text, html, attachment) {
     if (!transporter) {
         console.error('❌ No se puede enviar correo: Transporter de Nodemailer no inicializado.');
         return false;
     }
     try {
-        // Asegúrate de que el senderName también venga de mailConfig si es lo que quieres
         const config = await readJsonFile(CONFIG_FILE);
         const mailConfig = config.mail_config;
 
         const mailOptions = {
             from: {
                 name: mailConfig.senderName || 'Sistema de Rifas',
-                address: mailConfig.user // El remitente es tu propio correo
+                address: mailConfig.user
             },
             to: to,
             subject: subject,
@@ -147,9 +135,20 @@ async function sendEmailWithAttachment(to, subject, text, html, attachment) {
     }
 }
 
-// --- Rutas de API para Configuración General ---
+// --- Rutas de API para Configuración General (ADMIN y CLIENTE) ---
 
-// Obtener configuración general (Ahora con /admin para coincidir con frontend)
+// Obtener configuración general (CLIENTE - sin /admin)
+app.get('/api/configuracion', async (req, res) => {
+    try {
+        const config = await readJsonFile(CONFIG_FILE);
+        res.json(config);
+    } catch (error) {
+        console.error('Error al obtener configuración:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener configuración.' });
+    }
+});
+
+// Obtener configuración general (ADMIN - con /admin)
 app.get('/api/admin/configuracion', async (req, res) => {
     try {
         const config = await readJsonFile(CONFIG_FILE);
@@ -165,7 +164,6 @@ app.put('/api/admin/configuracion', async (req, res) => {
     try {
         const newConfig = req.body;
         const currentConfig = await readJsonFile(CONFIG_FILE);
-        // Asegúrate de solo actualizar campos permitidos
         const updatedConfig = {
             ...currentConfig,
             tasa_dolar: newConfig.tasa_dolar !== undefined ? parseFloat(newConfig.tasa_dolar) : currentConfig.tasa_dolar,
@@ -176,13 +174,11 @@ app.put('/api/admin/configuracion', async (req, res) => {
             ultimo_numero_ticket: newConfig.ultimo_numero_ticket !== undefined ? parseInt(newConfig.ultimo_numero_ticket) : currentConfig.ultimo_numero_ticket,
             ultima_fecha_resultados_zulia: newConfig.ultima_fecha_resultados_zulia || currentConfig.ultima_fecha_resultados_zulia,
             admin_whatsapp_numbers: newConfig.admin_whatsapp_numbers || currentConfig.admin_whatsapp_numbers,
-            // Permite actualizar la configuración del correo si está presente en el body, pero ten CUIDADO con esto en un repo público
             mail_config: newConfig.mail_config || currentConfig.mail_config,
             admin_email_for_reports: newConfig.admin_email_for_reports || currentConfig.admin_email_for_reports
         };
         await writeJsonFile(CONFIG_FILE, updatedConfig);
-        // Después de actualizar la configuración, reinicializa la configuración de correo
-        await initializeEmailConfig();
+        await initializeEmailConfig(); // Re-inicializar la configuración de correo
         res.json({ message: 'Configuración actualizada exitosamente', config: updatedConfig });
     } catch (error) {
         console.error('Error al actualizar configuración:', error);
@@ -190,9 +186,20 @@ app.put('/api/admin/configuracion', async (req, res) => {
     }
 });
 
-// --- Rutas de API para Horarios Zulia ---
+// --- Rutas de API para Horarios Zulia (ADMIN y CLIENTE) ---
 
-// Obtener horarios de Zulia (Ahora con /admin para coincidir con frontend)
+// Obtener horarios de Zulia (CLIENTE - sin /admin)
+app.get('/api/horarios-zulia', async (req, res) => {
+    try {
+        const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
+        res.json(horarios);
+    } catch (error) {
+        console.error('Error al obtener horarios de Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
+    }
+});
+
+// Obtener horarios de Zulia (ADMIN - con /admin)
 app.get('/api/admin/horarios-zulia', async (req, res) => {
     try {
         const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
@@ -220,27 +227,24 @@ app.put('/api/admin/horarios-zulia', async (req, res) => {
 // Guardar una nueva venta
 app.post('/api/ventas', async (req, res) => {
     try {
-        let nuevaVenta = req.body; // Usa let para poder reasignar
+        let nuevaVenta = req.body;
         let ventas = await readJsonFile(VENTAS_FILE);
         if (!Array.isArray(ventas)) {
-            ventas = []; // Inicializar como array si no lo es
+            ventas = [];
         }
 
-        // Leer la configuración actual para el último número de ticket
         const config = await readJsonFile(CONFIG_FILE);
         let ultimoNumeroTicket = config.ultimo_numero_ticket || 0;
 
-        // Asignar y actualizar el número de ticket correlativo
         const currentMoment = moment().tz("America/Caracas");
-        nuevaVenta.id = Date.now().toString(); // ID único basado en timestamp
+        nuevaVenta.id = Date.now().toString();
         nuevaVenta.fecha = currentMoment.format('YYYY-MM-DD');
         nuevaVenta.hora = currentMoment.format('HH:mm:ss');
-        nuevaVenta.numero_ticket = ++ultimoNumeroTicket; // Incrementar y asignar el nuevo número de ticket
+        nuevaVenta.numero_ticket = ++ultimoNumeroTicket;
 
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
 
-        // Actualizar el último número de ticket en la configuración
         config.ultimo_numero_ticket = ultimoNumeroTicket;
         await writeJsonFile(CONFIG_FILE, config);
 
@@ -262,7 +266,19 @@ app.get('/api/admin/ventas', async (req, res) => {
     }
 });
 
-// Función para obtener las ventas de hoy (desde la hora del corte anterior si aplica)
+// --- Rutas de API para Números (CLIENTE) ---
+// Obtener todos los números disponibles (asumiendo que numeros.json contiene los números)
+app.get('/api/numeros', async (req, res) => {
+    try {
+        const numeros = await readJsonFile(NUMEROS_FILE);
+        res.json(numeros);
+    } catch (error) {
+        console.error('Error al obtener números:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener números.' });
+    }
+});
+
+
 async function getSalesForCurrentCut(currentTime = moment().tz("America/Caracas")) {
     const ventas = await readJsonFile(VENTAS_FILE);
     const config = await readJsonFile(CONFIG_FILE);
@@ -277,14 +293,12 @@ async function getSalesForCurrentCut(currentTime = moment().tz("America/Caracas"
     });
 }
 
-// Función para obtener las ventas de todo el día para el reporte
 async function getDailySales(date = moment().tz("America/Caracas")) {
     const ventas = await readJsonFile(VENTAS_FILE);
     const formattedDate = date.format('YYYY-MM-DD');
     return ventas.filter(venta => venta.fecha === formattedDate);
 }
 
-// Función para generar el reporte de ventas en Excel
 async function generateSalesExcel(salesData, cutType = 'corte') {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Reporte de Ventas');
@@ -308,7 +322,6 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
             venta.fecha,
             venta.hora,
             venta.numero_ticket,
-            venta.nombre_cliente,
             venta.monto_total
         ]);
     });
@@ -336,7 +349,6 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
 }
 
 
-// Función principal para ejecutar el corte de ventas
 async function executeSalesCut(isAutomatic = false) {
     const currentTime = moment().tz("America/Caracas");
     console.log(`Iniciando corte de ventas (${isAutomatic ? 'automático' : 'manual'}) a las ${currentTime.format('YYYY-MM-DD HH:mm:ss')}`);
@@ -398,7 +410,6 @@ async function executeSalesCut(isAutomatic = false) {
 }
 
 
-// Ruta para ejecutar el corte de ventas (solo admin)
 app.post('/api/admin/execute-sales-cut', async (req, res) => {
     try {
         const { auto } = req.body;
@@ -411,7 +422,6 @@ app.post('/api/admin/execute-sales-cut', async (req, res) => {
 });
 
 
-// Ruta para exportar las ventas a Excel (ADMIN)
 app.get('/api/admin/export-sales-excel', async (req, res) => {
     try {
         const ventas = await readJsonFile(VENTAS_FILE);
@@ -428,27 +438,22 @@ app.get('/api/admin/export-sales-excel', async (req, res) => {
 });
 
 
-// Middleware para servir archivos estáticos (¡Importante para los comprobantes!)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Middleware para manejar rutas no encontradas (404)
 app.use((req, res, next) => {
     res.status(404).json({ message: 'Ruta no encontrada.', path: req.path, method: req.method });
 });
 
-// Manejador de errores general
 app.use((err, req, res, next) => {
     console.error('Unhandled Error:', err.stack);
     res.status(500).json({ message: 'Ocurrió un error inesperado en el servidor.', error: err.message });
 });
 
-// Iniciar el servidor
-app.listen(port, async () => { // Usar async aquí para initializeEmailConfig
+app.listen(port, async () => {
     console.log(`Servidor de backend escuchando en http://localhost:${port}`);
-    await initializeEmailConfig(); // Carga la configuración de correo al iniciar
+    await initializeEmailConfig();
 });
 
-// --- Tareas Programadas (Cron Jobs) ---
 cron.schedule('0 0 * * *', async () => {
     console.log('✨ Ejecutando tarea programada: Corte de ventas automático.');
     try {
