@@ -7,9 +7,9 @@ const path = require('path');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
-const dotenv = require('dotenv');
-const moment = require('moment-timezone'); // Asegúrate de que esta línea esté presente
-const ExcelJS = require('exceljs'); // Para exportar a Excel
+const dotenv = require('dotenv'); // Todavía lo mantenemos por si lo usas para otras cosas
+const moment = require('moment-timezone');
+const ExcelJS = require('exceljs');
 
 dotenv.config(); // Carga las variables de entorno desde .env si estás en desarrollo
 
@@ -51,7 +51,11 @@ async function readJsonFile(filePath) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             console.warn(`Archivo no encontrado en ${filePath}. Creando archivo vacío.`);
-            return {}; // Retorna un objeto vacío si el archivo no existe
+            // IMPORTANTE: Devolver [] para ventas y {} para configuración/horarios si son esperados como tal.
+            if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json')) {
+                return [];
+            }
+            return {}; // Retorna un objeto vacío por defecto si el archivo no existe
         }
         console.error(`Error al leer el archivo ${filePath}:`, error);
         throw error;
@@ -69,28 +73,58 @@ async function writeJsonFile(filePath, data) {
 }
 
 // --- Configuración de Nodemailer (Transporter) ---
-// IMPORTANT: Esto se lee de process.env. ¡Asegúrate de que tus variables de entorno en Render estén configuradas!
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST,
-    port: parseInt(process.env.EMAIL_PORT, 10), // Asegúrate de que el puerto sea un número
-    secure: process.env.EMAIL_SECURE === 'true', // true para puerto 465 (SSL), false para otros (como 587 con TLS)
-    auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-    },
-});
+// Ahora lee directamente del configuracion.json
+let transporter; // Declarar transporter aquí para que sea accesible globalmente o después de la carga
+let ADMIN_EMAIL_FOR_REPORTS; // Declarar aquí
 
-// Correo del administrador para los reportes (también desde variables de entorno)
-const ADMIN_EMAIL_FOR_REPORTS = process.env.ADMIN_EMAIL_FOR_REPORTS;
+// Función para inicializar el transportador y las variables de correo desde configuracion.json
+async function initializeEmailConfig() {
+    try {
+        const config = await readJsonFile(CONFIG_FILE);
+        const mailConfig = config.mail_config;
+        ADMIN_EMAIL_FOR_REPORTS = config.admin_email_for_reports;
+
+        transporter = nodemailer.createTransport({
+            host: mailConfig.host,
+            port: mailConfig.port,
+            secure: mailConfig.secure,
+            auth: {
+                user: mailConfig.user,
+                pass: mailConfig.pass,
+            },
+        });
+        console.log('✅ Configuración de correo cargada desde configuracion.json');
+        console.log('EMAIL_HOST:', mailConfig.host ? '*****' : 'NO CONFIGURADO');
+        console.log('EMAIL_PORT:', mailConfig.port ? '*****' : 'NO CONFIGURADO');
+        console.log('EMAIL_USER:', mailConfig.user ? mailConfig.user : 'NO CONFIGURADO');
+        console.log('EMAIL_PASS:', mailConfig.pass ? '*****' : 'NO CONFIGURADO');
+        console.log('EMAIL_SECURE:', mailConfig.secure);
+        console.log('ADMIN_EMAIL_FOR_REPORTS:', ADMIN_EMAIL_FOR_REPORTS ? ADMIN_EMAIL_FOR_REPORTS : 'NO CONFIGURADO');
+
+    } catch (error) {
+        console.error('❌ Error al cargar la configuración de correo desde configuracion.json:', error);
+        // Establecer valores por defecto o log de error si la configuración no se puede cargar
+        transporter = null; // O un transporter dummy si no hay config
+        ADMIN_EMAIL_FOR_REPORTS = 'error@example.com';
+    }
+}
 
 
 // Función para enviar correo electrónico con adjunto
 async function sendEmailWithAttachment(to, subject, text, html, attachment) {
+    if (!transporter) {
+        console.error('❌ No se puede enviar correo: Transporter de Nodemailer no inicializado.');
+        return false;
+    }
     try {
+        // Asegúrate de que el senderName también venga de mailConfig si es lo que quieres
+        const config = await readJsonFile(CONFIG_FILE);
+        const mailConfig = config.mail_config;
+
         const mailOptions = {
             from: {
-                name: process.env.EMAIL_SENDER_NAME || 'Sistema de Rifas', // Puedes añadir esta variable de entorno también
-                address: process.env.EMAIL_USER // El remitente es tu propio correo
+                name: mailConfig.senderName || 'Sistema de Rifas',
+                address: mailConfig.user // El remitente es tu propio correo
             },
             to: to,
             subject: subject,
@@ -115,8 +149,8 @@ async function sendEmailWithAttachment(to, subject, text, html, attachment) {
 
 // --- Rutas de API para Configuración General ---
 
-// Obtener configuración general
-app.get('/api/configuracion', async (req, res) => {
+// Obtener configuración general (Ahora con /admin para coincidir con frontend)
+app.get('/api/admin/configuracion', async (req, res) => {
     try {
         const config = await readJsonFile(CONFIG_FILE);
         res.json(config);
@@ -142,9 +176,13 @@ app.put('/api/admin/configuracion', async (req, res) => {
             ultimo_numero_ticket: newConfig.ultimo_numero_ticket !== undefined ? parseInt(newConfig.ultimo_numero_ticket) : currentConfig.ultimo_numero_ticket,
             ultima_fecha_resultados_zulia: newConfig.ultima_fecha_resultados_zulia || currentConfig.ultima_fecha_resultados_zulia,
             admin_whatsapp_numbers: newConfig.admin_whatsapp_numbers || currentConfig.admin_whatsapp_numbers,
-            // ¡NO ACTUALICES mail_config o admin_email_for_reports desde aquí!
+            // Permite actualizar la configuración del correo si está presente en el body, pero ten CUIDADO con esto en un repo público
+            mail_config: newConfig.mail_config || currentConfig.mail_config,
+            admin_email_for_reports: newConfig.admin_email_for_reports || currentConfig.admin_email_for_reports
         };
         await writeJsonFile(CONFIG_FILE, updatedConfig);
+        // Después de actualizar la configuración, reinicializa la configuración de correo
+        await initializeEmailConfig();
         res.json({ message: 'Configuración actualizada exitosamente', config: updatedConfig });
     } catch (error) {
         console.error('Error al actualizar configuración:', error);
@@ -154,8 +192,8 @@ app.put('/api/admin/configuracion', async (req, res) => {
 
 // --- Rutas de API para Horarios Zulia ---
 
-// Obtener horarios de Zulia
-app.get('/api/horarios-zulia', async (req, res) => {
+// Obtener horarios de Zulia (Ahora con /admin para coincidir con frontend)
+app.get('/api/admin/horarios-zulia', async (req, res) => {
     try {
         const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
         res.json(horarios);
@@ -182,8 +220,8 @@ app.put('/api/admin/horarios-zulia', async (req, res) => {
 // Guardar una nueva venta
 app.post('/api/ventas', async (req, res) => {
     try {
-        const nuevaVenta = req.body;
-        const ventas = await readJsonFile(VENTAS_FILE);
+        let nuevaVenta = req.body; // Usa let para poder reasignar
+        let ventas = await readJsonFile(VENTAS_FILE);
         if (!Array.isArray(ventas)) {
             ventas = []; // Inicializar como array si no lo es
         }
@@ -193,12 +231,10 @@ app.post('/api/ventas', async (req, res) => {
         let ultimoNumeroTicket = config.ultimo_numero_ticket || 0;
 
         // Asignar y actualizar el número de ticket correlativo
-        ultima_fecha_resultados_zulia = moment().tz("America/Caracas").format('YYYY-MM-DD');
-
-        // Asignar el ID y la fecha/hora
+        const currentMoment = moment().tz("America/Caracas");
         nuevaVenta.id = Date.now().toString(); // ID único basado en timestamp
-        nuevaVenta.fecha = moment().tz("America/Caracas").format('YYYY-MM-DD');
-        nuevaVenta.hora = moment().tz("America/Caracas").format('HH:mm:ss');
+        nuevaVenta.fecha = currentMoment.format('YYYY-MM-DD');
+        nuevaVenta.hora = currentMoment.format('HH:mm:ss');
         nuevaVenta.numero_ticket = ++ultimoNumeroTicket; // Incrementar y asignar el nuevo número de ticket
 
         ventas.push(nuevaVenta);
@@ -231,10 +267,9 @@ async function getSalesForCurrentCut(currentTime = moment().tz("America/Caracas"
     const ventas = await readJsonFile(VENTAS_FILE);
     const config = await readJsonFile(CONFIG_FILE);
 
-    // Determinar la hora del último corte para filtrar las ventas
     const lastCutTime = config.last_sales_cut_timestamp ?
         moment(config.last_sales_cut_timestamp).tz("America/Caracas") :
-        moment(currentTime).startOf('day'); // Si no hay corte previo, desde el inicio del día
+        moment(currentTime).startOf('day');
 
     return ventas.filter(venta => {
         const ventaDateTime = moment(`${venta.fecha} ${venta.hora}`).tz("America/Caracas");
@@ -254,7 +289,6 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet('Reporte de Ventas');
 
-    // Título y fecha
     worksheet.mergeCells('A1:F1');
     worksheet.getCell('A1').value = `Reporte de Ventas - ${cutType === 'corte' ? 'Corte' : 'Diario'}`;
     worksheet.getCell('A1').font = { bold: true, size: 16 };
@@ -265,11 +299,9 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
     worksheet.getCell('A2').alignment = { horizontal: 'center' };
     worksheet.getCell('A2').font = { italic: true };
 
-    // Encabezados
     worksheet.addRow(['ID', 'Fecha', 'Hora', 'Número Ticket', 'Nombre Cliente', 'Monto Venta ($)']);
     worksheet.getRow(4).font = { bold: true };
 
-    // Datos
     salesData.forEach(venta => {
         worksheet.addRow([
             venta.id,
@@ -277,20 +309,18 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
             venta.hora,
             venta.numero_ticket,
             venta.nombre_cliente,
-            venta.monto_total // Asumo que el monto_total ya está en dólares
+            venta.monto_total
         ]);
     });
 
-    // Cálculos de totales
     const totalVentas = salesData.reduce((sum, venta) => sum + parseFloat(venta.monto_total || 0), 0);
-    worksheet.addRow([]); // Fila en blanco
+    worksheet.addRow([]);
     worksheet.addRow(['', '', '', '', 'Total de Ventas:', totalVentas.toFixed(2)]);
     const totalRow = worksheet.lastRow;
     totalRow.font = { bold: true };
-    totalRow.getCell(5).alignment = { horizontal: 'right' }; // Alinea el texto "Total de Ventas:"
-    totalRow.getCell(6).numFmt = '$#,##0.00'; // Formato de moneda para el total
+    totalRow.getCell(5).alignment = { horizontal: 'right' };
+    totalRow.getCell(6).numFmt = '$#,##0.00';
 
-    // Ajustar anchos de columna
     worksheet.columns.forEach(column => {
         let maxLength = 0;
         column.eachCell({ includeEmpty: true }, cell => {
@@ -302,7 +332,6 @@ async function generateSalesExcel(salesData, cutType = 'corte') {
         column.width = maxLength < 10 ? 10 : maxLength + 2;
     });
 
-    // Buffer para el archivo
     return await workbook.xlsx.writeBuffer();
 }
 
@@ -312,21 +341,18 @@ async function executeSalesCut(isAutomatic = false) {
     const currentTime = moment().tz("America/Caracas");
     console.log(`Iniciando corte de ventas (${isAutomatic ? 'automático' : 'manual'}) a las ${currentTime.format('YYYY-MM-DD HH:mm:ss')}`);
 
-    const ventas = await getSalesForCurrentCut(currentTime); // Obtener ventas desde el último corte
+    const ventas = await getSalesForCurrentCut(currentTime);
     const totalVentasPeriodo = ventas.reduce((sum, venta) => sum + parseFloat(venta.monto_total || 0), 0);
 
-    const dailySales = await getDailySales(currentTime); // Obtener ventas de todo el día para el reporte diario
+    const dailySales = await getDailySales(currentTime);
     const totalVentasDiarias = dailySales.reduce((sum, venta) => sum + parseFloat(venta.monto_total || 0), 0);
 
-    // Generar reporte de corte (con las ventas desde el último corte)
     const cutReportBuffer = await generateSalesExcel(ventas, 'corte');
     const cutReportFileName = `Corte_Ventas_${currentTime.format('YYYYMMDD_HHmmss')}.xlsx`;
 
-    // Generar reporte diario (con las ventas de todo el día)
     const dailyReportBuffer = await generateSalesExcel(dailySales, 'diario');
     const dailyReportFileName = `Reporte_Diario_Ventas_${currentTime.format('YYYYMMDD')}.xlsx`;
 
-    // 1. Enviar correo con el reporte del corte actual
     const subjectCut = `Corte de Ventas - ${currentTime.format('YYYY-MM-DD HH:mm:ss')}`;
     const textCut = `Adjunto el reporte del corte de ventas realizado a las ${currentTime.format('HH:mm:ss')} del ${currentTime.format('DD/MM/YYYY')}.`;
     const htmlCut = `<p>Adjunto el reporte del corte de ventas realizado a las <b>${currentTime.format('HH:mm:ss')}</b> del <b>${currentTime.format('DD/MM/YYYY')}</b>.</p>
@@ -346,9 +372,6 @@ async function executeSalesCut(isAutomatic = false) {
         }
     );
 
-    // 2. Enviar correo con el reporte diario (si no es el mismo que el de corte)
-    // Se asume que el reporte diario se envía al final del día o en un corte que abarque el día entero.
-    // Aquí lo enviamos siempre, pero si el corte es a media mañana, este diario incluirá ventas hasta ese momento.
     const subjectDaily = `Reporte Diario de Ventas - ${currentTime.format('YYYY-MM-DD')}`;
     const textDaily = `Adjunto el reporte de ventas diarias hasta las ${currentTime.format('HH:mm:ss')} del ${currentTime.format('DD/MM/YYYY')}.`;
     const htmlDaily = `<p>Adjunto el reporte de ventas diarias hasta las <b>${currentTime.format('HH:mm:ss')}</b> del <b>${currentTime.format('DD/MM/YYYY')}</b>.</p>
@@ -367,9 +390,8 @@ async function executeSalesCut(isAutomatic = false) {
         }
     );
 
-    // Actualizar el timestamp del último corte de ventas en la configuración
     const config = await readJsonFile(CONFIG_FILE);
-    config.last_sales_cut_timestamp = currentTime.toISOString(); // Guarda como ISO string para fácil parseo
+    config.last_sales_cut_timestamp = currentTime.toISOString();
     await writeJsonFile(CONFIG_FILE, config);
 
     console.log(`✔ Corte de ventas completado. Correos de corte enviados: ${cutEmailSent}. Correos diarios enviados: ${dailyEmailSent}.`);
@@ -379,7 +401,7 @@ async function executeSalesCut(isAutomatic = false) {
 // Ruta para ejecutar el corte de ventas (solo admin)
 app.post('/api/admin/execute-sales-cut', async (req, res) => {
     try {
-        const { auto } = req.body; // Puedes pasar 'true' para indicar que es un corte automático (aunque aquí sea manual)
+        const { auto } = req.body;
         await executeSalesCut(auto);
         res.json({ message: 'Corte de ventas ejecutado exitosamente!' });
     } catch (error) {
@@ -393,7 +415,7 @@ app.post('/api/admin/execute-sales-cut', async (req, res) => {
 app.get('/api/admin/export-sales-excel', async (req, res) => {
     try {
         const ventas = await readJsonFile(VENTAS_FILE);
-        const buffer = await generateSalesExcel(ventas, 'todas'); // Puedes usar 'todas' para un reporte completo
+        const buffer = await generateSalesExcel(ventas, 'todas');
 
         res.setHeader('Content-Disposition', 'attachment; filename="Todas_Ventas_Sistema_Rifas.xlsx"');
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -407,65 +429,35 @@ app.get('/api/admin/export-sales-excel', async (req, res) => {
 
 
 // Middleware para servir archivos estáticos (¡Importante para los comprobantes!)
-// Asegúrate de que la carpeta 'uploads' exista en tu proyecto.
-// Render automáticamente la crea si la subes con tu código.
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Middleware para manejar rutas no encontradas (404)
-// Este middleware DEBE ir después de todas tus rutas definidas
 app.use((req, res, next) => {
     res.status(404).json({ message: 'Ruta no encontrada.', path: req.path, method: req.method });
 });
 
 // Manejador de errores general
-// Este middleware DEBE ir al final de todos los middlewares y rutas
 app.use((err, req, res, next) => {
     console.error('Unhandled Error:', err.stack);
     res.status(500).json({ message: 'Ocurrió un error inesperado en el servidor.', error: err.message });
 });
 
 // Iniciar el servidor
-app.listen(port, () => {
+app.listen(port, async () => { // Usar async aquí para initializeEmailConfig
     console.log(`Servidor de backend escuchando en http://localhost:${port}`);
-    console.log('Variables de entorno cargadas para correo:');
-    console.log('EMAIL_HOST:', process.env.EMAIL_HOST ? '*****' : 'NO CONFIGURADO');
-    console.log('EMAIL_PORT:', process.env.EMAIL_PORT ? '*****' : 'NO CONFIGURADO');
-    console.log('EMAIL_USER:', process.env.EMAIL_USER ? process.env.EMAIL_USER : 'NO CONFIGURADO');
-    console.log('EMAIL_PASS:', process.env.EMAIL_PASS ? '*****' : 'NO CONFIGURADO');
-    console.log('EMAIL_SECURE:', process.env.EMAIL_SECURE);
-    console.log('ADMIN_EMAIL_FOR_REPORTS:', process.env.ADMIN_EMAIL_FOR_REPORTS ? process.env.ADMIN_EMAIL_FOR_REPORTS : 'NO CONFIGURADO');
+    await initializeEmailConfig(); // Carga la configuración de correo al iniciar
 });
 
 // --- Tareas Programadas (Cron Jobs) ---
-// Tarea CRON para ejecutar el corte de ventas automáticamente (Ej: cada 24 horas a medianoche)
-// Adapta el cron a tus necesidades. Ejemplo: '0 0 * * *' para medianoche diaria.
-// NOTA: Para un corte de ventas específico para cada sorteo, necesitarías otra lógica.
-// Esto es un ejemplo de corte diario.
 cron.schedule('0 0 * * *', async () => {
     console.log('✨ Ejecutando tarea programada: Corte de ventas automático.');
     try {
-        await executeSalesCut(true); // Pasar 'true' para indicar que es automático
+        await executeSalesCut(true);
         console.log('✅ Corte de ventas automático completado.');
     } catch (error) {
         console.error('❌ Error en el corte de ventas automático:', error);
     }
 }, {
     scheduled: true,
-    timezone: "America/Caracas" // Asegúrate de que la zona horaria sea correcta para tu lógica de negocio
+    timezone: "America/Caracas"
 });
-
-// --- Funciones adicionales (si es que las tenías o se necesitan) ---
-
-// Función para obtener el último número de ticket y actualizarlo
-// (Ya integrada en app.post('/api/ventas'))
-
-// Función para obtener la última fecha de resultados de Zulia
-// (Ya integrada en app.put('/api/admin/configuracion'))
-
-// Función para cargar horarios de Zulia
-// (Ya integrada en app.get('/api/horarios-zulia') y app.put('/api/admin/horarios-zulia'))
-
-// Función para generar nombres de archivo de comprobantes (si es que los usas)
-// function generateComprobanteFileName(ticketId) {
-//     return `comprobante_${ticketId}.pdf`; // O .png, .jpg, etc.
-// }
