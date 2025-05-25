@@ -39,7 +39,7 @@ app.use(fileUpload());
 const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
-const NUMEROS_FILE = path.join(__dirname, 'numeros.json'); // Asegurarse de que esta constante esté definida
+const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
 
 async function readJsonFile(filePath) {
     try {
@@ -49,9 +49,9 @@ async function readJsonFile(filePath) {
         if (error.code === 'ENOENT') {
             console.warn(`Archivo no encontrado en ${filePath}. Creando archivo vacío.`);
             if (filePath.includes('ventas.json') || filePath.includes('numeros.json') || filePath.includes('cortes.json')) {
-                return []; // Array vacío para ventas y números
+                return [];
             }
-            return {}; // Objeto vacío por defecto para configuración y horarios
+            return {};
         }
         console.error(`Error al leer el archivo ${filePath}:`, error);
         throw error;
@@ -178,7 +178,7 @@ app.put('/api/admin/configuracion', async (req, res) => {
             admin_email_for_reports: newConfig.admin_email_for_reports || currentConfig.admin_email_for_reports
         };
         await writeJsonFile(CONFIG_FILE, updatedConfig);
-        await initializeEmailConfig(); // Re-inicializar la configuración de correo
+        await initializeEmailConfig();
         res.json({ message: 'Configuración actualizada exitosamente', config: updatedConfig });
     } catch (error) {
         console.error('Error al actualizar configuración:', error);
@@ -268,7 +268,8 @@ app.get('/api/admin/ventas', async (req, res) => {
 
 // --- Rutas de API para Números (CLIENTE) ---
 // Obtener todos los números disponibles (asumiendo que numeros.json contiene los números)
-app.get('/api/numeros', async (req, res) => {
+// *** RUTA MODIFICADA PARA COINCIDIR CON EL CLIENTE ***
+app.get('/api/numeros-disponibles', async (req, res) => {
     try {
         const numeros = await readJsonFile(NUMEROS_FILE);
         res.json(numeros);
