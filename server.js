@@ -1,7 +1,7 @@
 // server.js
 
 const express = require('express');
-// const fileUpload = require('express-fileupload'); // <-- ELIMINAR: Ya no se usa para subir archivos
+// const fileUpload = require('express-fileupload'); // <-- ELIMINAR/COMENTAR: Ya no se usa para subir archivos
 const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
@@ -34,14 +34,14 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json()); // Necesario para parsear el body JSON
 app.use(express.urlencoded({ extended: true }));
-// app.use(fileUpload()); // <-- ELIMINAR: Ya no se usa para subir archivos
+// app.use(fileUpload()); // <-- ELIMINAR/COMENTAR: Ya no se usa para subir archivos
 
 const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
-const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes'); // Aunque no subimos, la carpeta puede seguir siendo útil para otra cosa
+// const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes'); // Ya no es estrictamente necesario si no se suben archivos
 
 // --- Funciones auxiliares para leer y escribir JSON ---
 async function readJsonFile(filePath, defaultContent = {}) {
@@ -61,14 +61,14 @@ async function writeJsonFile(filePath, data) {
     await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// Asegurar que el directorio de comprobantes exista
-async function ensureComprobantesDir() {
-    try {
-        await fs.mkdir(COMPROBANTES_DIR, { recursive: true });
-    } catch (error) {
-        console.error('Error al crear el directorio de comprobantes:', error);
-    }
-}
+// Asegurar que el directorio de comprobantes exista (Opcional, si lo necesitas para otra cosa)
+// async function ensureComprobantesDir() {
+//     try {
+//         await fs.mkdir(COMPROBANTES_DIR, { recursive: true });
+//     } catch (error) {
+//         console.error('Error al crear el directorio de comprobantes:', error);
+//     }
+// }
 
 // --- Configuración de Nodemailer (para envío de correos) ---
 let transporter;
@@ -191,7 +191,6 @@ app.get('/api/numeros', async (req, res) => {
 app.post('/api/comprar', async (req, res) => {
     try {
         // console.log('req.body:', req.body); // Log para depuración
-        // console.log('req.files:', req.files); // Log para depuración, ahora debería estar vacío
 
         // Desestructurar los datos del body (JSON)
         const {
@@ -211,7 +210,6 @@ app.post('/api/comprar', async (req, res) => {
         if (!Array.isArray(numerosComprados)) {
             return res.status(400).json({ message: 'El formato de números comprados no es válido.' });
         }
-
 
         let numeros = await readJsonFile(NUMEROS_FILE);
         let ventas = await readJsonFile(VENTAS_FILE, []);
@@ -284,10 +282,7 @@ app.post('/api/comprar', async (req, res) => {
 
         adminNumbers.forEach(adminNum => {
             const whatsappLink = `https://api.whatsapp.com/send?phone=${adminNum}&text=${encodeURIComponent(mensajeAdmin)}`;
-            // En un entorno de servidor, no puedes abrir un navegador.
-            // Esto solo es para que el administrador sepa qué mensaje se enviaría.
-            // En una aplicación real, necesitarías una API de WhatsApp.
-            console.log(`WhatsApp Link para Admin (${adminNum}): ${whatsappLink}`);
+            console.log(`WhatsApp Link para Admin (${adminNum}): ${whatsappLink}`); // Esto es para depuración
         });
 
         // 2. Notificación al cliente por WhatsApp (si se desea)
@@ -570,11 +565,12 @@ cron.schedule('0 23 * * *', async () => { // Se ejecuta a las 11 PM (23:00) todo
 
 
 // --- Inicialización del servidor ---
-ensureComprobantesDir().then(() => {
+// Ya no es necesario llamar a ensureComprobantesDir si no manejas subida de archivos
+// ensureComprobantesDir().then(() => {
     initializeMailer().then(() => {
         app.listen(port, () => {
             console.log(`Servidor escuchando en http://localhost:${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
         });
     });
-});
+// });
