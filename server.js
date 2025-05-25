@@ -20,7 +20,7 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onren
 
 const corsOptions = {
     origin: [
-        'https://paneladmin01.netlify.app', // <--- ¡AÑADIDO ESTE ORIGEN!
+        'https://paneladmin01.netlify.app',
         'https://tuoportunidadeshoy.netlify.app',
         'http://localhost:8080',
         'http://127.0.0.1:5500',
@@ -674,9 +674,10 @@ cron.schedule('0 1 * * *', async () => {
                     <p>Total de ventas en este corte: <strong>${ventas.length}</strong></p>
                     <p>Saludos cordiales,<br>Sistema de Rifas</p>
                 `,
-                attachments:
-                    [{ filename: `Corte_Ventas_${yesterday}.xlsx`, content: buffer, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }]
-            );
+                attachments: [ // Corregida la sintaxis del array attachments
+                    { filename: `Corte_Ventas_${yesterday}.xlsx`, content: buffer, contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
+                ]
+            }); // Cierre correcto del objeto y la llamada a la función
             console.log(`Correo de corte de ventas automático enviado a ${adminEmail}`);
         } else {
             console.warn('No se ha configurado un correo de administrador para reportes en la configuración.');
