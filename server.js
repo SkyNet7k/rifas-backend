@@ -45,13 +45,13 @@ const DATA_DIR = path.join(__dirname, 'data');
 const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes');
 
 // Rutas de archivos de datos
-const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json'); // ¡CORREGIDO AQUÍ!
+const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json'); // ¡ESTO DEBE ESTAR ASÍ!
 const NUMEROS_FILE = path.join(DATA_DIR, 'numeros.json');
 const VENTAS_FILE = path.join(DATA_DIR, 'ventas.json');
 const HORARIOS_ZULIA_FILE = path.join(DATA_DIR, 'horariosZulia.json');
 
 // Declarar transporter aquí, pero inicializarlo después de cargar la configuración
-let transporter;
+let transporter; // ¡DECLARADO AQUÍ!
 
 // Función para asegurar que los directorios existan
 async function ensureDataAndComprobantesDirs() {
@@ -116,7 +116,7 @@ async function loadInitialData() {
     global.horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, []);
 
     // Inicializar transporter después de que global.config esté disponible
-    transporter = nodemailer.createTransport({
+    transporter = nodemailer.createTransport({ // ¡INICIALIZADO AQUÍ CON GLOBAL.CONFIG!
         service: 'gmail',
         auth: {
             user: global.config.mail_config.user,
@@ -251,7 +251,7 @@ app.post('/api/ventas/corte', async (req, res) => {
 
         // Generar el nombre del archivo Excel
         const now = moment().tz("America/Caracas");
-        const dateString = now.format('YYYYMMDD_HHmmss');
+        const dateString = now.format('YYYYMMMM_HHmmss'); // Corregido el formato para el mes
         const excelFileName = `Reporte_Ventas_${dateString}.xlsx`;
         const excelFilePath = path.join(__dirname, 'temp', excelFileName);
 
@@ -274,7 +274,6 @@ app.post('/api/ventas/corte', async (req, res) => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Ventas');
 
-        // === INICIO DE LA CORRECCIÓN para /api/ventas/corte ===
         if (dataToExport.length > 0) {
             // Añadir encabezados
             worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
@@ -306,7 +305,6 @@ app.post('/api/ventas/corte', async (req, res) => {
                 { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
             ];
         }
-        // === FIN DE LA CORRECCIÓN para /api/ventas/corte ===
 
         // Crear el buffer del archivo Excel
         const excelBuffer = await workbook.xlsx.writeBuffer();
@@ -381,7 +379,6 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Ventas');
 
-        // === INICIO DE LA CORRECCIÓN para /api/ventas/corte-manual-solo-email ===
         if (dataToExport.length > 0) {
             // Añadir encabezados
             worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
@@ -415,7 +412,6 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
                 { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
             ];
         }
-        // === FIN DE LA CORRECCIÓN para /api/ventas/corte-manual-solo-email ===
 
         // Crear el buffer del archivo Excel
         const excelBuffer = await workbook.xlsx.writeBuffer();
@@ -540,7 +536,6 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             const workbook = new ExcelJS.Workbook();
             const worksheet = workbook.addWorksheet('Ventas');
 
-            // === INICIO DE LA CORRECCIÓN para CRON JOB ===
             if (dataToExport.length > 0) {
                 worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
                     header: key,
@@ -569,7 +564,6 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
                     { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
                 ];
             }
-            // === FIN DE LA CORRECCIÓN para CRON JOB ===
 
             const excelBuffer = await workbook.xlsx.writeBuffer();
 
