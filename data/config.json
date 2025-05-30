@@ -1,0 +1,12 @@
+{
+  "precio_ticket": 1,
+  "tasa_dolar": 36.5,
+  "fecha_sorteo": "2025-05-26",
+  "ultimo_numero_ticket": 0,
+  "ultimo_numero_sorteo_correlativo": 1,
+  "pagina_bloqueada": false,
+  "admin_whatsapp_numbers": [
+    "584143630488"
+  ],
+  "horarios_zulia": []
+}
