@@ -23,8 +23,8 @@ const corsOptions = {
         'https://paneladmin01.netlify.app',
         'https://tuoportunidadeshoy.netlify.app',
         'http://localhost:8080',
-        'http://127.0.0.1:5500',
-        'http://localhost:3000',
+        'http://127.0.0.1:5500', // Agregado para testing local si usas Live Server u similar
+        'http://localhost:3000', // Si tu frontend corre en el mismo dominio/puerto que el backend
     ],
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     credentials: true,
@@ -35,39 +35,32 @@ app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(fileUpload({
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+    limits: { fileSize: 50 * 1024 * 1024 }, // Límite de 50MB
     useTempFiles: true,
     tempFileDir: '/tmp/'
 }));
 
-// Directorios para guardar datos
+// Directorios para datos
 const DATA_DIR = path.join(__dirname, 'data');
-const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes');
+const NUMBERS_FILE = path.join(DATA_DIR, 'numbers.json');
+const PURCHASES_FILE = path.join(DATA_DIR, 'purchases.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const COMPROBANTES_DIR = path.join(__dirname, 'uploads', 'comprobantes');
 
-// Rutas de archivos de datos
-const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json'); // ¡ESTO DEBE ESTAR ASÍ!
-const NUMEROS_FILE = path.join(DATA_DIR, 'numeros.json');
-const VENTAS_FILE = path.join(DATA_DIR, 'ventas.json');
-const HORARIOS_ZULIA_FILE = path.join(DATA_DIR, 'horariosZulia.json');
-
-// Declarar transporter aquí, pero inicializarlo después de cargar la configuración
-let transporter; // ¡DECLARADO AQUÍ!
-
-// Función para asegurar que los directorios existan
+// Asegurar que los directorios existan
 async function ensureDataAndComprobantesDirs() {
     await fs.mkdir(DATA_DIR, { recursive: true });
     await fs.mkdir(COMPROBANTES_DIR, { recursive: true });
-    await fs.mkdir(path.join(__dirname, 'temp'), { recursive: true }); // Para archivos temporales como Excel
 }
 
-// Funciones de lectura/escritura de archivos JSON
-async function readJsonFile(filePath, defaultValue = []) {
+// Funciones de lectura/escritura de JSON
+async function readJsonFile(filePath, defaultValue) {
     try {
         const data = await fs.readFile(filePath, 'utf8');
         return JSON.parse(data);
     } catch (error) {
-        if (error.code === 'ENOENT') { // Archivo no encontrado
-            await fs.writeFile(filePath, JSON.stringify(defaultValue, null, 2));
+        if (error.code === 'ENOENT') {
+            await writeJsonFile(filePath, defaultValue); // Crea el archivo con el valor por defecto si no existe
             return defaultValue;
         }
         throw error;
@@ -78,518 +71,394 @@ async function writeJsonFile(filePath, data) {
     await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// Números iniciales para el reinicio
-const initialNumbers = Array.from({ length: 1000 }, (_, i) => ({
-    numero: String(i).padStart(3, '0'),
-    comprado: false,
-    fecha_compra: null,
-    comprador: null,
-    telefono: null,
-    metodo_pago: null,
-    referencia_pago: null
-}));
-
-// Carga inicial de datos
+// Cargar datos iniciales o crear si no existen
 async function loadInitialData() {
-    global.config = await readJsonFile(CONFIG_FILE, {
-        precio_ticket: 1.00,
-        tasa_dolar: 36.50,
-        fecha_sorteo: moment().add(1, 'day').format('YYYY-MM-DD'),
-        ultimo_numero_ticket: 0,
-        ultimo_numero_sorteo_correlativo: 1,
-        pagina_bloqueada: false,
-        admin_whatsapp_numbers: ['584143630488'],
-        horarios_zulia: [],
-        // Incluir la estructura completa de mail_config y admin_email_for_reports aquí
-        // para cuando el archivo configuracion.json no exista inicialmente
-        mail_config: {
-            host: "smtp.gmail.com",
-            port: 465,
-            secure: true,
-            user: "tu_email@gmail.com", // ¡IMPORTANTE! Cambia esto por tu EMAIL real en el archivo
-            pass: "tu_contraseña_de_aplicacion" // ¡IMPORTANTE! Cambia esto por tu CONTRASEÑA DE APLICACIÓN real
-        },
-        admin_email_for_reports: "tu_email_admin@gmail.com" // ¡IMPORTANTE! Cambia esto por el email del admin real
-    });
-    global.numeros = await readJsonFile(NUMEROS_FILE, initialNumbers);
-    global.ventas = await readJsonFile(VENTAS_FILE, []);
-    global.horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, []);
+    const configDefault = {
+        sorteo_activo: true,
+        fecha_sorteo: moment.tz("America/Caracas").format('YYYY-MM-DD'), // Fecha de hoy por defecto
+        precio_usd: 1.00,
+        precio_bs: 38.00, // Ajusta a la tasa actual
+        zona_horaria: "America/Caracas",
+        ultimo_numero_sorteo_correlativo: 0,
+        ultimo_numero_ticket: 0
+    };
 
-    // Inicializar transporter después de que global.config esté disponible
-    transporter = nodemailer.createTransport({ // ¡INICIALIZADO AQUÍ CON GLOBAL.CONFIG!
-        service: 'gmail',
-        auth: {
-            user: global.config.mail_config.user,
-            pass: global.config.mail_config.pass
-        }
-    });
+    const numbersDefault = Array.from({ length: 100 }, (_, i) => ({
+        numero: i,
+        estado: 'disponible',
+        comprador: null,
+        fecha_compra: null,
+        metodo_pago: null,
+        referencia_pago: null
+    }));
+
+    const purchasesDefault = [];
+
+    await readJsonFile(CONFIG_FILE, configDefault);
+    await readJsonFile(NUMBERS_FILE, numbersDefault);
+    await readJsonFile(PURCHASES_FILE, purchasesDefault);
+
+    // Servir archivos estáticos (comprobantes)
+    app.use('/uploads/comprobantes', express.static(COMPROBANTES_DIR));
 }
 
-// Servir archivos estáticos (comprobantes)
-app.use('/comprobantes', express.static(COMPROBANTES_DIR));
+// Configuración del transportador de Nodemailer
+const transporter = nodemailer.createTransport({
+    service: process.env.EMAIL_SERVICE, // ej. 'gmail'
+    auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+    },
+});
 
-// Rutas de la API
+// Función para enviar correo de confirmación
+async function enviarCorreoConfirmacion(compra) {
+    try {
+        const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: compra.email,
+            subject: `Confirmación de Compra de Números para la Rifa ${compra.correlativo_sorteo}`,
+            html: `
+                <p>Estimado/a ${compra.nombre_apellido},</p>
+                <p>Gracias por tu compra en nuestra rifa. A continuación, los detalles de tu compra:</p>
+                <ul>
+                    <li><strong>Números Comprados:</strong> ${compra.numeros_comprados.map(n => String(n).padStart(2, '0')).join(', ')}</li>
+                    <li><strong>Total USD:</strong> $${compra.total_usd}</li>
+                    <li><strong>Total Bs:</strong> Bs ${compra.total_bs}</li>
+                    <li><strong>Método de Pago:</strong> ${compra.metodo_pago}</li>
+                    <li><strong>Referencia:</strong> ${compra.referencia_pago}</li>
+                    <li><strong>Fecha de Compra:</strong> ${moment(compra.fecha_compra).tz("America/Caracas").format('DD/MM/YYYY hh:mm A')}</li>
+                    <li><strong>Número de Ticket:</strong> ${String(compra.numero_ticket).padStart(5, '0')}</li>
+                </ul>
+                <p>Tu compra está registrada. ¡Mucha suerte en el sorteo!</p>
+                <p>Saludos cordiales,<br>El equipo de la rifa</p>
+            `,
+            // attachments: [
+            //     {
+            //         filename: 'comprobante.jpg', // Nombre del archivo adjunto
+            //         path: path.join(COMPROBANTES_DIR, compra.comprobante_url.split('/').pop()), // Ruta real del archivo
+            //         cid: 'unique@nodemailer.com' // ID para incrustar en HTML si es necesario
+            //     }
+            // ]
+        };
+        await transporter.sendMail(mailOptions);
+        console.log('Correo de confirmación enviado a:', compra.email);
+    } catch (error) {
+        console.error('Error al enviar correo de confirmación:', error);
+    }
+}
 
-// Configuración
-app.get('/api/configuracion', async (req, res) => {
+// --- INICIO DE NUEVAS RUTAS PARA EL FRONTEND (CORRIGEN LOS 404) ---
+
+// Ruta para obtener la configuración activa
+app.get('/configuracion/activa', async (req, res) => {
+    try {
+        const config = await readJsonFile(CONFIG_FILE);
+        if (!config.sorteo_activo) {
+            // Se devuelve 404 porque el frontend espera este código para bloquear la página
+            return res.status(404).json({ error: 'La plataforma está actualmente bloqueada.' });
+        }
+        // Devuelve solo la configuración relevante para el frontend
+        res.json({
+            sorteo_activo: config.sorteo_activo,
+            fecha_sorteo: config.fecha_sorteo,
+            precio_usd: config.precio_usd,
+            precio_bs: config.precio_bs,
+            zona_horaria: config.zona_horaria
+        });
+    } catch (error) {
+        console.error('Error al obtener la configuración activa:', error);
+        res.status(500).json({ error: 'Error interno del servidor al cargar la configuración.' });
+    }
+});
+
+// Ruta para obtener todos los números y su estado
+app.get('/numeros', async (req, res) => {
+    try {
+        const numbers = await readJsonFile(NUMBERS_FILE);
+        res.json(numbers);
+    } catch (error) {
+        console.error('Error al obtener números:', error);
+        res.status(500).json({ error: 'Error interno del servidor al cargar los números.' });
+    }
+});
+
+// --- FIN DE NUEVAS RUTAS PARA EL FRONTEND ---
+
+
+// Ruta para procesar la compra de números
+app.post('/comprar', async (req, res) => {
+    try {
+        const { nombre_apellido, telefono, cedula, email, metodo_pago, referencia_pago, numeros_comprados, total_usd, total_bs } = req.body;
+        const comprobante_pago = req.files ? req.files.comprobante_pago : null;
+
+        if (!nombre_apellido || !telefono || !cedula || !email || !metodo_pago || !referencia_pago || !numeros_comprados || !comprobante_pago) {
+            return res.status(400).json({ error: 'Faltan campos obligatorios para la compra.' });
+        }
+
+        let parsedNumeros = [];
+        try {
+            parsedNumeros = JSON.parse(numeros_comprados);
+            if (!Array.isArray(parsedNumeros) || parsedNumeros.some(isNaN)) {
+                throw new Error('Formato de números seleccionados inválido.');
+            }
+        } catch (parseError) {
+            return res.status(400).json({ error: 'Formato de números seleccionados inválido.' });
+        }
+
+        const numbers = await readJsonFile(NUMBERS_FILE);
+        const config = await readJsonFile(CONFIG_FILE);
+
+        if (!config.sorteo_activo) {
+            return res.status(403).json({ error: 'El sorteo no está activo en este momento.' });
+        }
+
+        const tomados = [];
+        for (const num of parsedNumeros) {
+            if (numbers[num] && numbers[num].estado === 'comprado') {
+                tomados.push(num);
+            }
+        }
+
+        if (tomados.length > 0) {
+            return res.status(409).json({
+                error: `Los siguientes números ya fueron comprados: ${tomados.map(n => String(n).padStart(2, '0')).join(', ')}.`,
+                tomados: tomados
+            });
+        }
+
+        const now = moment().tz(config.zona_horaria || "America/Caracas");
+        const fechaCompra = now.toISOString(); // Fecha ISO string
+        const timestamp = now.format('YYYYMMDDHHmmss');
+
+        // Generar un número de ticket incremental
+        config.ultimo_numero_ticket = (config.ultimo_numero_ticket || 0) + 1;
+        await writeJsonFile(CONFIG_FILE, config);
+        const numeroTicket = config.ultimo_numero_ticket;
+
+        let comprobanteFileName = '';
+        let comprobantePath = '';
+        let comprobanteUrl = '';
+
+        if (comprobante_pago) {
+            const fileExtension = path.extname(comprobante_pago.name);
+            comprobanteFileName = `comprobante_${timestamp}_${cedula}${fileExtension}`;
+            comprobantePath = path.join(COMPROBANTES_DIR, comprobanteFileName);
+            await comprobante_pago.mv(comprobantePath);
+            comprobanteUrl = `${API_BASE_URL}/uploads/comprobantes/${comprobanteFileName}`;
+        }
+
+        const newPurchase = {
+            id: Date.now(),
+            nombre_apellido,
+            telefono,
+            cedula,
+            email,
+            numeros_comprados: parsedNumeros,
+            total_usd: parseFloat(total_usd),
+            total_bs: parseFloat(total_bs),
+            metodo_pago,
+            referencia_pago,
+            fecha_compra: fechaCompra,
+            estado: 'pendiente', // O 'confirmado' si no requiere revisión manual
+            comprobante_url: comprobanteUrl,
+            numero_ticket: numeroTicket,
+            correlativo_sorteo: config.ultimo_numero_sorteo_correlativo || 0 // Asociar con el sorteo actual
+        };
+
+        const purchases = await readJsonFile(PURCHASES_FILE);
+        purchases.push(newPurchase);
+        await writeJsonFile(PURCHASES_FILE, purchases);
+
+        // Marcar números como comprados
+        for (const num of parsedNumeros) {
+            if (numbers[num]) {
+                numbers[num].estado = 'comprado';
+                numbers[num].comprador = nombre_apellido;
+                numbers[num].fecha_compra = fechaCompra;
+                numbers[num].metodo_pago = metodo_pago;
+                numbers[num].referencia_pago = referencia_pago;
+                numbers[num].id_compra = newPurchase.id; // Vincular al ID de la compra
+                numbers[num].numero_ticket = numeroTicket;
+                numbers[num].correlativo_sorteo = config.ultimo_numero_sorteo_correlativo || 0;
+            }
+        }
+        await writeJsonFile(NUMBERS_FILE, numbers);
+
+        // Enviar correo de confirmación (asincrónicamente, no bloquea la respuesta)
+        enviarCorreoConfirmacion(newPurchase);
+
+        res.status(201).json({ message: 'Compra realizada con éxito', compra: newPurchase });
+
+    } catch (error) {
+        console.error('Error al procesar la compra:', error);
+        if (error.code === 'ENOENT') {
+            res.status(500).json({ error: 'Error en la configuración del servidor (archivos de datos no encontrados).' });
+        } else {
+            res.status(500).json({ error: 'Error interno del servidor al procesar la compra.', details: error.message });
+        }
+    }
+});
+
+
+// Ruta para obtener todas las compras (Admin)
+app.get('/admin/compras', async (req, res) => {
+    try {
+        const purchases = await readJsonFile(PURCHASES_FILE);
+        res.json(purchases);
+    } catch (error) {
+        console.error('Error al obtener compras:', error);
+        res.status(500).json({ error: 'Error interno del servidor.' });
+    }
+});
+
+// Ruta para obtener la configuración (Admin)
+app.get('/admin/configuracion', async (req, res) => {
     try {
         const config = await readJsonFile(CONFIG_FILE);
         res.json(config);
     } catch (error) {
-        res.status(500).json({ message: 'Error al obtener la configuración', error: error.message });
+        console.error('Error al obtener configuración:', error);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-app.put('/api/configuracion', async (req, res) => {
+// Ruta para actualizar la configuración (Admin)
+app.post('/admin/configuracion', async (req, res) => {
     try {
-        let config = await readJsonFile(CONFIG_FILE);
-        const updatedConfig = { ...config, ...req.body };
-        await writeJsonFile(CONFIG_FILE, updatedConfig);
-        global.config = updatedConfig; // Actualizar la variable global en memoria
-        res.status(200).json({ message: 'Configuración actualizada', config: updatedConfig });
+        const newConfig = req.body;
+        // Solo permitir ciertos campos actualizables para evitar sobreescritura accidental
+        let currentConfig = await readJsonFile(CONFIG_FILE);
+        Object.assign(currentConfig, newConfig); // Actualiza los campos recibidos
+        await writeJsonFile(CONFIG_FILE, currentConfig);
+        res.json({ message: 'Configuración actualizada con éxito', config: currentConfig });
     } catch (error) {
-        res.status(500).json({ message: 'Error al actualizar la configuración', error: error.message });
+        console.error('Error al actualizar configuración:', error);
+        res.status(500).json({ error: 'Error interno del servidor.' });
     }
 });
 
-// Números
-app.get('/api/numeros', async (req, res) => {
+// Ruta para reiniciar la rifa (Admin)
+app.post('/admin/reiniciar-rifa', async (req, res) => {
     try {
-        const numeros = await readJsonFile(NUMEROS_FILE);
-        res.json(numeros);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener los números', error: error.message });
-    }
-});
+        const numbersDefault = Array.from({ length: 100 }, (_, i) => ({
+            numero: i,
+            estado: 'disponible',
+            comprador: null,
+            fecha_compra: null,
+            metodo_pago: null,
+            referencia_pago: null
+        }));
+        await writeJsonFile(NUMBERS_FILE, numbersDefault); // Reinicia los números
 
-// Comprar números
-app.post('/api/numeros/comprar', async (req, res) => {
-    try {
-        const { numerosSeleccionados, comprador, telefono, metodoPago, referenciaPago, valorUsd, valorBs } = req.body;
-        let numeros = await readJsonFile(NUMEROS_FILE);
-        let ventas = await readJsonFile(VENTAS_FILE);
         let config = await readJsonFile(CONFIG_FILE);
-
-        const now = moment().tz("America/Caracas");
-        const fechaCompra = now.format('YYYY-MM-DD HH:mm:ss');
-        const fechaSorteo = config.fecha_sorteo;
-        const numeroSorteoCorrelativo = config.ultimo_numero_sorteo_correlativo;
-
-        // Verificar si algún número ya fue comprado
-        const numerosYaComprados = numerosSeleccionados.filter(n =>
-            numeros.find(numObj => numObj.numero === n && numObj.comprado)
-        );
-
-        if (numerosYaComprados.length > 0) {
-            return res.status(400).json({ message: `Los números ${numerosYaComprados.join(', ')} ya han sido comprados. Por favor, selecciona otros.` });
-        }
-
-        // Incrementar el número de ticket correlativo globalmente
-        config.ultimo_numero_ticket = (config.ultimo_numero_ticket || 0) + 1;
+        config.ultimo_numero_sorteo_correlativo = (config.ultimo_numero_sorteo_correlativo || 0) + 1;
+        config.ultimo_numero_ticket = 0; // Reiniciar el contador de tickets
+        config.fecha_sorteo = moment().tz(config.zona_horaria || "America/Caracas").add(1, 'days').format('YYYY-MM-DD'); // Establecer la fecha del sorteo para mañana
         await writeJsonFile(CONFIG_FILE, config);
 
-        const numeroTicket = config.ultimo_numero_ticket;
+        // Opcional: También podrías querer archivar o limpiar `purchases.json`
+        // await writeJsonFile(PURCHASES_FILE, []); // Limpiar compras anteriores si es un reinicio completo
+        
+        res.json({ message: 'Rifa reiniciada con éxito. Números disponibles y correlativo de sorteo actualizado.', config });
+    } catch (error) {
+        console.error('Error al reiniciar rifa:', error);
+        res.status(500).json({ error: 'Error interno del servidor al reiniciar la rifa.' });
+    }
+});
 
-        // Marcar números como comprados
-        numerosSeleccionados.forEach(selectedNum => {
-            const index = numeros.findIndex(n => n.numero === selectedNum);
-            if (index !== -1) {
-                numeros[index].comprado = true;
-                numeros[index].fecha_compra = fechaCompra;
-                numeros[index].comprador = comprador;
-                numeros[index].telefono = telefono;
-                numeros[index].metodo_pago = metodoPago;
-                numeros[index].referencia_pago = referenciaPago;
-            }
+// Ruta para exportar compras a Excel (Admin)
+app.get('/admin/exportar-excel', async (req, res) => {
+    try {
+        const purchases = await readJsonFile(PURCHASES_FILE);
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Compras de Rifa');
+
+        // Definir columnas
+        worksheet.columns = [
+            { header: 'ID Compra', key: 'id', width: 10 },
+            { header: 'Ticket', key: 'numero_ticket', width: 10 },
+            { header: 'Sorteo Correlativo', key: 'correlativo_sorteo', width: 15 },
+            { header: 'Fecha Compra', key: 'fecha_compra_local', width: 20 },
+            { header: 'Nombre Apellido', key: 'nombre_apellido', width: 30 },
+            { header: 'Cédula', key: 'cedula', width: 15 },
+            { header: 'Teléfono', key: 'telefono', width: 20 },
+            { header: 'Email', key: 'email', width: 30 },
+            { header: 'Números Comprados', key: 'numeros_comprados_str', width: 30 },
+            { header: 'Total USD', key: 'total_usd', width: 15 },
+            { header: 'Total Bs', key: 'total_bs', width: 15 },
+            { header: 'Método Pago', key: 'metodo_pago', width: 20 },
+            { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
+            { header: 'Estado', key: 'estado', width: 15 },
+            { header: 'Comprobante URL', key: 'comprobante_url', width: 40 }
+        ];
+
+        // Añadir filas
+        purchases.forEach(p => {
+            // Se asume que config está disponible globalmente o se carga aquí de nuevo si es necesario.
+            // Para asegurar, la cargamos dentro del bucle si no está garantizado que `config` sea accesible
+            // o se mantenga actualizado de forma global. Para este caso, cargaremos de nuevo para evitar dependencias.
+            // Ojo: Si 'config' no existe (ej. al inicio), esto podría fallar. Se debería cargar al inicio del script.
+            // Aquí, para la exportación, lo hacemos seguro.
+            const config = require(CONFIG_FILE); // Cargar config para zona horaria
+            const fechaLocal = moment(p.fecha_compra).tz(config.zona_horaria || "America/Caracas").format('DD/MM/YYYY hh:mm A');
+            worksheet.addRow({
+                id: p.id,
+                numero_ticket: String(p.numero_ticket).padStart(5, '0'),
+                correlativo_sorteo: p.correlativo_sorteo,
+                fecha_compra_local: fechaLocal,
+                nombre_apellido: p.nombre_apellido,
+                cedula: p.cedula,
+                telefono: p.telefono,
+                email: p.email,
+                numeros_comprados_str: p.numeros_comprados.map(n => String(n).padStart(2, '0')).join(', '),
+                total_usd: p.total_usd,
+                total_bs: p.total_bs,
+                metodo_pago: p.metodo_pago,
+                referencia_pago: p.referencia_pado,
+                estado: p.estado,
+                comprobante_url: p.comprobante_url
+            });
         });
 
-        // Crear registro de venta
-        const nuevaVenta = {
-            id: ventas.length > 0 ? Math.max(...ventas.map(v => v.id)) + 1 : 1,
-            numero_ticket: numeroTicket,
-            numeros: numerosSeleccionados,
-            comprador: comprador,
-            telefono: telefono,
-            metodo_pago: metodoPago,
-            referencia_pago: referenciaPago,
-            valor_usd: valorUsd,
-            valor_bs: valorBs,
-            fecha_compra: fechaCompra,
-            fecha_sorteo: fechaSorteo,
-            numero_sorteo: numeroSorteoCorrelativo,
-            url_comprobante: null // Se llenará si se sube un comprobante
-        };
-        ventas.push(nuevaVenta);
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename=' + 'compras_rifa.xlsx');
 
-        await writeJsonFile(NUMEROS_FILE, numeros);
-        await writeJsonFile(VENTAS_FILE, ventas);
-
-        res.status(201).json({ message: 'Compra realizada con éxito', venta: nuevaVenta });
+        await workbook.xlsx.write(res);
+        res.end();
 
     } catch (error) {
-        console.error('Error al comprar números:', error);
-        res.status(500).json({ message: 'Error interno al procesar la compra', error: error.message });
+        console.error('Error al exportar a Excel:', error);
+        res.status(500).json({ error: 'Error interno del servidor al exportar a Excel.' });
     }
 });
 
-// Obtener todas las ventas (para el panel de administración)
-app.get('/api/ventas', async (req, res) => {
+// Tarea programada para cortar ventas y reiniciar números a medianoche
+// Se ejecuta todos los días a las 00:00 (medianoche) en la zona horaria de Venezuela
+cron.schedule('0 0 * * *', async () => {
     try {
-        const ventas = await readJsonFile(VENTAS_FILE);
-        res.json(ventas);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener las ventas', error: error.message });
-    }
-});
-
-
-// RUTA EXISTENTE: Realizar corte de ventas, enviar reporte por email y REINICIAR el sistema (USADA POR CRON JOB)
-app.post('/api/ventas/corte', async (req, res) => {
-    try {
-        const ventas = await readJsonFile(VENTAS_FILE);
-        let config = await readJsonFile(CONFIG_FILE); // Cargar configuración para reiniciar números
-
-        // Generar el nombre del archivo Excel
-        const now = moment().tz("America/Caracas");
-        const dateString = now.format('YYYYMMMM_HHmmss'); // Corregido el formato para el mes
-        const excelFileName = `Reporte_Ventas_${dateString}.xlsx`;
-        const excelFilePath = path.join(__dirname, 'temp', excelFileName);
-
-        // Mapear los datos para el archivo Excel
-        const dataToExport = ventas.map(venta => ({
-            'Fecha/Hora Compra': venta.fecha_compra ? moment(venta.fecha_compra).format('DD/MM/YYYY HH:mm:ss') : 'N/A',
-            'Fecha Sorteo': venta.fecha_sorteo ? moment(venta.fecha_sorteo).format('DD/MM/YYYY') : 'N/A',
-            'Nro. Sorteo': venta.numero_sorteo || 'N/A',
-            'Nro. Ticket': venta.numero_ticket || 'N/A',
-            'Comprador': venta.comprador || 'N/A',
-            'Teléfono': venta.telefono || 'N/A',
-            'Números': (venta.numeros && venta.numeros.length > 0) ? venta.numeros.join(', ') : 'N/A',
-            'Valor USD': (venta.valor_usd !== undefined) ? venta.valor_usd.toFixed(2) : 'N/A',
-            'Valor Bs': (venta.valor_bs !== undefined) ? venta.valor_bs.toFixed(2) : 'N/A',
-            'Método de Pago': venta.metodo_pago || 'N/A',
-            'Referencia Pago': venta.referencia_pago || 'N/A',
-            'URL Comprobante': venta.url_comprobante || 'N/A'
-        }));
-
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Ventas');
-
-        if (dataToExport.length > 0) {
-            // Añadir encabezados
-            worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
-                header: key,
-                key: key,
-                width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
-            }));
-            // Añadir datos
-            worksheet.addRows(dataToExport);
-            // Estilos para encabezados (opcional)
-            worksheet.getRow(1).eachCell((cell) => {
-                cell.font = { bold: true };
-                cell.alignment = { horizontal: 'center' };
-            });
-        } else {
-            console.log('No hay ventas registradas para generar el reporte Excel (corte con reinicio). Se enviará un Excel con solo encabezados.');
-            worksheet.columns = [
-                { header: 'Fecha/Hora Compra', key: 'Fecha/Hora Compra', width: 20 },
-                { header: 'Fecha Sorteo', key: 'Fecha Sorteo', width: 15 },
-                { header: 'Nro. Sorteo', key: 'Nro. Sorteo', width: 15 },
-                { header: 'Nro. Ticket', key: 'Nro. Ticket', width: 15 },
-                { header: 'Comprador', key: 'Comprador', width: 15 },
-                { header: 'Teléfono', key: 'Teléfono', width: 20 },
-                { header: 'Números', key: 'Números', width: 15 },
-                { header: 'Valor USD', key: 'Valor USD', width: 15 },
-                { header: 'Valor Bs', key: 'Valor Bs', width: 15 },
-                { header: 'Método de Pago', key: 'Método de Pago', width: 15 },
-                { header: 'Referencia Pago', key: 'Referencia Pago', width: 15 },
-                { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
-            ];
-        }
-
-        // Crear el buffer del archivo Excel
-        const excelBuffer = await workbook.xlsx.writeBuffer();
-
-        // Enviar el correo electrónico
-        const mailOptions = {
-            from: global.config.mail_config.user, // Usar la credencial del config
-            to: global.config.admin_email_for_reports, // Usar el email del admin del config
-            subject: `Corte de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
-            html: `
-                <p>Adjunto encontrarás el reporte de ventas correspondiente al corte y reinicio realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
-                <p>Las ventas y los números disponibles han sido reiniciados.</p>
-                ${dataToExport.length > 0 ? `<p>Total de ventas en este corte: ${ventas.length}</p>` : `<p>No se registraron ventas en este corte.</p>`}
-                <p>Gracias.</p>
-            `,
-            attachments: [{
-                filename: excelFileName,
-                content: excelBuffer,
-                contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            }]
-        };
-
-        await transporter.sendMail(mailOptions);
-
-        console.log('Reporte de ventas enviado por correo electrónico y sistema reiniciado.');
-
-        // Reiniciar las ventas y los números disponibles
-        await writeJsonFile(VENTAS_FILE, []); // Borra las ventas
-        await writeJsonFile(NUMEROS_FILE, initialNumbers); // Reinicia los números a su estado inicial
-
-        // Actualizar el número de sorteo correlativo y reiniciar el ticket para el nuevo ciclo
-        config.ultimo_numero_sorteo_correlativo = (config.ultimo_numero_sorteo_correlativo || 0) + 1;
-        config.ultimo_numero_ticket = 0;
-        await writeJsonFile(CONFIG_FILE, config);
-
-
-        res.status(200).json({ message: 'Corte de ventas realizado, reporte enviado y sistema reiniciado con éxito.' });
-
-    } catch (error) {
-        console.error('Error en el corte de ventas y reinicio:', error);
-        res.status(500).json({ message: 'Error interno al realizar el corte de ventas y reinicio.' });
-    }
-});
-
-// NUEVA RUTA: Realizar corte de ventas y enviar reporte por email (SIN REINICIAR VENTAS)
-app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
-    try {
-        const ventas = await readJsonFile(VENTAS_FILE);
-        const config = await readJsonFile(CONFIG_FILE); // Para acceder a admin_whatsapp_numbers si fuera necesario, aunque no se usa directamente aquí
-
-        // Generar el nombre del archivo Excel
-        const now = moment().tz("America/Caracas");
-        const dateString = now.format('YYYYMMDD_HHmmss');
-        const excelFileName = `Reporte_Ventas_${dateString}.xlsx`;
-
-        // Mapear los datos para el archivo Excel
-        const dataToExport = ventas.map(venta => ({
-            'Fecha/Hora Compra': venta.fecha_compra ? moment(venta.fecha_compra).format('DD/MM/YYYY HH:mm:ss') : 'N/A',
-            'Fecha Sorteo': venta.fecha_sorteo ? moment(venta.fecha_sorteo).format('DD/MM/YYYY') : 'N/A',
-            'Nro. Sorteo': venta.numero_sorteo || 'N/A',
-            'Nro. Ticket': venta.numero_ticket || 'N/A',
-            'Comprador': venta.comprador || 'N/A',
-            'Teléfono': venta.telefono || 'N/A',
-            'Números': (venta.numeros && venta.numeros.length > 0) ? venta.numeros.join(', ') : 'N/A',
-            'Valor USD': (venta.valor_usd !== undefined) ? venta.valor_usd.toFixed(2) : 'N/A',
-            'Valor Bs': (venta.valor_bs !== undefined) ? venta.valor_bs.toFixed(2) : 'N/A',
-            'Método de Pago': venta.metodo_pago || 'N/A',
-            'Referencia Pago': venta.referencia_pago || 'N/A',
-            'URL Comprobante': venta.url_comprobante || 'N/A'
-        }));
-
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Ventas');
-
-        if (dataToExport.length > 0) {
-            // Añadir encabezados
-            worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
-                header: key,
-                key: key,
-                width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
-            }));
-
-            // Añadir datos
-            worksheet.addRows(dataToExport);
-
-            // Estilos para encabezados (opcional)
-            worksheet.getRow(1).eachCell((cell) => {
-                cell.font = { bold: true };
-                cell.alignment = { horizontal: 'center' };
-            });
-        } else {
-            console.log('No hay ventas registradas para generar el reporte Excel (corte manual). Se enviará un Excel con solo encabezados.');
-            worksheet.columns = [
-                { header: 'Fecha/Hora Compra', key: 'Fecha/Hora Compra', width: 20 },
-                { header: 'Fecha Sorteo', key: 'Fecha Sorteo', width: 15 },
-                { header: 'Nro. Sorteo', key: 'Nro. Sorteo', width: 15 },
-                { header: 'Nro. Ticket', key: 'Nro. Ticket', width: 15 },
-                { header: 'Comprador', key: 'Comprador', width: 15 },
-                { header: 'Teléfono', key: 'Teléfono', width: 20 },
-                { header: 'Números', key: 'Números', width: 15 },
-                { header: 'Valor USD', key: 'Valor USD', width: 15 },
-                { header: 'Valor Bs', key: 'Valor Bs', width: 15 },
-                { header: 'Método de Pago', key: 'Método de Pago', width: 15 },
-                { header: 'Referencia Pago', key: 'Referencia Pago', width: 15 },
-                { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
-            ];
-        }
-
-        // Crear el buffer del archivo Excel
-        const excelBuffer = await workbook.xlsx.writeBuffer();
-
-        // Enviar el correo electrónico
-        const mailOptions = {
-            from: global.config.mail_config.user, // Usar la credencial del config
-            to: global.config.admin_email_for_reports, // Usar el email del admin del config
-            subject: `Corte de Ventas Manual - ${now.format('DD/MM/YYYY HH:mm')}`,
-            html: `
-                <p>Adjunto encontrarás el reporte de ventas correspondiente al corte manual realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
-                ${dataToExport.length > 0 ? `<p>Total de ventas registradas en este corte: ${ventas.length}</p>` : `<p>No se registraron ventas en este corte.</p>`}
-                <p>Este corte fue solicitado manualmente y las ventas NO han sido reiniciadas.</p>
-                <p>Gracias.</p>
-            `,
-            attachments: [{
-                filename: excelFileName,
-                content: excelBuffer,
-                contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            }]
-        };
-
-        await transporter.sendMail(mailOptions);
-
-        console.log('Reporte de ventas manual enviado por correo electrónico (sin reinicio).');
-
-        // ***** IMPORTANTE: NO REINICIAR VENTAS NI NÚMEROS AQUÍ *****
-        // Las ventas se mantienen intactas en la base de datos (VENTAS_FILE).
-        // Los números disponibles en NUMEROS_FILE no se tocan.
-        // No se actualiza config.ultimo_numero_sorteo_correlativo ni ultimo_numero_ticket aquí.
-
-        res.status(200).json({ message: 'Corte de ventas realizado y reporte enviado por correo. Las ventas NO han sido reiniciadas.' });
-
-    } catch (error) {
-        console.error('Error en el corte de ventas (solo email):', error);
-        res.status(500).json({ message: 'Error interno al realizar el corte de ventas.' });
-    }
-});
-
-// Rutas para Horarios del Zulia
-app.get('/api/horarios-zulia', async (req, res) => {
-    try {
-        const horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
-        res.json(horarios);
-    } catch (error) {
-        res.status(500).json({ message: 'Error al obtener horarios del Zulia', error: error.message });
-    }
-});
-
-app.post('/api/horarios-zulia', async (req, res) => {
-    try {
-        const { horario } = req.body;
-        if (!horario || !/^\d{2}:\d{2}$/.test(horario)) {
-            return res.status(400).json({ message: 'Formato de horario inválido. Use HH:MM.' });
-        }
-        let horarios = await readJsonFile(HORARIOS_ZULIA_FILE, []);
-        if (horarios.includes(horario)) {
-            return res.status(409).json({ message: 'El horario ya existe.' });
-        }
-        horarios.push(horario);
-        horarios.sort(); // Opcional: ordenar los horarios
-        await writeJsonFile(HORARIOS_ZULIA_FILE, horarios);
-        global.horariosZulia = horarios; // Actualizar globalmente
-        res.status(201).json({ message: 'Horario agregado con éxito', horarios });
-    } catch (error) {
-        res.status(500).json({ message: 'Error al agregar horario', error: error.message });
-    }
-});
-
-app.delete('/api/horarios-zulia', async (req, res) => {
-    try {
-        const { horario } = req.body;
-        let horarios = await readJsonFile(HORARIOS_ZULIA_FILE);
-        const initialLength = horarios.length;
-        horarios = horarios.filter(h => h !== horario);
-        if (horarios.length === initialLength) {
-            return res.status(404).json({ message: 'Horario no encontrado.' });
-        }
-        await writeJsonFile(HORARIOS_ZULIA_FILE, horarios);
-        global.horariosZulia = horarios; // Actualizar globalmente
-        res.status(200).json({ message: 'Horario eliminado con éxito', horarios });
-    } catch (error) {
-        res.status(500).json({ message: 'Error al eliminar horario', error: error.message });
-    }
-});
-
-
-// Tarea programada (CRON JOB): Esta sigue siendo la que reinicia
-cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos los días a medianoche (hora de Caracas)
-    try {
-        console.log('Iniciando tarea programada de corte de ventas y reinicio...');
-        const ventas = await readJsonFile(VENTAS_FILE);
-        let config = await readJsonFile(CONFIG_FILE);
-
-        // Solo procede si hay ventas o si la fecha de sorteo actual es pasada
-        const now = moment().tz("America/Caracas");
+        const config = await readJsonFile(CONFIG_FILE);
+        const now = moment().tz(config.zona_horaria || "America/Caracas");
         const todayFormatted = now.format('YYYY-MM-DD');
-        const currentDrawDate = config.fecha_sorteo;
+        const currentDrawDate = moment(config.fecha_sorteo).format('YYYY-MM-DD');
 
-        // Comprueba si la fecha del sorteo actual es anterior o igual a hoy
-        if (moment(currentDrawDate).isSameOrBefore(todayFormatted) || ventas.length > 0) {
-            console.log('Realizando corte de ventas y reinicio por tarea programada.');
+        console.log(`Ejecutando tarea programada a las ${now.format('HH:mm:ss')}.`);
+        console.log(`Fecha actual (zona horaria del servidor): ${todayFormatted}`);
+        console.log(`Fecha de sorteo configurada: ${currentDrawDate}`);
 
-            const dateString = now.format('YYYYMMDD_HHmmss');
-            const excelFileName = `Reporte_Ventas_Automatica_${dateString}.xlsx`;
-
-            const dataToExport = ventas.map(venta => ({
-                'Fecha/Hora Compra': venta.fecha_compra ? moment(venta.fecha_compra).format('DD/MM/YYYY HH:mm:ss') : 'N/A',
-                'Fecha Sorteo': venta.fecha_sorteo ? moment(venta.fecha_sorteo).format('DD/MM/YYYY') : 'N/A',
-                'Nro. Sorteo': venta.numero_sorteo || 'N/A',
-                'Nro. Ticket': venta.numero_ticket || 'N/A',
-                'Comprador': venta.comprador || 'N/A',
-                'Teléfono': venta.telefono || 'N/A',
-                'Números': (venta.numeros && venta.numeros.length > 0) ? venta.numeros.join(', ') : 'N/A',
-                'Valor USD': (venta.valor_usd !== undefined) ? venta.valor_usd.toFixed(2) : 'N/A',
-                'Valor Bs': (venta.valor_bs !== undefined) ? venta.valor_bs.toFixed(2) : 'N/A',
-                'Método de Pago': venta.metodo_pago || 'N/A',
-                'Referencia Pago': venta.referencia_pago || 'N/A',
-                'URL Comprobante': venta.url_comprobante || 'N/A'
+        // Si la fecha del sorteo es hoy o una fecha pasada, reiniciar números
+        if (moment(currentDrawDate).isSameOrBefore(todayFormatted, 'day')) {
+            console.log(`Sorteo de fecha ${currentDrawDate} ha terminado o es hoy. Reiniciando números y actualizando la fecha del próximo sorteo.`);
+            const numbersDefault = Array.from({ length: 100 }, (_, i) => ({
+                numero: i,
+                estado: 'disponible',
+                comprador: null,
+                fecha_compra: null,
+                metodo_pago: null,
+                referencia_pago: null
             }));
-
-            const workbook = new ExcelJS.Workbook();
-            const worksheet = workbook.addWorksheet('Ventas');
-
-            if (dataToExport.length > 0) {
-                worksheet.columns = Object.keys(dataToExport[0]).map(key => ({
-                    header: key,
-                    key: key,
-                    width: key === 'Fecha/Hora Compra' || key === 'Teléfono' ? 20 : 15
-                }));
-                worksheet.addRows(dataToExport);
-                worksheet.getRow(1).eachCell((cell) => {
-                    cell.font = { bold: true };
-                    cell.alignment = { horizontal: 'center' };
-                });
-            } else {
-                console.log('No hay ventas registradas para generar el reporte Excel (cron job). Se enviará un Excel con solo encabezados.');
-                worksheet.columns = [
-                    { header: 'Fecha/Hora Compra', key: 'Fecha/Hora Compra', width: 20 },
-                    { header: 'Fecha Sorteo', key: 'Fecha Sorteo', width: 15 },
-                    { header: 'Nro. Sorteo', key: 'Nro. Sorteo', width: 15 },
-                    { header: 'Nro. Ticket', key: 'Nro. Ticket', width: 15 },
-                    { header: 'Comprador', key: 'Comprador', width: 15 },
-                    { header: 'Teléfono', key: 'Teléfono', width: 20 },
-                    { header: 'Números', key: 'Números', width: 15 },
-                    { header: 'Valor USD', key: 'Valor USD', width: 15 },
-                    { header: 'Valor Bs', key: 'Valor Bs', width: 15 },
-                    { header: 'Método de Pago', key: 'Método de Pago', width: 15 },
-                    { header: 'Referencia Pago', key: 'Referencia Pago', width: 15 },
-                    { header: 'URL Comprobante', key: 'URL Comprobante', width: 15 }
-                ];
-            }
-
-            const excelBuffer = await workbook.xlsx.writeBuffer();
-
-            const mailOptions = {
-                from: global.config.mail_config.user, // Usar la credencial del config
-                to: global.config.admin_email_for_reports, // Usar el email del admin del config
-                subject: `Reporte Automático de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
-                html: `
-                    <p>Adjunto encontrarás el reporte de ventas del día, generado automáticamente.</p>
-                    <p>El sistema de ventas y números disponibles ha sido reiniciado para el próximo sorteo.</p>
-                    ${dataToExport.length > 0 ? `<p>Total de ventas registradas en este corte: ${ventas.length}</p>` : `<p>No se registraron ventas en este corte.</p>`}
-                    <p>Gracias.</p>
-                `,
-                attachments: [{
-                    filename: excelFileName,
-                    content: excelBuffer,
-                    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                }]
-            };
-
-            await transporter.sendMail(mailOptions);
-            console.log('Reporte de ventas automático enviado por correo electrónico.');
-
-            // Reiniciar ventas y números
-            await writeJsonFile(VENTAS_FILE, []); // Borra las ventas
-            await writeJsonFile(NUMEROS_FILE, initialNumbers); // Reinicia los números
+            await writeJsonFile(NUMBERS_FILE, numbersDefault); // Reinicia los números
 
             // Actualizar la fecha del próximo sorteo a mañana y el correlativo
             config.fecha_sorteo = now.clone().add(1, 'days').format('YYYY-MM-DD');
@@ -616,8 +485,14 @@ ensureDataAndComprobantesDirs().then(() => {
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
-            console.log(`Panel de administración disponible en: https://paneladmin01.netlify.app/`);
-            console.log(`Plataforma de rifas disponible en: https://tuoportunidadeshoy.netlify.app/`);
+            // NOTA: Esta URL de paneladmin01.netlify.app debe ser la real para tu frontend de administración
+            console.log(`Panel de administración disponible en: https://paneladmin01.netlify.app`);
+            // NOTA: Esta URL de tuoportunidadeshoy.netlify.app debe ser la real para tu frontend de usuario
+            console.log(`Plataforma de usuario disponible en: https://tuoportunidadeshoy.netlify.app`);
         });
+    }).catch(error => {
+        console.error('Error al cargar datos iniciales o iniciar el servidor:', error);
     });
+}).catch(error => {
+    console.error('Error al asegurar directorios:', error);
 });
