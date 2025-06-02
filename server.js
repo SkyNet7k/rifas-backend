@@ -61,6 +61,7 @@ let ventas = [];
 let horariosZulia = { horarios_zulia: [] };
 let resultadosZulia = [];
 let comprobantesRegistros = [];
+let transporter; // Declaramos transporter aquí para que sea global
 
 // --- Funciones de Utilidad para manejo de JSON ---
 async function readJsonFile(filePath) {
@@ -81,13 +82,14 @@ async function writeJsonFile(filePath, data) {
     await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// --- Funciones de Carga Inicial ---
+// --- Funciones de Carga Inicial y Configuración del Mailer ---
 async function ensureDataAndComprobantesDirs() {
     await fs.mkdir(DATA_DIR, { recursive: true });
     await fs.mkdir(COMPROBANTES_DIR, { recursive: true });
 }
 
-async function loadInitialData() {
+// Renombramos la función para reflejar que también configura el mailer
+async function loadInitialDataAndSetupMailer() {
     try {
         configuracion = await readJsonFile(CONFIG_FILE);
         if (Object.keys(configuracion).length === 0) {
@@ -119,6 +121,23 @@ async function loadInitialData() {
                 metodos_de_pago: ["Pago Móvil", "Transferencia", "Binance", "Zelle"]
             };
             await writeJsonFile(CONFIG_FILE, configuracion);
+        }
+
+        // Inicializar el transportador de Nodemailer aquí, después de cargar la config
+        // Se asegura de que configuracion.mail_config.user y .pass existan antes de usar
+        if (configuracion.mail_config && configuracion.mail_config.user && configuracion.mail_config.pass) {
+            transporter = nodemailer.createTransport({
+                host: configuracion.mail_config.host,
+                port: configuracion.mail_config.port,
+                secure: configuracion.mail_config.secure,
+                auth: {
+                    user: configuracion.mail_config.user,
+                    pass: configuracion.mail_config.pass,
+                },
+            });
+            console.log('Transportador de Nodemailer inicializado con éxito.');
+        } else {
+            console.warn('Configuración de correo incompleta (user/pass faltantes). El transportador de correo no se inicializará.');
         }
 
         numeros = await readJsonFile(NUMEROS_FILE);
@@ -158,7 +177,7 @@ async function loadInitialData() {
 
         console.log('Datos iniciales cargados con éxito.');
     } catch (error) {
-        console.error('Error al cargar datos iniciales:', error);
+        console.error('Error al cargar datos iniciales o configurar el mailer:', error);
         process.exit(1); // Salir si los datos esenciales no se pueden cargar
     }
 }
@@ -177,19 +196,15 @@ function isAuthenticated(req, res, next) {
 }
 
 // --- Funciones de Notificación ---
-const transporter = nodemailer.createTransport({
-    host: configuracion.mail_config.host,
-    port: configuracion.mail_config.port,
-    secure: configuracion.mail_config.secure,
-    auth: {
-        user: configuracion.mail_config.user,
-        pass: configuracion.mail_config.pass,
-    },
-});
-
+// Eliminamos la inicialización directa de transporter aquí, ya que se hace en loadInitialDataAndSetupMailer()
 async function enviarCorreoNotificacion(subject, textContent, htmlContent, attachments = []) {
+    // Verificamos si transporter se inicializó correctamente
+    if (!transporter) {
+        console.error('El transportador de correo no está inicializado. No se puede enviar el correo.');
+        return;
+    }
     if (!configuracion.mail_config.user || !configuracion.mail_config.pass || !configuracion.admin_email_for_reports) {
-        console.error('Configuración de correo incompleta. No se puede enviar el correo.');
+        console.error('Configuración de correo incompleta (user/pass o admin_email_for_reports faltantes). No se puede enviar el correo.');
         return;
     }
 
@@ -221,7 +236,7 @@ app.get('/configuracion', async (req, res) => {
             fechaSorteo: configuracion.fecha_sorteo,
             precioTicket: configuracion.precio_ticket,
             numeroSorteoCorrelativo: configuracion.numero_sorteo_correlativo,
-            whatsappContactNumber: configuracion.whatsapp_contact_number, // Nuevo campo
+            whatsappContactNumber: configuracion.whatsapp_contact_number,
             codigosPais: configuracion.codigos_pais,
             metodosDePago: configuracion.metodos_de_pago
         };
@@ -245,29 +260,33 @@ app.get('/numeros-disponibles', async (req, res) => {
 
 // 3. Endpoint de Compra
 app.post('/comprar', async (req, res) => {
-    const { numeros, comprador, telefono, metodo_pago, referencia_pago, valor_usd, valor_bs, fecha_sorteo, numero_sorteo_correlativo } = req.body;
+    const { numeros: numerosComprados, comprador, telefono, metodo_pago, referencia_pago, valor_usd, valor_bs, fecha_sorteo, numero_sorteo_correlativo } = req.body;
 
-    if (!numeros || !Array.isArray(numeros) || numeros.length === 0 || !comprador || !telefono || !metodo_pago || !referencia_pago || valor_usd === undefined || valor_bs === undefined) {
+    if (!numerosComprados || !Array.isArray(numerosComprados) || numerosComprados.length === 0 || !comprador || !telefono || !metodo_pago || !referencia_pago || valor_usd === undefined || valor_bs === undefined) {
         return res.status(400).json({ message: 'Faltan datos requeridos para la compra.' });
     }
 
     try {
-        // Verificar si los números aún están disponibles
-        const numerosNoDisponibles = numeros.filter(num => {
-            const numeroEncontrado = numeros.find(n => n.numero === num);
-            return !numeroEncontrado || numeroEncontrado.comprado;
-        });
+        // Verificar si los números aún están disponibles y actualizarlos
+        const numerosParaActualizar = [];
+        const numerosNoDisponibles = [];
+
+        for (const num of numerosComprados) {
+            const numeroEncontradoIndex = numeros.findIndex(n => n.numero === num);
+            if (numeroEncontradoIndex !== -1 && !numeros[numeroEncontradoIndex].comprado) {
+                numerosParaActualizar.push(numeroEncontradoIndex);
+            } else {
+                numerosNoDisponibles.push(num);
+            }
+        }
 
         if (numerosNoDisponibles.length > 0) {
             return res.status(409).json({ message: `Algunos números ya no están disponibles: ${numerosNoDisponibles.join(', ')}` });
         }
 
         // Actualizar el estado de los números a "comprado"
-        numeros.forEach(num => {
-            const index = numeros.findIndex(n => n.numero === num);
-            if (index !== -1) {
-                numeros[index].comprado = true;
-            }
+        numerosParaActualizar.forEach(index => {
+            numeros[index].comprado = true;
         });
         await writeJsonFile(NUMEROS_FILE, numeros);
 
@@ -283,27 +302,27 @@ app.post('/comprar', async (req, res) => {
             fecha_sorteo: fecha_sorteo,
             numero_sorteo_correlativo: numero_sorteo_correlativo,
             numero_ticket: numeroTicket,
-            numeros: numeros,
+            numeros: numerosComprados, // Asegúrate de usar los números de la compra
             comprador: comprador,
             telefono: telefono,
             valor_usd: valor_usd,
             valor_bs: valor_bs,
             metodo_pago: metodo_pago,
             referencia_pago: referencia_pago,
-            url_comprobante: null, // Asumimos que el comprobante se manejará aparte si es necesario
-            status: 'pendiente_verificacion' // Añadir un estado inicial
+            url_comprobante: null,
+            status: 'pendiente_verificacion'
         };
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
 
-        // Notificar al administrador (opcional, se puede activar/desactivar)
+        // Notificar al administrador
         const emailSubject = `Nueva Compra - Ticket #${numeroTicket}`;
         const emailHtml = `
             <h3>¡Nueva Apuesta Realizada!</h3>
             <p><strong>Ticket #:</strong> ${numeroTicket}</p>
             <p><strong>Comprador:</strong> ${comprador}</p>
             <p><strong>Teléfono:</strong> ${telefono}</p>
-            <p><strong>Números Comprados:</strong> ${numeros.join(', ')}</p>
+            <p><strong>Números Comprados:</strong> ${numerosComprados.join(', ')}</p>
             <p><strong>Total USD:</strong> $${valor_usd.toFixed(2)}</p>
             <p><strong>Total Bs:</strong> Bs ${valor_bs.toFixed(2)}</p>
             <p><strong>Método de Pago:</strong> ${metodo_pago}</p>
@@ -338,12 +357,6 @@ app.post('/finalizar-apuesta', async (req, res) => {
     try {
         console.log("Datos de finalización de apuesta recibidos:", datosFinalizacion);
 
-        // Aquí podrías:
-        // 1. Guardar estos datos en un archivo de log/registro de finalizaciones.
-        //    Por ejemplo, en un nuevo archivo `finalizaciones.json` o añadir un campo `finalizado: true`
-        //    a la venta existente en `ventas.json` si puedes correlacionarla por `numero_ticket` o similar.
-        //    Por simplicidad, vamos a loguearlo y enviarlo por correo.
-
         // Opcional: Si quieres actualizar una venta existente a un estado "finalizado por el cliente"
         // Necesitarías un identificador único como `numero_ticket` enviado desde el frontend.
         // const { numero_ticket } = datosFinalizacion;
@@ -356,12 +369,10 @@ app.post('/finalizar-apuesta', async (req, res) => {
         //     }
         // }
 
-
         // Notificar al administrador que una apuesta ha sido "finalizada" por el cliente.
-        // Esto es útil si el administrador necesita revisar el comprobante o realizar alguna acción manual.
         const emailSubject = `Apuesta Finalizada por Cliente - ${datosFinalizacion.comprador || 'Desconocido'}`;
         const emailHtml = `
-            <h3>El Cliente ha Finalizado una Apuesta</h3>
+            <h3>El Cliente ha Hecho Clic en "Finalizar Apuesta"</h3>
             <p>El cliente ha hecho clic en "Finalizar Apuesta" en el comprobante.</p>
             <p><strong>Comprador:</strong> ${datosFinalizacion.comprador || 'N/A'}</p>
             <p><strong>Teléfono:</strong> ${datosFinalizacion.telefono || 'N/A'}</p>
@@ -675,7 +686,7 @@ app.get('/admin/exportar-ventas-excel', isAuthenticated, async (req, res) => {
             { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
             { header: 'Referencia Pago', key: 'referencia_pago', width: 25 },
             { header: 'URL Comprobante', key: 'url_comprobante', width: 50 },
-            { header: 'Estado', key: 'status', width: 20 } // Nuevo campo de estado
+            { header: 'Estado', key: 'status', width: 20 }
         ];
 
         ventas.forEach(venta => {
@@ -693,7 +704,7 @@ app.get('/admin/exportar-ventas-excel', isAuthenticated, async (req, res) => {
                 metodo_pago: venta.metodo_pago || 'N/A',
                 referencia_pago: venta.referencia_pago || 'N/A',
                 url_comprobante: venta.url_comprobante || 'N/A',
-                status: venta.status || 'N/A' // Asegúrate de que el estado se exporte
+                status: venta.status || 'N/A'
             });
         });
 
@@ -745,13 +756,13 @@ app.post('/admin/corte-ventas', isAuthenticated, async (req, res) => {
 });
 
 // --- TAREA PROGRAMADA (CRON JOB) ---
-// Este cron job se ejecuta diariamente para asegurar que la fecha del sorteo
-// y los números se reinicien automáticamente después de la fecha del sorteo configurada.
+// Este cron job se ejecuta a las 00:00 (medianoche) todos los días en la zona horaria de Caracas.
+// Su propósito es reiniciar los números, ventas y actualizar la fecha del sorteo si el sorteo actual ha pasado.
 cron.schedule('0 0 * * *', async () => { // Se ejecuta a las 00:00 (medianoche) todos los días
     console.log('Ejecutando tarea programada de verificación de sorteo y reinicio...');
     try {
         // Recargar la configuración para asegurar que es la más reciente
-        await loadInitialData();
+        await loadInitialDataAndSetupMailer(); // Usa la función que también carga la configuración
 
         const todayFormatted = moment().tz("America/Caracas").format('YYYY-MM-DD');
         const currentDrawDate = configuracion.fecha_sorteo;
@@ -800,7 +811,8 @@ cron.schedule('0 0 * * *', async () => { // Se ejecuta a las 00:00 (medianoche) 
 
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
-    loadInitialData().then(() => {
+    // Usamos la nueva función que también inicializa el mailer
+    loadInitialDataAndSetupMailer().then(() => {
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
