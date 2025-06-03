@@ -94,7 +94,7 @@ async function loadInitialData() {
     global.config = await readJsonFile(CONFIG_FILE, {
         precio_ticket: 1.00,
         tasa_dolar: 36.50,
-        fecha_sorteo: moment().tz("America/Caracas").add(1, 'day').format('YYYY-MM-DD'), // Usar moment-timezone para la fecha del sorteo
+        fecha_sorteo: moment().add(1, 'day').format('YYYY-MM-DD'),
         ultimo_numero_ticket: 0,
         ultimo_numero_sorteo_correlativo: 1,
         pagina_bloqueada: false,
@@ -126,42 +126,7 @@ async function loadInitialData() {
 // Servir archivos estáticos (comprobantes)
 app.use('/comprobantes', express.static(COMPROBANTES_DIR));
 
----
-
-## Rutas de la API (Corregidas)
-
-Aquí están las rutas con el prefijo `/api` añadido para que coincidan con tus llamadas desde el frontend.
-
-```javascript
 // Configuración
-// ***************************************************************************************************
-// ESTA ES LA RUTA QUE TU FRONTEND ESTÁ BUSCANDO PARA OBTENER LA CONFIGURACIÓN INICIAL
-// Redirige a /api/configuracion que ya existe y contiene la lógica.
-app.get('/api/config', async (req, res) => {
-    try {
-        // Llama a la lógica de la ruta existente '/api/configuracion'
-        const config = await readJsonFile(CONFIG_FILE);
-
-        // Mapear los campos que tu frontend espera de /api/config
-        // Asegúrate de que los nombres de las propiedades coincidan con los que espera script.js
-        const frontendConfig = {
-            bloqueado: config.pagina_bloqueada || false, // Asegúrate de que 'pagina_bloqueada' se mapee a 'bloqueado'
-            fecha_sorteo: config.fecha_sorteo || moment().tz("America/Caracas").add(1, 'day').format('YYYY-MM-DD'), // Asegúrate que siempre haya una fecha
-            tasa_usd_bs: config.tasa_dolar || 0, // Asegúrate de que 'tasa_dolar' se mapee a 'tasa_usd_bs'
-            ultimo_numero_sorteo: config.ultimo_numero_sorteo_correlativo || 0, // Mapeo a lo que espera el frontend
-            ultimo_numero_ticket: config.ultimo_numero_ticket || 0, // Mapeo a lo que espera el frontend
-            admin_whatsapp_number: config.admin_whatsapp_numbers && config.admin_whatsapp_numbers.length > 0 ? config.admin_whatsapp_numbers[0] : '' // Si tienes múltiples, toma el primero o un string vacío
-        };
-        res.json(frontendConfig);
-    } catch (error) {
-        // Captura cualquier error y responde con un 500
-        console.error('Error al obtener la configuración para /api/config:', error);
-        res.status(500).json({ message: 'Error al cargar la configuración inicial', error: error.message });
-    }
-});
-// ***************************************************************************************************
-
-// La ruta original de configuración sigue existiendo y funcionando
 app.get('/api/configuracion', async (req, res) => {
     try {
         const config = await readJsonFile(CONFIG_FILE);
@@ -194,15 +159,7 @@ app.get('/api/numeros', async (req, res) => {
 });
 
 // Comprar números
-// ***************************************************************************************************
-// ESTA ES LA RUTA QUE TU FRONTEND ESTÁ BUSCANDO PARA COMPRAR NÚMEROS
-// Asegúrate de que la ruta aquí coincida con la que llama tu frontend (API_BASE_URL + '/api/comprar-numeros')
-// En tu script.js tienes: API_BASE_URL + '/api/comprar-numeros' (línea 286 de script.js)
-// Y en tu server.js actual la ruta es: '/api/numeros/comprar'
-// Para corregir el error 404 para la compra, necesitamos alinear esto.
-
-// Renombramos la ruta para que coincida con lo que espera el frontend
-app.post('/api/comprar-numeros', async (req, res) => { // CAMBIADO DE '/api/numeros/comprar' a '/api/comprar-numeros'
+app.post('/api/numeros/comprar', async (req, res) => {
     try {
         const { numerosSeleccionados, comprador, telefono, metodoPago, referenciaPago, valorUsd, valorBs } = req.body;
         let numeros = await readJsonFile(NUMEROS_FILE);
@@ -263,31 +220,13 @@ app.post('/api/comprar-numeros', async (req, res) => { // CAMBIADO DE '/api/nume
         await writeJsonFile(NUMEROS_FILE, numeros);
         await writeJsonFile(VENTAS_FILE, ventas);
 
-        // La respuesta del backend al frontend para la compra
-        // Tu script.js espera un objeto 'venta' con la info del comprobante
-        res.status(201).json({ 
-            message: 'Compra realizada con éxito', 
-            venta: { // Asegúrate de que esta estructura coincida con lo que espera tu frontend para el comprobante
-                numeroTicket: nuevaVenta.numero_ticket,
-                numeros: nuevaVenta.numeros,
-                comprador: nuevaVenta.comprador,
-                telefono: nuevaVenta.telefono,
-                totalUsd: nuevaVenta.valor_usd,
-                totalBs: nuevaVenta.valor_bs,
-                metodoPago: nuevaVenta.metodo_pago,
-                referencia: nuevaVenta.referencia_pago,
-                fechaSorteo: nuevaVenta.fecha_sorteo,
-                numeroSorteo: nuevaVenta.numero_sorteo
-            }
-        });
+        res.status(201).json({ message: 'Compra realizada con éxito', venta: nuevaVenta });
 
     } catch (error) {
         console.error('Error al comprar números:', error);
         res.status(500).json({ message: 'Error interno al procesar la compra', error: error.message });
     }
 });
-// ***************************************************************************************************
-
 
 // Obtener todas las ventas (para el panel de administración)
 app.get('/api/ventas', async (req, res) => {
@@ -554,13 +493,6 @@ app.delete('/api/horarios-zulia', async (req, res) => {
     }
 });
 
----
-
-## Tarea Programada (CRON JOB) e Inicialización del Servidor
-
-Esta sección se mantiene igual.
-
-```javascript
 // Tarea programada (CRON JOB): Esta sigue siendo la que reinicia
 cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos los días a medianoche (hora de Caracas)
     try {
@@ -577,7 +509,7 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
         if (moment(currentDrawDate).isSameOrBefore(todayFormatted) || ventas.length > 0) {
             console.log('Realizando corte de ventas y reinicio por tarea programada.');
 
-            const dateString = now.format('YYYYMMMM_HHmmss');
+            const dateString = now.format('YYYYMMDD_HHmmss');
             const excelFileName = `Reporte_Ventas_Automatica_${dateString}.xlsx`;
 
             const dataToExport = ventas.map(venta => ({
