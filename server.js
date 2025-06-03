@@ -45,13 +45,13 @@ const DATA_DIR = path.join(__dirname, 'data');
 const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes');
 
 // Rutas de archivos de datos
-const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json'); // ¡ESTO DEBE ESTAR ASÍ!
+const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json');
 const NUMEROS_FILE = path.join(DATA_DIR, 'numeros.json');
 const VENTAS_FILE = path.join(DATA_DIR, 'ventas.json');
 const HORARIOS_ZULIA_FILE = path.join(DATA_DIR, 'horariosZulia.json');
 
 // Declarar transporter aquí, pero inicializarlo después de cargar la configuración
-let transporter; // ¡DECLARADO AQUÍ!
+let transporter;
 
 // Función para asegurar que los directorios existan
 async function ensureDataAndComprobantesDirs() {
@@ -100,23 +100,21 @@ async function loadInitialData() {
         pagina_bloqueada: false,
         admin_whatsapp_numbers: ['584143630488'],
         horarios_zulia: [],
-        // Incluir la estructura completa de mail_config y admin_email_for_reports aquí
-        // para cuando el archivo configuracion.json no exista inicialmente
         mail_config: {
             host: "smtp.gmail.com",
             port: 465,
             secure: true,
-            user: "tu_email@gmail.com", // ¡IMPORTANTE! Cambia esto por tu EMAIL real en el archivo
-            pass: "tu_contraseña_de_aplicacion" // ¡IMPORTANTE! Cambia esto por tu CONTRASEÑA DE APLICACIÓN real
+            user: "tu_email@gmail.com",
+            pass: "tu_contraseña_de_aplicacion"
         },
-        admin_email_for_reports: "tu_email_admin@gmail.com" // ¡IMPORTANTE! Cambia esto por el email del admin real
+        admin_email_for_reports: "tu_email_admin@gmail.com"
     });
     global.numeros = await readJsonFile(NUMEROS_FILE, initialNumbers);
     global.ventas = await readJsonFile(VENTAS_FILE, []);
     global.horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, []);
 
     // Inicializar transporter después de que global.config esté disponible
-    transporter = nodemailer.createTransport({ // ¡INICIALIZADO AQUÍ CON GLOBAL.CONFIG!
+    transporter = nodemailer.createTransport({
         service: 'gmail',
         auth: {
             user: global.config.mail_config.user,
@@ -128,8 +126,13 @@ async function loadInitialData() {
 // Servir archivos estáticos (comprobantes)
 app.use('/comprobantes', express.static(COMPROBANTES_DIR));
 
-// Rutas de la API
+---
 
+## Rutas de la API (Corregidas)
+
+Aquí están las rutas con el prefijo `/api` añadido para que coincidan con tus llamadas desde el frontend.
+
+```javascript
 // Configuración
 app.get('/api/configuracion', async (req, res) => {
     try {
@@ -251,7 +254,7 @@ app.post('/api/ventas/corte', async (req, res) => {
 
         // Generar el nombre del archivo Excel
         const now = moment().tz("America/Caracas");
-        const dateString = now.format('YYYYMMMM_HHmmss'); // Corregido el formato para el mes
+        const dateString = now.format('YYYYMMMM_HHmmss');
         const excelFileName = `Reporte_Ventas_${dateString}.xlsx`;
         const excelFilePath = path.join(__dirname, 'temp', excelFileName);
 
@@ -311,8 +314,8 @@ app.post('/api/ventas/corte', async (req, res) => {
 
         // Enviar el correo electrónico
         const mailOptions = {
-            from: global.config.mail_config.user, // Usar la credencial del config
-            to: global.config.admin_email_for_reports, // Usar el email del admin del config
+            from: global.config.mail_config.user,
+            to: global.config.admin_email_for_reports,
             subject: `Corte de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte y reinicio realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
@@ -340,7 +343,6 @@ app.post('/api/ventas/corte', async (req, res) => {
         config.ultimo_numero_ticket = 0;
         await writeJsonFile(CONFIG_FILE, config);
 
-
         res.status(200).json({ message: 'Corte de ventas realizado, reporte enviado y sistema reiniciado con éxito.' });
 
     } catch (error) {
@@ -353,7 +355,7 @@ app.post('/api/ventas/corte', async (req, res) => {
 app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
     try {
         const ventas = await readJsonFile(VENTAS_FILE);
-        const config = await readJsonFile(CONFIG_FILE); // Para acceder a admin_whatsapp_numbers si fuera necesario, aunque no se usa directamente aquí
+        const config = await readJsonFile(CONFIG_FILE);
 
         // Generar el nombre del archivo Excel
         const now = moment().tz("America/Caracas");
@@ -418,8 +420,8 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
 
         // Enviar el correo electrónico
         const mailOptions = {
-            from: global.config.mail_config.user, // Usar la credencial del config
-            to: global.config.admin_email_for_reports, // Usar el email del admin del config
+            from: global.config.mail_config.user,
+            to: global.config.admin_email_for_reports,
             subject: `Corte de Ventas Manual - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte manual realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
@@ -498,7 +500,13 @@ app.delete('/api/horarios-zulia', async (req, res) => {
     }
 });
 
+---
 
+## Tarea Programada (CRON JOB) e Inicialización del Servidor
+
+Esta sección se mantiene igual.
+
+```javascript
 // Tarea programada (CRON JOB): Esta sigue siendo la que reinicia
 cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos los días a medianoche (hora de Caracas)
     try {
@@ -568,8 +576,8 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             const excelBuffer = await workbook.xlsx.writeBuffer();
 
             const mailOptions = {
-                from: global.config.mail_config.user, // Usar la credencial del config
-                to: global.config.admin_email_for_reports, // Usar el email del admin del config
+                from: global.config.mail_config.user,
+                to: global.config.admin_email_for_reports,
                 subject: `Reporte Automático de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
                 html: `
                     <p>Adjunto encontrarás el reporte de ventas del día, generado automáticamente.</p>
@@ -598,10 +606,8 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             await writeJsonFile(CONFIG_FILE, config);
             console.log(`Fecha del sorteo actualizada automáticamente a: ${config.fecha_sorteo} y correlativo a ${config.ultimo_numero_sorteo_correlativo}.`);
         } else {
-             console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior a hoy (${todayFormatted}).`);
+               console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior a hoy (${todayFormatted}).`);
         }
-
-
     } catch (error) {
         console.error('Error en la tarea programada de corte de ventas y reinicio:', error);
     }
