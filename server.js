@@ -9,7 +9,7 @@ const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
 const moment = require('moment-timezone');
-const ExcelJS = require('exceljs'); // Asegúrate de tener 'exceljs' instalado: npm install exceljs
+const ExcelJS = require('exceljs');
 
 dotenv.config();
 
@@ -45,13 +45,13 @@ const DATA_DIR = path.join(__dirname, 'data');
 const COMPROBANTES_DIR = path.join(__dirname, 'comprobantes');
 
 // Rutas de archivos de datos
-const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json'); // ¡ESTO DEBE ESTAR ASÍ!
+const CONFIG_FILE = path.join(DATA_DIR, 'configuracion.json');
 const NUMEROS_FILE = path.join(DATA_DIR, 'numeros.json');
 const VENTAS_FILE = path.join(DATA_DIR, 'ventas.json');
 const HORARIOS_ZULIA_FILE = path.join(DATA_DIR, 'horariosZulia.json');
 
 // Declarar transporter aquí, pero inicializarlo después de cargar la configuración
-let transporter; // ¡DECLARADO AQUÍ!
+let transporter;
 
 // Función para asegurar que los directorios existan
 async function ensureDataAndComprobantesDirs() {
@@ -94,29 +94,27 @@ async function loadInitialData() {
     global.config = await readJsonFile(CONFIG_FILE, {
         precio_ticket: 1.00,
         tasa_dolar: 36.50,
-        fecha_sorteo: moment().add(1, 'day').format('YYYY-MM-DD'),
+        fecha_sorteo: moment().tz("America/Caracas").add(1, 'day').format('YYYY-MM-DD'), // Usar moment-timezone para la fecha del sorteo
         ultimo_numero_ticket: 0,
         ultimo_numero_sorteo_correlativo: 1,
         pagina_bloqueada: false,
         admin_whatsapp_numbers: ['584143630488'],
         horarios_zulia: [],
-        // Incluir la estructura completa de mail_config y admin_email_for_reports aquí
-        // para cuando el archivo configuracion.json no exista inicialmente
         mail_config: {
             host: "smtp.gmail.com",
             port: 465,
             secure: true,
-            user: "tu_email@gmail.com", // ¡IMPORTANTE! Cambia esto por tu EMAIL real en el archivo
-            pass: "tu_contraseña_de_aplicacion" // ¡IMPORTANTE! Cambia esto por tu CONTRASEÑA DE APLICACIÓN real
+            user: "tu_email@gmail.com",
+            pass: "tu_contraseña_de_aplicacion"
         },
-        admin_email_for_reports: "tu_email_admin@gmail.com" // ¡IMPORTANTE! Cambia esto por el email del admin real
+        admin_email_for_reports: "tu_email_admin@gmail.com"
     });
     global.numeros = await readJsonFile(NUMEROS_FILE, initialNumbers);
     global.ventas = await readJsonFile(VENTAS_FILE, []);
     global.horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, []);
 
     // Inicializar transporter después de que global.config esté disponible
-    transporter = nodemailer.createTransport({ // ¡INICIALIZADO AQUÍ CON GLOBAL.CONFIG!
+    transporter = nodemailer.createTransport({
         service: 'gmail',
         auth: {
             user: global.config.mail_config.user,
@@ -131,6 +129,34 @@ app.use('/comprobantes', express.static(COMPROBANTES_DIR));
 // Rutas de la API
 
 // Configuración
+// ***************************************************************************************************
+// ESTA ES LA RUTA QUE TU FRONTEND ESTÁ BUSCANDO PARA OBTENER LA CONFIGURACIÓN INICIAL
+// Redirige a /api/configuracion que ya existe y contiene la lógica.
+app.get('/api/config', async (req, res) => {
+    try {
+        // Llama a la lógica de la ruta existente '/api/configuracion'
+        const config = await readJsonFile(CONFIG_FILE);
+
+        // Mapear los campos que tu frontend espera de /api/config
+        // Asegúrate de que los nombres de las propiedades coincidan con los que espera script.js
+        const frontendConfig = {
+            bloqueado: config.pagina_bloqueada || false, // Asegúrate de que 'pagina_bloqueada' se mapee a 'bloqueado'
+            fecha_sorteo: config.fecha_sorteo || moment().tz("America/Caracas").add(1, 'day').format('YYYY-MM-DD'), // Asegúrate que siempre haya una fecha
+            tasa_usd_bs: config.tasa_dolar || 0, // Asegúrate de que 'tasa_dolar' se mapee a 'tasa_usd_bs'
+            ultimo_numero_sorteo: config.ultimo_numero_sorteo_correlativo || 0, // Mapeo a lo que espera el frontend
+            ultimo_numero_ticket: config.ultimo_numero_ticket || 0, // Mapeo a lo que espera el frontend
+            admin_whatsapp_number: config.admin_whatsapp_numbers && config.admin_whatsapp_numbers.length > 0 ? config.admin_whatsapp_numbers[0] : '' // Si tienes múltiples, toma el primero o un string vacío
+        };
+        res.json(frontendConfig);
+    } catch (error) {
+        // Captura cualquier error y responde con un 500
+        console.error('Error al obtener la configuración para /api/config:', error);
+        res.status(500).json({ message: 'Error al cargar la configuración inicial', error: error.message });
+    }
+});
+// ***************************************************************************************************
+
+// La ruta original de configuración sigue existiendo y funcionando
 app.get('/api/configuracion', async (req, res) => {
     try {
         const config = await readJsonFile(CONFIG_FILE);
@@ -163,7 +189,15 @@ app.get('/api/numeros', async (req, res) => {
 });
 
 // Comprar números
-app.post('/api/numeros/comprar', async (req, res) => {
+// ***************************************************************************************************
+// ESTA ES LA RUTA QUE TU FRONTEND ESTÁ BUSCANDO PARA COMPRAR NÚMEROS
+// Asegúrate de que la ruta aquí coincida con la que llama tu frontend (API_BASE_URL + '/api/comprar-numeros')
+// En tu script.js tienes: API_BASE_URL + '/api/comprar-numeros' (línea 286 de script.js)
+// Y en tu server.js actual la ruta es: '/api/numeros/comprar'
+// Para corregir el error 404 para la compra, necesitamos alinear esto.
+
+// Renombramos la ruta para que coincida con lo que espera el frontend
+app.post('/api/comprar-numeros', async (req, res) => { // CAMBIADO DE '/api/numeros/comprar' a '/api/comprar-numeros'
     try {
         const { numerosSeleccionados, comprador, telefono, metodoPago, referenciaPago, valorUsd, valorBs } = req.body;
         let numeros = await readJsonFile(NUMEROS_FILE);
@@ -224,13 +258,31 @@ app.post('/api/numeros/comprar', async (req, res) => {
         await writeJsonFile(NUMEROS_FILE, numeros);
         await writeJsonFile(VENTAS_FILE, ventas);
 
-        res.status(201).json({ message: 'Compra realizada con éxito', venta: nuevaVenta });
+        // La respuesta del backend al frontend para la compra
+        // Tu script.js espera un objeto 'venta' con la info del comprobante
+        res.status(201).json({ 
+            message: 'Compra realizada con éxito', 
+            venta: { // Asegúrate de que esta estructura coincida con lo que espera tu frontend para el comprobante
+                numeroTicket: nuevaVenta.numero_ticket,
+                numeros: nuevaVenta.numeros,
+                comprador: nuevaVenta.comprador,
+                telefono: nuevaVenta.telefono,
+                totalUsd: nuevaVenta.valor_usd,
+                totalBs: nuevaVenta.valor_bs,
+                metodoPago: nuevaVenta.metodo_pago,
+                referencia: nuevaVenta.referencia_pago,
+                fechaSorteo: nuevaVenta.fecha_sorteo,
+                numeroSorteo: nuevaVenta.numero_sorteo
+            }
+        });
 
     } catch (error) {
         console.error('Error al comprar números:', error);
         res.status(500).json({ message: 'Error interno al procesar la compra', error: error.message });
     }
 });
+// ***************************************************************************************************
+
 
 // Obtener todas las ventas (para el panel de administración)
 app.get('/api/ventas', async (req, res) => {
@@ -251,7 +303,7 @@ app.post('/api/ventas/corte', async (req, res) => {
 
         // Generar el nombre del archivo Excel
         const now = moment().tz("America/Caracas");
-        const dateString = now.format('YYYYMMMM_HHmmss'); // Corregido el formato para el mes
+        const dateString = now.format('YYYYMMMM_HHmmss');
         const excelFileName = `Reporte_Ventas_${dateString}.xlsx`;
         const excelFilePath = path.join(__dirname, 'temp', excelFileName);
 
@@ -311,8 +363,8 @@ app.post('/api/ventas/corte', async (req, res) => {
 
         // Enviar el correo electrónico
         const mailOptions = {
-            from: global.config.mail_config.user, // Usar la credencial del config
-            to: global.config.admin_email_for_reports, // Usar el email del admin del config
+            from: global.config.mail_config.user,
+            to: global.config.admin_email_for_reports,
             subject: `Corte de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte y reinicio realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
@@ -353,7 +405,7 @@ app.post('/api/ventas/corte', async (req, res) => {
 app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
     try {
         const ventas = await readJsonFile(VENTAS_FILE);
-        const config = await readJsonFile(CONFIG_FILE); // Para acceder a admin_whatsapp_numbers si fuera necesario, aunque no se usa directamente aquí
+        const config = await readJsonFile(CONFIG_FILE);
 
         // Generar el nombre del archivo Excel
         const now = moment().tz("America/Caracas");
@@ -418,8 +470,8 @@ app.post('/api/ventas/corte-manual-solo-email', async (req, res) => {
 
         // Enviar el correo electrónico
         const mailOptions = {
-            from: global.config.mail_config.user, // Usar la credencial del config
-            to: global.config.admin_email_for_reports, // Usar el email del admin del config
+            from: global.config.mail_config.user,
+            to: global.config.admin_email_for_reports,
             subject: `Corte de Ventas Manual - ${now.format('DD/MM/YYYY HH:mm')}`,
             html: `
                 <p>Adjunto encontrarás el reporte de ventas correspondiente al corte manual realizado el ${now.format('DD/MM/YYYY')} a las ${now.format('HH:mm:ss')}.</p>
@@ -515,7 +567,7 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
         if (moment(currentDrawDate).isSameOrBefore(todayFormatted) || ventas.length > 0) {
             console.log('Realizando corte de ventas y reinicio por tarea programada.');
 
-            const dateString = now.format('YYYYMMDD_HHmmss');
+            const dateString = now.format('YYYYMMMM_HHmmss');
             const excelFileName = `Reporte_Ventas_Automatica_${dateString}.xlsx`;
 
             const dataToExport = ventas.map(venta => ({
@@ -568,8 +620,8 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             const excelBuffer = await workbook.xlsx.writeBuffer();
 
             const mailOptions = {
-                from: global.config.mail_config.user, // Usar la credencial del config
-                to: global.config.admin_email_for_reports, // Usar el email del admin del config
+                from: global.config.mail_config.user,
+                to: global.config.admin_email_for_reports,
                 subject: `Reporte Automático de Ventas y Reinicio - ${now.format('DD/MM/YYYY HH:mm')}`,
                 html: `
                     <p>Adjunto encontrarás el reporte de ventas del día, generado automáticamente.</p>
@@ -598,7 +650,7 @@ cron.schedule(process.env.CRON_SCHEDULE || '0 0 * * *', async () => { // Todos l
             await writeJsonFile(CONFIG_FILE, config);
             console.log(`Fecha del sorteo actualizada automáticamente a: ${config.fecha_sorteo} y correlativo a ${config.ultimo_numero_sorteo_correlativo}.`);
         } else {
-             console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior a hoy (${todayFormatted}).`);
+               console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior a hoy (${todayFormatted}).`);
         }
 
 
