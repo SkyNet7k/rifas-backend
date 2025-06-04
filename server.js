@@ -71,8 +71,8 @@ async function ensureDataAndComprobantesDirs() {
             ensureJsonFile(VENTAS_FILE, []),
             ensureJsonFile(COMPROBANTES_FILE, []),
             ensureJsonFile(RESULTADOS_ZULIA_FILE, []),
-            // --- NUEVO: Asegurar que premios.json existe ---
-            ensureJsonFile(PREMIOS_FILE, {})
+            // --- NUEVO: Asegurar que premios.json existe con un objeto vacío ---
+            ensureJsonFile(PREMIOS_FILE, {}) 
         ]);
         console.log('Directorios y archivos JSON iniciales asegurados.');
     } catch (error) {
@@ -122,7 +122,7 @@ let horariosZulia = { horarios_zulia: [] };
 let ventas = [];
 let comprobantes = [];
 let resultadosZulia = [];
-let premios = {}; // --- NUEVO: Para almacenar los premios ---
+let premios = {}; // --- NUEVO: Para almacenar los premios (inicializado como objeto vacío) ---
 
 
 // Carga inicial de datos
@@ -158,11 +158,51 @@ function configureMailer() {
         console.log('Nodemailer configurado.');
     } else {
         console.warn('Configuración de correo incompleta. El envío de correos no funcionará.');
+        transporter = null; // Asegura que transporter sea null si no se puede configurar
+    }
+}
+
+// --- Funciones para enviar correos ---
+/**
+ * Envía un correo electrónico utilizando el transporter configurado.
+ * @param {string} to - Dirección de correo del destinatario.
+ * @param {string} subject - Asunto del correo.
+ * @param {string} html - Contenido HTML del correo.
+ * @returns {Promise<boolean>} True si el correo se envió con éxito, false en caso contrario.
+ */
+async function sendEmail(to, subject, html) {
+    if (!transporter) {
+        console.error('Mailer no configurado. No se pudo enviar el correo.');
+        return false;
+    }
+    try {
+        const mailOptions = {
+            from: `${configuracion.mail_config.senderName || 'Sistema de Rifas'} <${configuracion.mail_config.user}>`,
+            to,
+            subject,
+            html
+        };
+        await transporter.sendMail(mailOptions);
+        console.log('Correo enviado exitosamente.');
+        return true;
+    } catch (error) {
+        console.error('Error al enviar correo:', error);
+        return false;
     }
 }
 
 
-// --- Rutas existentes ---
+// --- CRON JOBS (si los tienes definidos) ---
+/*
+// Ejemplo: Reiniciar tickets diarios a medianoche
+cron.schedule('0 0 * * *', async () => {
+    console.log('Ejecutando tarea diaria: Reiniciar tickets...');
+    // Lógica para reiniciar tickets o realizar otras tareas diarias
+    // await reiniciarTicketsDiarios(); 
+});
+*/
+
+// --- RUTAS DE LA API ---
 
 // Obtener configuración
 app.get('/api/configuracion', async (req, res) => {
@@ -611,7 +651,7 @@ cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:
             await writeJsonFile(CONFIG_FILE, configuracion);
             console.log(`Fecha del sorteo actualizada automáticamente a: ${configuracion.fecha_sorteo} y correlativo a ${configuracion.numero_sorteo_correlativo}.`);
         } else {
-               console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior o igual a hoy (${todayFormatted}).`);
+                console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior o igual a hoy (${todayFormatted}).`);
         }
     } catch (error) {
         console.error('Error en la tarea programada de corte de ventas y reinicio:', error);
@@ -621,7 +661,7 @@ cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:
 });
 
 
-// --- NUEVAS RUTAS PARA PREMIOS ---
+// --- RUTAS PARA PREMIOS ---
 
 // 1. GET /api/premios: Obtener premios por fecha
 app.get('/api/premios', async (req, res) => {
@@ -637,13 +677,13 @@ app.get('/api/premios', async (req, res) => {
     try {
         const allPremios = await readJsonFile(PREMIOS_FILE);
         // Devuelve los premios del día o un objeto vacío si no existen
-        const premiosDelDia = allPremios[fechaFormateada] || {}; 
+        const premiosDelDia = allPremios[fechaFormateada] || {}; // Si no hay premios para la fecha, es un objeto vacío
 
-        // Rellenar con valores por defecto si no hay premios para esa fecha
+        // Rellenar con valores por defecto si no hay premios para esa fecha o si algún sorteo está incompleto
         const premiosParaFrontend = {
-            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '' },
-            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '' },
-            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '' }
+            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' },
+            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' },
+            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' }
         };
         
         res.status(200).json(premiosParaFrontend);
@@ -665,25 +705,16 @@ app.post('/api/premios', async (req, res) => {
     // Formatear la fecha para que coincida con la clave en el JSON, asegurando zona horaria
     const fechaFormateada = moment.tz(fechaSorteo, "America/Caracas").format('YYYY-MM-DD');
 
-    // Validación de los valores de los premios (opcional pero recomendado)
-    const validatePremioValue = (val) => val === '' || (typeof val === 'string' && /^\d{3}$/.test(val));
-
-    if (
-        !validatePremioValue(sorteo12PM?.tripleA) || !validatePremioValue(sorteo12PM?.tripleB) ||
-        !validatePremioValue(sorteo3PM?.tripleA) || !validatePremioValue(sorteo3PM?.tripleB) ||
-        !validatePremioValue(sorteo5PM?.tripleA) || !validatePremioValue(sorteo5PM?.tripleB)
-    ) {
-        return res.status(400).json({ message: 'Los valores de los premios deben ser números de 3 dígitos o estar vacíos.' });
-    }
-
     try {
         const allPremios = await readJsonFile(PREMIOS_FILE);
 
         // Actualizar o crear la entrada para la fecha específica
+        // sorteo12PM, sorteo3PM, sorteo5PM ya son objetos que vienen del frontend
+        // y contienen los campos tripleA, tripleB, valorTripleA, valorTripleB, valorTripleC
         allPremios[fechaFormateada] = {
-            sorteo12PM: sorteo12PM || { tripleA: '', tripleB: '' }, // Asegura que no sea null/undefined si no se envía
-            sorteo3PM: sorteo3PM || { tripleA: '', tripleB: '' },
-            sorteo5PM: sorteo5PM || { tripleA: '', tripleB: '' }
+            sorteo12PM: sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' }, 
+            sorteo3PM: sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' },
+            sorteo5PM: sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' }
         };
 
         await writeJsonFile(PREMIOS_FILE, allPremios);
@@ -693,6 +724,28 @@ app.post('/api/premios', async (req, res) => {
     } catch (error) {
         console.error('Error al guardar premios en el archivo JSON:', error);
         res.status(500).json({ message: 'Error interno del servidor al guardar premios.', error: error.message });
+    }
+});
+
+// NUEVA RUTA: Ruta POST para enviar un correo de prueba
+app.post('/api/send-test-email', async (req, res) => {
+    try {
+        const { to, subject, html } = req.body;
+
+        if (!to || !subject || !html) {
+            return res.status(400).json({ message: 'Faltan parámetros: "to", "subject" y "html" son obligatorios.' });
+        }
+
+        const emailSent = await sendEmail(to, subject, html);
+
+        if (emailSent) {
+            res.status(200).json({ message: 'Correo de prueba enviado exitosamente.' });
+        } else {
+            res.status(500).json({ message: 'Fallo al enviar el correo de prueba. Revisa la configuración del mailer y los logs del servidor.' });
+        }
+    } catch (error) {
+        console.error('Error en la ruta /api/send-test-email:', error);
+        res.status(500).json({ message: 'Error interno del servidor al enviar correo de prueba.', error: error.message });
     }
 });
 
