@@ -1,7 +1,7 @@
 {
   "tasa_dolar": [],
   "pagina_bloqueada": false,
-  "fecha_sorteo": "[]",
+  "fecha_sorteo": "",
   "precio_ticket": 3.00,
   "numero_sorteo_correlativo": 1,
   "ultimo_numero_ticket": 0,
