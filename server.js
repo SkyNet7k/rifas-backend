@@ -260,8 +260,8 @@ app.get('/api/ventas', (req, res) => {
     res.json(ventas);
 });
 
-// Ruta para la compra de tickets
-app.post('/api/comprar', async (req, res) => {
+// Ruta para la compra de tickets - CAMBIO DE /api/comprar a /api/numeros/comprar
+app.post('/api/numeros/comprar', async (req, res) => {
     const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, fechaSorteo, horaSorteo } = req.body;
 
     if (!numerosSeleccionados || numerosSeleccionados.length === 0 || !valorUsd || !valorBs || !metodoPago || !comprador || !telefono || !fechaSorteo || !horaSorteo) {
