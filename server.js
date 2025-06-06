@@ -47,7 +47,7 @@ const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
 const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json');
 const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
-// --- NUEVO: Archivo para premios ---
+// --- Archivo para premios ---
 const PREMIOS_FILE = path.join(__dirname, 'premios.json');
 
 
@@ -71,7 +71,7 @@ async function ensureDataAndComprobantesDirs() {
             ensureJsonFile(VENTAS_FILE, []),
             ensureJsonFile(COMPROBANTES_FILE, []),
             ensureJsonFile(RESULTADOS_ZULIA_FILE, []),
-            // --- NUEVO: Asegurar que premios.json existe con un objeto vacío ---
+            // Asegurar que premios.json existe con un objeto vacío
             ensureJsonFile(PREMIOS_FILE, {}) 
         ]);
         console.log('Directorios y archivos JSON iniciales asegurados.');
@@ -103,7 +103,6 @@ async function readJsonFile(filePath) {
         return JSON.parse(data);
     } catch (error) {
         // Si el archivo no existe o está vacío/corrupto, devuelve un objeto o array vacío
-        // console.warn(`Advertencia: No se pudo leer o parsear ${filePath}. Devolviendo contenido por defecto.`, error.message);
         if (filePath === VENTAS_FILE || filePath === RESULTADOS_ZULIA_FILE || filePath === COMPROBANTES_FILE || filePath === NUMEROS_FILE) {
             return [];
         }
@@ -117,12 +116,12 @@ async function writeJsonFile(filePath, data) {
 }
 
 let configuracion = {};
-let numeros = [];
+let numeros = []; // Esta es la variable global que necesita ser sincronizada
 let horariosZulia = { horarios_zulia: [] };
 let ventas = [];
 let comprobantes = [];
 let resultadosZulia = [];
-let premios = {}; // --- NUEVO: Para almacenar los premios (inicializado como objeto vacío) ---
+let premios = {}; // Para almacenar los premios (inicializado como objeto vacío)
 
 
 // Carga inicial de datos
@@ -134,7 +133,7 @@ async function loadInitialData() {
         ventas = await readJsonFile(VENTAS_FILE);
         comprobantes = await readJsonFile(COMPROBANTES_FILE);
         resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE);
-        premios = await readJsonFile(PREMIOS_FILE); // --- NUEVO: Cargar premios ---
+        premios = await readJsonFile(PREMIOS_FILE); // Cargar premios
 
         console.log('Datos iniciales cargados.');
     } catch (error) {
@@ -260,7 +259,7 @@ app.get('/api/ventas', (req, res) => {
     res.json(ventas);
 });
 
-// Ruta para la compra de tickets - CAMBIO DE /api/comprar a /api/numeros/comprar
+// Ruta para la compra de tickets
 app.post('/api/numeros/comprar', async (req, res) => {
     const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, fechaSorteo, horaSorteo } = req.body;
 
@@ -317,6 +316,13 @@ app.post('/api/numeros/comprar', async (req, res) => {
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
         await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados
+        
+        // ***** INICIO DE LA CORRECCIÓN CLAVE *****
+        // Sincronizar la variable global 'numeros' con el estado actualizado
+        // Esto es crucial para que el siguiente GET a /api/numeros devuelva los datos correctos
+        numeros = currentNumeros; 
+        // ***** FIN DE LA CORRECCIÓN CLAVE *****
+
         await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
@@ -681,9 +687,9 @@ app.get('/api/premios', async (req, res) => {
 
         // Rellenar con valores por defecto si no hay premios para esa fecha o si algún sorteo está incompleto
         const premiosParaFrontend = {
-            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' },
-            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' },
-            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' }
+            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }, // Eliminado valorTripleC
+            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }, // Eliminado valorTripleC
+            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }  // Eliminado valorTripleC
         };
         
         res.status(200).json(premiosParaFrontend);
@@ -696,7 +702,8 @@ app.get('/api/premios', async (req, res) => {
 
 // 2. POST /api/premios: Guardar o actualizar premios
 app.post('/api/premios', async (req, res) => {
-    const { fechaSorteo, sorteo12PM, sorteo3PM, sorteo5PM } = req.body;
+    // Eliminado 'sorteo5PM' y 'valorTripleC' de la desestructuración, ya que no se usará 'Triple C'
+    const { fechaSorteo, sorteo12PM, sorteo3PM } = req.body; 
 
     if (!fechaSorteo || !moment(fechaSorteo, 'YYYY-MM-DD', true).isValid()) {
         return res.status(400).json({ message: 'La fecha del sorteo (YYYY-MM-DD) es requerida y debe ser válida para guardar premios.' });
@@ -709,12 +716,27 @@ app.post('/api/premios', async (req, res) => {
         const allPremios = await readJsonFile(PREMIOS_FILE);
 
         // Actualizar o crear la entrada para la fecha específica
-        // sorteo12PM, sorteo3PM, sorteo5PM ya son objetos que vienen del frontend
-        // y contienen los campos tripleA, tripleB, valorTripleA, valorTripleB, valorTripleC
+        // Se aseguran los valores por defecto para evitar errores si no se envían todos los campos (aunque el frontend debe enviarlos)
         allPremios[fechaFormateada] = {
-            sorteo12PM: sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' }, 
-            sorteo3PM: sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' },
-            sorteo5PM: sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '', valorTripleC: '' }
+            sorteo12PM: sorteo12PM ? {
+                tripleA: sorteo12PM.tripleA || '',
+                tripleB: sorteo12PM.tripleB || '',
+                valorTripleA: sorteo12PM.valorTripleA || '',
+                valorTripleB: sorteo12PM.valorTripleB || ''
+            } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
+            sorteo3PM: sorteo3PM ? {
+                tripleA: sorteo3PM.tripleA || '',
+                tripleB: sorteo3PM.tripleB || '',
+                valorTripleA: sorteo3PM.valorTripleA || '',
+                valorTripleB: sorteo3PM.valorTripleB || ''
+            } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
+            // El sorteo de las 5PM ahora solo tiene A y B
+            sorteo5PM: req.body.sorteo5PM ? { // Se accede directamente a req.body.sorteo5PM para mantener la posibilidad de guardarlo
+                tripleA: req.body.sorteo5PM.tripleA || '',
+                tripleB: req.body.sorteo5PM.tripleB || '',
+                valorTripleA: req.body.sorteo5PM.valorTripleA || '',
+                valorTripleB: req.body.sorteo5PM.valorTripleB || ''
+            } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
         };
 
         await writeJsonFile(PREMIOS_FILE, allPremios);
