@@ -11,13 +11,24 @@
     "584126083355",
     "584143630488"
   ],
-  "mail_config": {
+ "mail_config": {
     "host": "smtp.gmail.com",
     "port": 465,
     "secure": true,
     "user": "SkyFall7k@gmail.com",
     "pass": "gnrl fxqe oqpd twti",
-    "senderName": "Sistema de Rifas"
+    "senderName": "Sistema De Cortes de Ventas"
   },
   "admin_email_for_reports": "SkyFall7k@gmail.com"
+}
+
+  "mail_config": {
+    "host": "smtp.gmail.com",
+    "port": 465,
+    "secure": true,
+    "user": "Tuoportunidadeshoy1@gmail.com",
+    "pass": "pcfc acbs ahka jwpk",
+    "senderName": "Sistema De Cortes de Ventas"
+  },
+  "admin_email_for_reports": "Tuoportunidadeshoy1@gmail.com"
 }
