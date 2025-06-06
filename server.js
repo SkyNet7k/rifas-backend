@@ -47,7 +47,7 @@ const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
 const VENTAS_FILE = path.join(__dirname, 'ventas.json');
 const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json');
 const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
-// --- Archivo para premios ---
+// Archivo para premios
 const PREMIOS_FILE = path.join(__dirname, 'premios.json');
 
 
@@ -116,7 +116,7 @@ async function writeJsonFile(filePath, data) {
 }
 
 let configuracion = {};
-let numeros = []; // Esta es la variable global que necesita ser sincronizada
+let numeros = [];
 let horariosZulia = { horarios_zulia: [] };
 let ventas = [];
 let comprobantes = [];
@@ -190,16 +190,164 @@ async function sendEmail(to, subject, html) {
     }
 }
 
+// --- NUEVA FUNCIÓN: Generar y Enviar Reporte de Ventas por Correo ---
+/**
+ * Genera un reporte de ventas en Excel para el día actual y lo envía por correo electrónico.
+ * Esta función NO reinicia los números ni limpia las ventas.
+ */
+async function generateAndEmailSalesReport() {
+    console.log('Iniciando generación y envío de reporte de ventas...');
+    try {
+        const now = moment().tz("America/Caracas");
+        const todayFormatted = now.format('YYYY-MM-DD');
 
-// --- CRON JOBS (si los tienes definidos) ---
-/*
-// Ejemplo: Reiniciar tickets diarios a medianoche
-cron.schedule('0 0 * * *', async () => {
-    console.log('Ejecutando tarea diaria: Reiniciar tickets...');
-    // Lógica para reiniciar tickets o realizar otras tareas diarias
-    // await reiniciarTicketsDiarios(); 
+        // Leer las ventas más recientes directamente del archivo para el reporte
+        const currentVentas = await readJsonFile(VENTAS_FILE);
+
+        const ventasDelDia = currentVentas.filter(venta =>
+            moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') === todayFormatted
+        );
+
+        const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valor_usd, 0);
+        const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + venta.valor_bs, 0);
+
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Reporte de Ventas');
+
+        worksheet.columns = [
+            { header: 'Campo', key: 'field', width: 20 },
+            { header: 'Valor', key: 'value', width: 30 }
+        ];
+
+        worksheet.addRow({ field: 'Fecha del Reporte', value: now.format('YYYY-MM-DD HH:mm:ss') });
+        worksheet.addRow({ field: 'Total Ventas USD', value: totalVentasUSD.toFixed(2) });
+        worksheet.addRow({ field: 'Total Ventas Bs', value: totalVentasBs.toFixed(2) });
+        worksheet.addRow({ field: 'Número de Ventas', value: ventasDelDia.length });
+
+        worksheet.addRow({});
+        worksheet.addRow({ field: 'Detalle de Ventas del Día' });
+        worksheet.addRow({});
+
+        const ventasHeaders = [
+            { header: 'Fecha/Hora Compra', key: 'fecha_hora_compra', width: 20 },
+            { header: 'Fecha Sorteo', key: 'fecha_sorteo', width: 15 },
+            { header: 'Hora Sorteo', key: 'hora_sorteo', width: 15 },
+            { header: 'Nro. Ticket', key: 'numero_ticket', width: 15 },
+            { header: 'Comprador', key: 'comprador', width: 20 },
+            { header: 'Teléfono', key: 'telefono', width: 15 },
+            { header: 'Números', key: 'numeros', width: 30 },
+            { header: 'Valor USD', key: 'valor_usd', width: 15 },
+            { header: 'Valor Bs', key: 'valor_bs', width: 15 },
+            { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
+            { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
+            { header: 'URL Comprobante', key: 'url_comprobante', width: 30 }
+        ];
+        worksheet.addRow(ventasHeaders.map(h => h.header));
+
+        ventasDelDia.forEach(venta => {
+            worksheet.addRow({
+                fecha_hora_compra: venta.fecha_hora_compra,
+                fecha_sorteo: venta.fecha_sorteo,
+                hora_sorteo: venta.hora_sorteo,
+                numero_ticket: venta.numero_ticket,
+                comprador: venta.comprador,
+                telefono: venta.telefono,
+                numeros: venta.numeros.join(', '),
+                valor_usd: venta.valor_usd,
+                valor_bs: venta.valor_bs,
+                metodo_pago: venta.metodo_pago,
+                referencia_pago: venta.referencia_pago,
+                url_comprobante: venta.url_comprobante ? `${API_BASE_URL}${venta.url_comprobante}` : ''
+            });
+        });
+
+        const excelFileName = `Reporte_Ventas_${todayFormatted}_${now.format('HHmmss')}.xlsx`;
+        const excelFilePath = path.join(REPORTS_DIR, excelFileName);
+        await workbook.xlsx.writeFile(excelFilePath);
+
+        if (transporter && configuracion.admin_email_for_reports) {
+            const mailOptions = {
+                from: `${configuracion.mail_config.senderName || 'Sistema de Rifas'} <${configuracion.mail_config.user}>`,
+                to: configuracion.admin_email_for_reports,
+                subject: `Reporte de Ventas ${todayFormatted} (${now.format('HH:mm')})`,
+                html: `
+                    <p>Se ha generado el reporte de ventas parcial para el día <strong>${todayFormatted}</strong> a las ${now.format('HH:mm')}.</p>
+                    <p><b>Total de Ventas USD (acumulado):</b> $${totalVentasUSD.toFixed(2)}</p>
+                    <p><b>Total de Ventas Bs (acumulado):</b> Bs ${totalVentasBs.toFixed(2)}</p>
+                    <p>Adjunto encontrarás el detalle completo en formato Excel.</p>
+                `,
+                attachments: [
+                    {
+                        filename: excelFileName,
+                        path: excelFilePath,
+                        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                    }
+                ]
+            };
+
+            transporter.sendMail(mailOptions, (error, info) => {
+                if (error) {
+                    console.error('Error al enviar correo de reporte de ventas:', error);
+                } else {
+                    console.log('Correo de reporte de ventas enviado:', info.response);
+                }
+            });
+        }
+        console.log('Reporte de ventas generado y enviado con éxito.');
+        return { success: true, message: 'Reporte de ventas generado y enviado con éxito.' };
+
+    } catch (error) {
+        console.error('Error al generar y enviar reporte de ventas:', error);
+        return { success: false, message: `Error al generar y enviar reporte de ventas: ${error.message}` };
+    }
+}
+
+
+// --- CRON JOBS ---
+
+// Tarea programada para generar reporte de ventas cada 55 minutos
+cron.schedule('*/55 * * * *', async () => { // Se ejecuta cada 55 minutos
+    console.log('Ejecutando tarea programada: Generación de reporte de ventas parcial...');
+    await generateAndEmailSalesReport();
+}, {
+    timezone: "America/Caracas"
 });
-*/
+
+
+// Tarea programada para reinicio diario de números y actualización de fecha de sorteo
+cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:00 (medianoche)
+    console.log('Ejecutando tarea programada: reinicio de números y actualización de fecha de sorteo...');
+    try {
+        const now = moment().tz("America/Caracas");
+        const todayFormatted = now.format('YYYY-MM-DD');
+        const currentDrawDate = configuracion.fecha_sorteo;
+
+        // Comprobar si la fecha de sorteo es anterior a hoy
+        if (moment(currentDrawDate).isBefore(todayFormatted, 'day')) {
+            console.log(`La fecha de sorteo (${currentDrawDate}) es anterior a hoy (${todayFormatted}). Reiniciando números y actualizando fecha.`);
+            // Reiniciar los números
+            numeros = numeros.map(n => ({ ...n, comprado: false }));
+            await writeJsonFile(NUMEROS_FILE, numeros);
+            console.log('Números reiniciados a no comprados.');
+
+            // Las ventas históricas no se tocan aquí, se mantienen en ventas.json.
+
+            // Actualizar la fecha del próximo sorteo a mañana y el correlativo
+            configuracion.fecha_sorteo = now.clone().add(1, 'days').format('YYYY-MM-DD');
+            configuracion.numero_sorteo_correlativo = (configuracion.numero_sorteo_correlativo || 0) + 1;
+            configuracion.ultimo_numero_ticket = 0; // Reiniciar el último número de ticket usado
+            await writeJsonFile(CONFIG_FILE, configuracion);
+            console.log(`Fecha del sorteo actualizada automáticamente a: ${configuracion.fecha_sorteo} y correlativo a ${configuracion.numero_sorteo_correlativo}.`);
+        } else {
+                console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior o igual a hoy (${todayFormatted}).`);
+        }
+    } catch (error) {
+        console.error('Error en la tarea programada de reinicio diario:', error);
+    }
+}, {
+    timezone: "America/Caracas"
+});
+
 
 // --- RUTAS DE LA API ---
 
@@ -316,13 +464,6 @@ app.post('/api/numeros/comprar', async (req, res) => {
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
         await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados
-        
-        // ***** INICIO DE LA CORRECCIÓN CLAVE *****
-        // Sincronizar la variable global 'numeros' con el estado actualizado
-        // Esto es crucial para que el siguiente GET a /api/numeros devuelva los datos correctos
-        numeros = currentNumeros; 
-        // ***** FIN DE LA CORRECCIÓN CLAVE *****
-
         await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
@@ -503,167 +644,40 @@ app.post('/api/resultados-zulia', async (req, res) => {
     }
 });
 
-// Endpoint para el corte de ventas
+// Endpoint para el corte de ventas (manual o via API)
 app.post('/api/corte-ventas', async (req, res) => {
     try {
+        // Primero, genera y envía el reporte de ventas
+        const reportResult = await generateAndEmailSalesReport();
+        if (!reportResult.success) {
+            // Si el reporte falló, devolver error sin proceder con el corte
+            return res.status(500).json({ message: reportResult.message });
+        }
+
         const now = moment().tz("America/Caracas");
         const todayFormatted = now.format('YYYY-MM-DD');
 
-        // Filtrar las ventas para obtener las del día actual
-        const ventasDelDia = ventas.filter(venta =>
-            moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') === todayFormatted
-        );
+        // Leer los números más recientes para asegurar el estado más actual antes del reinicio
+        const currentNumeros = await readJsonFile(NUMEROS_FILE);
 
-        // Sumar los valores en USD y Bs
-        const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valor_usd, 0);
-        const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + venta.valor_bs, 0);
-
-        // Generar un reporte en Excel
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Corte de Ventas');
-
-        // Añadir encabezados
-        worksheet.columns = [
-            { header: 'Campo', key: 'field', width: 20 },
-            { header: 'Valor', key: 'value', width: 30 }
-        ];
-
-        // Añadir datos generales del corte
-        worksheet.addRow({ field: 'Fecha del Corte', value: now.format('YYYY-MM-DD HH:mm:ss') });
-        worksheet.addRow({ field: 'Total Ventas USD', value: totalVentasUSD.toFixed(2) });
-        worksheet.addRow({ field: 'Total Ventas Bs', value: totalVentasBs.toFixed(2) });
-        worksheet.addRow({ field: 'Número de Ventas', value: ventasDelDia.length });
-
-        // Añadir una sección para las ventas detalladas
-        worksheet.addRow({}); // Fila vacía para espacio
-        worksheet.addRow({ field: 'Detalle de Ventas del Día' });
-        worksheet.addRow({}); // Fila vacía para espacio
-
-        // Encabezados de la tabla de ventas
-        const ventasHeaders = [
-            { header: 'Fecha/Hora Compra', key: 'fecha_hora_compra', width: 20 },
-            { header: 'Fecha Sorteo', key: 'fecha_sorteo', width: 15 },
-            { header: 'Hora Sorteo', key: 'hora_sorteo', width: 15 },
-            { header: 'Nro. Ticket', key: 'numero_ticket', width: 15 },
-            { header: 'Comprador', key: 'comprador', width: 20 },
-            { header: 'Teléfono', key: 'telefono', width: 15 },
-            { header: 'Números', key: 'numeros', width: 30 },
-            { header: 'Valor USD', key: 'valor_usd', width: 15 },
-            { header: 'Valor Bs', key: 'valor_bs', width: 15 },
-            { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
-            { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
-            { header: 'URL Comprobante', key: 'url_comprobante', width: 30 }
-        ];
-        worksheet.addRow(ventasHeaders.map(h => h.header)); // Añade los nombres de las columnas
-
-        // Añadir las filas de ventas
-        ventasDelDia.forEach(venta => {
-            worksheet.addRow({
-                fecha_hora_compra: venta.fecha_hora_compra,
-                fecha_sorteo: venta.fecha_sorteo,
-                hora_sorteo: venta.hora_sorteo,
-                numero_ticket: venta.numero_ticket,
-                comprador: venta.comprador,
-                telefono: venta.telefono,
-                numeros: venta.numeros.join(', '),
-                valor_usd: venta.valor_usd,
-                valor_bs: venta.valor_bs,
-                metodo_pago: venta.metodo_pago,
-                referencia_pago: venta.referencia_pago,
-                url_comprobante: venta.url_comprobante ? `${API_BASE_URL}${venta.url_comprobante}` : ''
-            });
-        });
-
-        // Guardar el archivo Excel
-        const excelFileName = `Corte_Ventas_${todayFormatted}.xlsx`;
-        const excelFilePath = path.join(REPORTS_DIR, excelFileName);
-        await workbook.xlsx.writeFile(excelFilePath);
-
-        // Envío de correo electrónico con el reporte adjunto
-        if (transporter && configuracion.admin_email_for_reports) {
-            const mailOptions = {
-                from: `${configuracion.mail_config.senderName || 'Sistema de Rifas'} <${configuracion.mail_config.user}>`,
-                to: configuracion.admin_email_for_reports,
-                subject: `Reporte de Corte de Ventas ${todayFormatted}`,
-                html: `
-                    <p>Se ha realizado el corte de ventas para el día <strong>${todayFormatted}</strong>.</p>
-                    <p><b>Total de Ventas USD:</b> $${totalVentasUSD.toFixed(2)}</p>
-                    <p><b>Total de Ventas Bs:</b> Bs ${totalVentasBs.toFixed(2)}</p>
-                    <p>Adjunto encontrarás el detalle completo en formato Excel.</p>
-                `,
-                attachments: [
-                    {
-                        filename: excelFileName,
-                        path: excelFilePath,
-                        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    }
-                ]
-            };
-
-            transporter.sendMail(mailOptions, (error, info) => {
-                if (error) {
-                    console.error('Error al enviar correo de corte de ventas:', error);
-                } else {
-                    console.log('Correo de corte de ventas enviado:', info.response);
-                }
-            });
-        }
+        // Reiniciar los números a "no comprados"
+        const updatedNumeros = currentNumeros.map(n => ({ ...n, comprado: false }));
+        await writeJsonFile(NUMEROS_FILE, updatedNumeros);
+        // Actualizar la variable global 'numeros' después de escribir en el archivo
+        numeros = updatedNumeros; 
 
 
-        // Reiniciar los números a "no comprados" y limpiar ventas del día
-        numeros = numeros.map(n => ({ ...n, comprado: false }));
-        ventas = ventas.filter(venta =>
-            moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') !== todayFormatted
-        );
+        // ***** CORRECCIÓN CLAVE: Las ventas ya NO se limpian ni filtran aquí. *****
+        // El archivo ventas.json ahora mantiene todo el historial de ventas.
+        // La variable global 'ventas' simplemente reflejará lo que se cargó inicialmente
+        // y lo que se añadió con nuevas compras, sin ser reiniciada por el corte.
 
-        await writeJsonFile(NUMEROS_FILE, numeros);
-        await writeJsonFile(VENTAS_FILE, ventas);
-
-        res.status(200).json({ message: 'Corte de ventas realizado con éxito y números reiniciados.' });
+        res.status(200).json({ message: 'Corte de ventas realizado con éxito y números reiniciados. Las ventas históricas se han mantenido intactas.' });
 
     } catch (error) {
         console.error('Error al realizar corte de ventas:', error);
         res.status(500).json({ message: 'Error interno del servidor al realizar corte de ventas.', error: error.message });
     }
-});
-
-
-// Tarea programada para reinicio diario de números y actualización de fecha de sorteo
-cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:00 (medianoche)
-    console.log('Ejecutando tarea programada: reinicio de números y actualización de fecha de sorteo...');
-    try {
-        const now = moment().tz("America/Caracas");
-        const todayFormatted = now.format('YYYY-MM-DD');
-        const currentDrawDate = configuracion.fecha_sorteo;
-
-        // Comprobar si la fecha de sorteo es anterior a hoy
-        if (moment(currentDrawDate).isBefore(todayFormatted, 'day')) {
-            console.log(`La fecha de sorteo (${currentDrawDate}) es anterior a hoy (${todayFormatted}). Reiniciando números y actualizando fecha.`);
-            // Reiniciar los números
-            numeros = numeros.map(n => ({ ...n, comprado: false }));
-            await writeJsonFile(NUMEROS_FILE, numeros);
-            console.log('Números reiniciados a no comprados.');
-
-            // Reiniciar ventas para la fecha anterior (opcional, si quieres mantener un historial de ventas completas y luego hacer cortes)
-            // Si el corte de ventas ya limpia ventas del día, esto no sería necesario aquí a medianoche.
-            // ventas = ventas.filter(venta => moment(venta.fecha_hora_compra).format('YYYY-MM-DD') !== currentDrawDate);
-            // await writeJsonFile(VENTAS_FILE, ventas);
-            // console.log(`Ventas del día ${currentDrawDate} limpiadas.`);
-
-            // Actualizar la fecha del próximo sorteo a mañana y el correlativo
-            configuracion.fecha_sorteo = now.clone().add(1, 'days').format('YYYY-MM-DD');
-            configuracion.numero_sorteo_correlativo = (configuracion.numero_sorteo_correlativo || 0) + 1;
-            configuracion.ultimo_numero_ticket = 0; // Reiniciar el último número de ticket usado
-            await writeJsonFile(CONFIG_FILE, configuracion);
-            console.log(`Fecha del sorteo actualizada automáticamente a: ${configuracion.fecha_sorteo} y correlativo a ${configuracion.numero_sorteo_correlativo}.`);
-        } else {
-                console.log(`No es necesario reiniciar números o actualizar fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior o igual a hoy (${todayFormatted}).`);
-        }
-    } catch (error) {
-        console.error('Error en la tarea programada de corte de ventas y reinicio:', error);
-    }
-}, {
-    timezone: "America/Caracas"
 });
 
 
@@ -687,9 +701,9 @@ app.get('/api/premios', async (req, res) => {
 
         // Rellenar con valores por defecto si no hay premios para esa fecha o si algún sorteo está incompleto
         const premiosParaFrontend = {
-            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }, // Eliminado valorTripleC
-            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }, // Eliminado valorTripleC
-            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }  // Eliminado valorTripleC
+            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }, 
+            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }, 
+            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' } 
         };
         
         res.status(200).json(premiosParaFrontend);
@@ -702,8 +716,7 @@ app.get('/api/premios', async (req, res) => {
 
 // 2. POST /api/premios: Guardar o actualizar premios
 app.post('/api/premios', async (req, res) => {
-    // Eliminado 'sorteo5PM' y 'valorTripleC' de la desestructuración, ya que no se usará 'Triple C'
-    const { fechaSorteo, sorteo12PM, sorteo3PM } = req.body; 
+    const { fechaSorteo, sorteo12PM, sorteo3PM, sorteo5PM } = req.body; 
 
     if (!fechaSorteo || !moment(fechaSorteo, 'YYYY-MM-DD', true).isValid()) {
         return res.status(400).json({ message: 'La fecha del sorteo (YYYY-MM-DD) es requerida y debe ser válida para guardar premios.' });
@@ -716,7 +729,6 @@ app.post('/api/premios', async (req, res) => {
         const allPremios = await readJsonFile(PREMIOS_FILE);
 
         // Actualizar o crear la entrada para la fecha específica
-        // Se aseguran los valores por defecto para evitar errores si no se envían todos los campos (aunque el frontend debe enviarlos)
         allPremios[fechaFormateada] = {
             sorteo12PM: sorteo12PM ? {
                 tripleA: sorteo12PM.tripleA || '',
@@ -730,12 +742,11 @@ app.post('/api/premios', async (req, res) => {
                 valorTripleA: sorteo3PM.valorTripleA || '',
                 valorTripleB: sorteo3PM.valorTripleB || ''
             } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
-            // El sorteo de las 5PM ahora solo tiene A y B
-            sorteo5PM: req.body.sorteo5PM ? { // Se accede directamente a req.body.sorteo5PM para mantener la posibilidad de guardarlo
-                tripleA: req.body.sorteo5PM.tripleA || '',
-                tripleB: req.body.sorteo5PM.tripleB || '',
-                valorTripleA: req.body.sorteo5PM.valorTripleA || '',
-                valorTripleB: req.body.sorteo5PM.valorTripleB || ''
+            sorteo5PM: sorteo5PM ? { 
+                tripleA: sorteo5PM.tripleA || '',
+                tripleB: sorteo5PM.tripleB || '',
+                valorTripleA: sorteo5PM.valorTripleA || '',
+                valorTripleB: sorteo5PM.valorTripleB || ''
             } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
         };
 
@@ -779,8 +790,6 @@ ensureDataAndComprobantesDirs().then(() => {
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
-            // console.log(`Panel de administración disponible en: https://paneladmin01.netlify.app/`); // Esto es solo un ejemplo si lo usas en Netlify
-            // console.log(`Frontend principal disponible en: https://tuoportunidadeshoy.netlify.app/`); // Esto es solo un ejemplo si lo usas en Netlify
         });
     });
 });
