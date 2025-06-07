@@ -527,7 +527,7 @@ app.post('/api/corte-ventas', async (req, res) => {
         const now = moment().tz("America/Caracas");
         const todayFormatted = now.format('YYYY-MM-DD');
 
-        // Filtrar las ventas para obtener las del día actual
+        // Filtrar las ventas para obtener las del día actual (para el reporte)
         const ventasDelDia = ventas.filter(venta =>
             moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') === todayFormatted
         );
@@ -598,7 +598,6 @@ app.post('/api/corte-ventas', async (req, res) => {
         await workbook.xlsx.writeFile(excelFilePath);
 
         // Envío de correo electrónico con el reporte adjunto
-        // Ahora se usa la función sendEmail con la configuración admin_email_for_reports que puede ser un array
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
             const subject = `Reporte de Corte de Ventas ${todayFormatted}`;
             const htmlContent = `
@@ -621,16 +620,15 @@ app.post('/api/corte-ventas', async (req, res) => {
         }
 
 
-        // Reiniciar los números a "no comprados" y limpiar ventas del día
+        // Reiniciar los números a "no comprados"
         numeros = numeros.map(n => ({ ...n, comprado: false }));
-        ventas = ventas.filter(venta =>
-            moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') !== todayFormatted
-        );
+        // Se ELIMINA la línea que filtraba las ventas para mantener el historial completo.
+        // ventas = ventas.filter(venta => moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') !== todayFormatted);
 
         await writeJsonFile(NUMEROS_FILE, numeros);
-        await writeJsonFile(VENTAS_FILE, ventas);
+        await writeJsonFile(VENTAS_FILE, ventas); // Guardar el archivo de ventas SIN FILTRAR
 
-        res.status(200).json({ message: 'Corte de ventas realizado con éxito y números reiniciados.' });
+        res.status(200).json({ message: 'Corte de ventas realizado con éxito y números reiniciados. El historial de ventas se ha mantenido.' });
 
     } catch (error) {
         console.error('Error al realizar corte de ventas:', error);
