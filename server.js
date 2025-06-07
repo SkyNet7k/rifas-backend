@@ -88,7 +88,7 @@ async function ensureDataAndComprobantesDirs() {
             ensureJsonFile(VENTAS_FILE, []),
             ensureJsonFile(COMPROBANTES_FILE, []),
             ensureJsonFile(RESULTADOS_ZULIA_FILE, []),
-            ensureJsonFile(PREMIOS_FILE, {}) 
+            ensureJsonFile(PREMIOS_FILE, {})
         ]);
         console.log('Directorios y archivos JSON iniciales asegurados.');
     } catch (error) {
@@ -137,7 +137,7 @@ let horariosZulia = { horarios_zulia: [] };
 let ventas = [];
 let comprobantes = [];
 let resultadosZulia = [];
-let premios = {}; 
+let premios = {};
 
 
 // Carga inicial de datos
@@ -149,7 +149,7 @@ async function loadInitialData() {
         ventas = await readJsonFile(VENTAS_FILE);
         comprobantes = await readJsonFile(COMPROBANTES_FILE);
         resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE);
-        premios = await readJsonFile(PREMIOS_FILE); 
+        premios = await readJsonFile(PREMIOS_FILE);
 
         console.log('Datos iniciales cargados.');
     } catch (error) {
@@ -219,7 +219,7 @@ async function sendEmail(to, subject, html, attachments = []) {
 cron.schedule('0 0 * * *', async () => {
     console.log('Ejecutando tarea diaria: Reiniciar tickets...');
     // Lógica para reiniciar tickets o realizar otras tareas diarias
-    // await reiniciarTicketsDiarios(); 
+    // await reiniciarTicketsDiarios();
 });
 */
 
@@ -239,7 +239,7 @@ app.post('/api/configuracion', async (req, res) => {
     try {
         // Fusionar solo los campos permitidos y existentes
         Object.keys(newConfig).forEach(key => {
-            if (configuracion.hasOwnProperty(key) && key !== 'mail_config') { 
+            if (configuracion.hasOwnProperty(key) && key !== 'mail_config') {
                 configuracion[key] = newConfig[key];
             }
         });
@@ -249,13 +249,13 @@ app.post('/api/configuracion', async (req, res) => {
             configuracion.mail_config = { ...configuracion.mail_config, ...newConfig.mail_config };
             configureMailer(); // Reconfigurar el mailer si la configuración de correo ha cambiado
         }
-        
+
         // Manejar admin_email_for_reports específicamente para asegurar que sea un array
         if (newConfig.admin_email_for_reports !== undefined) {
             // Si el valor enviado no es un array, lo convertimos en uno que contenga solo ese valor.
             // Esto es útil si el frontend envía un string.
-            configuracion.admin_email_for_reports = Array.isArray(newConfig.admin_email_for_reports) 
-                                                      ? newConfig.admin_email_for_reports 
+            configuracion.admin_email_for_reports = Array.isArray(newConfig.admin_email_for_reports)
+                                                      ? newConfig.admin_email_for_reports
                                                       : [newConfig.admin_email_for_reports].filter(Boolean); // Filtra valores falsy
         }
 
@@ -290,6 +290,18 @@ app.post('/api/numeros', async (req, res) => {
 app.get('/api/ventas', (req, res) => {
     res.json(ventas);
 });
+
+// *** INICIO DE LA SOLUCIÓN: MANEJAR SOLICITUDES GET INESPERADAS A /api/compra ***
+app.get('/api/compra', (req, res) => {
+    // Esta ruta no está diseñada para manejar solicitudes GET para la compra de tickets.
+    // La compra se realiza mediante una solicitud POST a /api/comprar.
+    res.status(404).json({
+        message: 'Esta ruta no soporta solicitudes GET. Para realizar una compra, utiliza el método POST en /api/comprar.',
+        hint: 'Si estás intentando obtener información de ventas, usa la ruta GET /api/ventas.'
+    });
+});
+// *** FIN DE LA SOLUCIÓN ***
+
 
 // Ruta para la compra de tickets
 app.post('/api/comprar', async (req, res) => {
@@ -700,7 +712,7 @@ app.get('/api/premios', async (req, res) => {
             sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
             sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
         };
-        
+
         res.status(200).json(premiosParaFrontend);
 
     } catch (error) {
