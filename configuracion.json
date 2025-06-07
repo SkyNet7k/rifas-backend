@@ -1,5 +1,5 @@
 {
-  "tasa_dolar": [],
+  "tasa_dolar": [], 
   "pagina_bloqueada": false,
   "fecha_sorteo": "",
   "precio_ticket": 3.00,
@@ -15,9 +15,12 @@
     "host": "smtp.gmail.com",
     "port": 465,
     "secure": true,
-    "user": "Tuoportunidadeshoy1@gmail.com",
-    "pass": "pcfc acbs ahka jwpk",
+    "user": "SkyFall7k@gmail.com",
+    "pass": "gnrl fxqe oqpd twti",
     "senderName": "Sistema De Cortes de Ventas"
   },
-  "admin_email_for_reports": ["SkyFall7k@gmail.com", "Tuoportunidadeshoy1@gmail.com"]
+  "admin_email_for_reports": [
+    "SkyFall7k@gmail.com",
+    "Tuoportunidadeshoy1@gmail.com"
+  ]
 }
