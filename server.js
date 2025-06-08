@@ -132,7 +132,7 @@ async function writeJsonFile(filePath, data) {
 }
 
 let configuracion = {};
-let numeros = [];
+let numeros = []; // Esta es la variable global que necesita actualizarse
 let horariosZulia = { horarios_zulia: [] };
 let ventas = [];
 let comprobantes = [];
@@ -296,7 +296,7 @@ app.get('/api/compra', (req, res) => {
     // Esta ruta no está diseñada para manejar solicitudes GET para la compra de tickets.
     // La compra se realiza mediante una solicitud POST a /api/comprar.
     res.status(404).json({
-        message: 'Esta ruta no soporta solicitudes GET. Para realizar una compra, utiliza el método POST en /api/comprar.',
+        message: 'Esta ruta no soporta solicitudes GET. Para realizar una una compra, utiliza el método POST en /api/comprar.',
         hint: 'Si estás intentando obtener información de ventas, usa la ruta GET /api/ventas.'
     });
 });
@@ -359,7 +359,8 @@ app.post('/api/comprar', async (req, res) => {
 
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
-        await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados
+        await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados en el archivo
+        numeros = currentNumeros; // CAMBIO CLAVE: Actualizar la variable global 'numeros' en memoria
         await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
