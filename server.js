@@ -354,7 +354,8 @@ app.post('/api/comprar', async (req, res) => {
             valor_bs: parseFloat(valorBs),
             metodo_pago: metodoPago,
             referencia_pago: referenciaPago,
-            url_comprobante: null // Se llenará si se sube un comprobante
+            url_comprobante: null, // Se llenará si se sube un comprobante
+            estado_validacion: 'Pendiente' // NEW: Campo para el estado de validación, por defecto 'Pendiente'
         };
 
         ventas.push(nuevaVenta);
@@ -583,7 +584,8 @@ app.post('/api/corte-ventas', async (req, res) => {
             { header: 'Valor Bs', key: 'valor_bs', width: 15 },
             { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
             { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
-            { header: 'URL Comprobante', key: 'url_comprobante', width: 30 }
+            { header: 'URL Comprobante', key: 'url_comprobante', width: 30 },
+            { header: 'Estado Validación', key: 'estado_validacion', width: 20 } // NEW: Columna para el estado de validación
         ];
         worksheet.addRow(ventasHeaders.map(h => h.header)); // Añade los nombres de las columnas
 
@@ -601,7 +603,8 @@ app.post('/api/corte-ventas', async (req, res) => {
                 valor_bs: venta.valor_bs,
                 metodo_pago: venta.metodo_pago,
                 referencia_pago: venta.referencia_pago,
-                url_comprobante: venta.url_comprobante ? `${API_BASE_URL}${venta.url_comprobante}` : ''
+                url_comprobante: venta.url_comprobante ? `${API_BASE_URL}${venta.url_comprobante}` : '',
+                estado_validacion: venta.estado_validacion || 'Pendiente' // NEW: Añadir estado de validación
             });
         });
 
@@ -788,6 +791,36 @@ app.post('/api/send-test-email', async (req, res) => {
     } catch (error) {
         console.error('Error en la ruta /api/send-test-email:', error);
         res.status(500).json({ message: 'Error interno del servidor al enviar correo de prueba.', error: error.message });
+    }
+});
+
+
+// NUEVA RUTA: Endpoint para actualizar el estado de validación de una venta
+app.put('/api/ventas/:id/validar', async (req, res) => {
+    const ventaId = parseInt(req.params.id); // Asegúrate de que el ID sea un entero
+    const { estado_validacion } = req.body;
+
+    // Validar el estado de validación recibido
+    const estadosValidos = ['Confirmado', 'Falso', 'Pendiente'];
+    if (!estado_validacion || !estadosValidos.includes(estado_validacion)) {
+        return res.status(400).json({ message: 'Estado de validación inválido. Debe ser "Confirmado", "Falso" o "Pendiente".' });
+    }
+
+    try {
+        const ventaIndex = ventas.findIndex(v => v.id === ventaId);
+
+        if (ventaIndex === -1) {
+            return res.status(404).json({ message: 'Venta no encontrada.' });
+        }
+
+        // Actualizar solo el campo estado_validacion
+        ventas[ventaIndex].estado_validacion = estado_validacion;
+        await writeJsonFile(VENTAS_FILE, ventas);
+
+        res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${estado_validacion}" con éxito.`, venta: ventas[ventaIndex] });
+    } catch (error) {
+        console.error(`Error al actualizar el estado de la venta ${ventaId}:`, error);
+        res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la venta.', error: error.message });
     }
 });
 
