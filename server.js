@@ -683,7 +683,7 @@ cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:
 
             // Reiniciar ventas para la fecha anterior (opcional, si quieres mantener un historial de ventas completas y luego hacer cortes)
             // Si el corte de ventas ya limpia ventas del día, esto no sería necesario aquí a medianoche.
-            // ventas = ventas.filter(venta => moment(venta.fecha_hora_compra).format('YYYY-MM-DD') !== currentDrawDate);
+            // ventas = ventas.filter(venta => moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') !== currentDrawDate);
             // await writeJsonFile(VENTAS_FILE, ventas);
             // console.log(`Ventas del día ${currentDrawDate} limpiadas.`);
 
@@ -896,6 +896,54 @@ app.get('/api/export-database', async (req, res) => {
     } catch (error) {
         console.error('Error al exportar la base de datos:', error);
         res.status(500).send('Error al exportar la base de datos.');
+    }
+});
+
+// NUEVA RUTA: Endpoint para generar el enlace de WhatsApp para un cliente
+app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
+    const { ventaId } = req.body;
+
+    if (!ventaId) {
+        return res.status(400).json({ message: 'ID de venta requerido para generar el enlace de WhatsApp.' });
+    }
+
+    try {
+        // Buscar la venta por su ID
+        const venta = ventas.find(v => v.id === ventaId);
+
+        if (!venta) {
+            return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp.' });
+        }
+
+        // Construir el mensaje de confirmación para el cliente
+        const customerPhoneNumber = venta.telefono;
+        const ticketNumber = venta.numero_ticket;
+        const purchasedNumbers = venta.numeros.join(', ');
+        const valorUsd = venta.valor_usd.toFixed(2);
+        const valorBs = venta.valor_bs.toFixed(2);
+        const metodoPago = venta.metodo_pago;
+        const referenciaPago = venta.referencia_pago;
+        const fechaCompra = moment(venta.fecha_hora_compra).tz("America/Caracas").format('DD/MM/YYYY HH:mm');
+
+        const whatsappMessage = encodeURIComponent(
+            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. 🎉\n\n` +
+            `Detalles de su ticket:\n` +
+            `*Número de Ticket:* ${ticketNumber}\n` +
+            `*Números Jugados:* ${purchasedNumbers}\n` +
+            `*Valor Pagado:* $${valorUsd} USD (Bs ${valorBs})\n` +
+            `*Método de Pago:* ${metodoPago}\n` +
+            (referenciaPago ? `*Referencia de Pago:* ${referenciaPago}\n` : '') +
+            `*Fecha de Compra:* ${fechaCompra}\n\n` +
+            `¡Mucha suerte en el sorteo! Estaremos informándole sobre los resultados.`
+        );
+
+        const whatsappLink = `https://api.whatsapp.com/send?phone=${customerPhoneNumber}&text=${whatsappMessage}`;
+
+        res.status(200).json({ whatsappLink });
+
+    } catch (error) {
+        console.error('Error al generar el enlace de WhatsApp para el cliente:', error);
+        res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp.', error: error.message });
     }
 });
 
