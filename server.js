@@ -10,6 +10,7 @@ const cron = require('node-cron');
 const dotenv = require('dotenv');
 const ExcelJS = require('exceljs');
 const moment = require('moment-timezone'); // Asegúrate de tener moment-timezone instalado: npm install moment-timezone exceljs
+const archiver = require('archiver'); // NUEVO: Importar archiver
 
 dotenv.config();
 
@@ -48,6 +49,17 @@ const VENTAS_FILE = path.join(__dirname, 'ventas.json');
 const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json');
 const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
 const PREMIOS_FILE = path.join(__dirname, 'premios.json');
+
+// Lista de todos los archivos de la base de datos para exportar
+const DATABASE_FILES = [
+    CONFIG_FILE,
+    NUMEROS_FILE,
+    HORARIOS_ZULIA_FILE,
+    VENTAS_FILE,
+    COMPROBANTES_FILE,
+    RESULTADOS_ZULIA_FILE,
+    PREMIOS_FILE
+];
 
 
 // Directorios para guardar comprobantes y reportes
@@ -847,6 +859,43 @@ app.put('/api/ventas/:id/validar', async (req, res) => {
     } catch (error) {
         console.error(`Error al actualizar el estado de la venta ${ventaId}:`, error);
         res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la venta.', error: error.message });
+    }
+});
+
+
+// NUEVA RUTA: Endpoint para exportar toda la base de datos en un archivo ZIP
+app.get('/api/export-database', async (req, res) => {
+    const archive = archiver('zip', {
+        zlib: { level: 9 } // Nivel de compresión
+    });
+
+    const archiveName = `rifas_db_backup_${moment().format('YYYYMMDD_HHmmss')}.zip`;
+
+    res.attachment(archiveName); // Establece el nombre del archivo de descarga
+    archive.pipe(res); // Envía el archivo ZIP como respuesta al cliente
+
+    try {
+        for (const filePath of DATABASE_FILES) {
+            const fileName = path.basename(filePath);
+            try {
+                // Asegurarse de que el archivo existe antes de intentar adjuntarlo
+                await fs.access(filePath);
+                archive.file(filePath, { name: fileName });
+            } catch (fileError) {
+                if (fileError.code === 'ENOENT') {
+                    console.warn(`Archivo no encontrado, omitiendo: ${fileName}`);
+                    // Opcional: Crear un archivo vacío o un placeholder si el archivo no existe
+                    // archive.append(Buffer.from(''), { name: fileName });
+                } else {
+                    throw fileError; // Relanza otros errores de archivo
+                }
+            }
+        }
+        archive.finalize(); // Finaliza el archivo ZIP
+        console.log('Base de datos exportada y enviada como ZIP.');
+    } catch (error) {
+        console.error('Error al exportar la base de datos:', error);
+        res.status(500).send('Error al exportar la base de datos.');
     }
 });
 
