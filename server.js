@@ -585,7 +585,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             { header: 'Método de Pago', key: 'metodo_pago', width: 20 },
             { header: 'Referencia Pago', key: 'referencia_pago', width: 20 },
             { header: 'URL Comprobante', key: 'url_comprobante', width: 30 },
-            { header: 'Estado Validación', key: 'estado_validacion', width: 20 } // NEW: Columna para el estado de validación
+            { header: 'Estado Validación', key: 'estado_validacion', width: 20 }
         ];
         worksheet.addRow(ventasHeaders.map(h => h.header)); // Añade los nombres de las columnas
 
@@ -604,7 +604,7 @@ app.post('/api/corte-ventas', async (req, res) => {
                 metodo_pago: venta.metodo_pago,
                 referencia_pago: venta.referencia_pago,
                 url_comprobante: venta.url_comprobante ? `${API_BASE_URL}${venta.url_comprobante}` : '',
-                estado_validacion: venta.estado_validacion || 'Pendiente' // NEW: Añadir estado de validación
+                estado_validacion: venta.estado_validacion || 'Pendiente'
             });
         });
 
@@ -813,8 +813,34 @@ app.put('/api/ventas/:id/validar', async (req, res) => {
             return res.status(404).json({ message: 'Venta no encontrada.' });
         }
 
-        // Actualizar solo el campo estado_validacion
+        // Obtener el estado de validación actual antes de actualizar
+        const oldEstadoValidacion = ventas[ventaIndex].estado_validacion;
+
+        // Actualizar el campo estado_validacion
         ventas[ventaIndex].estado_validacion = estado_validacion;
+
+        // Si el estado cambia a 'Falso' y no era 'Falso' antes, anular la venta y liberar los números
+        if (estado_validacion === 'Falso' && oldEstadoValidacion !== 'Falso') {
+            const numerosAnulados = ventas[ventaIndex].numeros;
+            if (numerosAnulados && numerosAnulados.length > 0) {
+                // Leer el estado más reciente de los números desde el archivo para asegurar consistencia
+                let currentNumeros = await readJsonFile(NUMEROS_FILE);
+
+                numerosAnulados.forEach(numAnulado => {
+                    const numObj = currentNumeros.find(n => n.numero === numAnulado);
+                    if (numObj) {
+                        numObj.comprado = false; // Marcar como disponible
+                    }
+                });
+                await writeJsonFile(NUMEROS_FILE, currentNumeros);
+                // También actualizar la variable global 'numeros' en memoria
+                numeros = currentNumeros;
+                console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} han sido puestos nuevamente disponibles.`);
+            }
+        }
+        // NOTA: Si el estado cambia de 'Falso' a 'Confirmado', los números NO se vuelven a marcar como comprados automáticamente aquí.
+        // Se asume que una vez anulados, si se confirman de nuevo, se debe gestionar manualmente o con otra lógica.
+
         await writeJsonFile(VENTAS_FILE, ventas);
 
         res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${estado_validacion}" con éxito.`, venta: ventas[ventaIndex] });
