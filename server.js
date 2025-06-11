@@ -947,6 +947,44 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     }
 });
 
+// NUEVA RUTA: Endpoint para generar el enlace de WhatsApp para notificar pago falso
+app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
+    const { ventaId } = req.body;
+
+    if (!ventaId) {
+        return res.status(400).json({ message: 'ID de venta requerido para generar el enlace de WhatsApp para pago falso.' });
+    }
+
+    try {
+        // Buscar la venta por su ID
+        const venta = ventas.find(v => v.id === ventaId);
+
+        if (!venta) {
+            return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp de pago falso.' });
+        }
+
+        const customerPhoneNumber = venta.telefono;
+        const ticketNumber = venta.numero_ticket;
+        const comprador = venta.comprador || 'Estimado cliente'; // Usar nombre del comprador si está disponible
+
+        const whatsappMessage = encodeURIComponent(
+            `¡Hola ${comprador}! 👋\n\n` +
+            `Lamentamos informarle que su pago para la compra con Ticket N° *${ticketNumber}* no pudo ser verificado.\n\n` +
+            `Por lo tanto, su compra ha sido *anulada*.\n\n` +
+            `Si cree que esto es un error o tiene alguna pregunta, por favor, contáctenos para aclarar la situación.\n\n` +
+            `Gracias por su comprensión.`
+        );
+
+        const whatsappLink = `https://api.whatsapp.com/send?phone=${customerPhoneNumber}&text=${whatsappMessage}`;
+
+        res.status(200).json({ whatsappLink });
+
+    } catch (error) {
+        console.error('Error al generar el enlace de WhatsApp para pago falso:', error);
+        res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp para pago falso.', error: error.message });
+    }
+});
+
 
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
