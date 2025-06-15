@@ -261,8 +261,8 @@ app.get('/api/configuracion', async (req, res) => {
     res.json(configToSend);
 });
 
-// Actualizar configuración
-app.post('/api/configuracion', async (req, res) => {
+// Actualizar configuración (Cambiado de POST a PUT)
+app.put('/api/configuracion', async (req, res) => { // CAMBIO CLAVE: Aquí cambiamos de app.post a app.put
     const newConfig = req.body;
     try {
         // Fusionar solo los campos permitidos y existentes
@@ -538,7 +538,9 @@ app.post('/api/resultados-sorteo', async (req, res) => {
     const currentDay = now.format('YYYY-MM-DD');
 
     try {
-        let existingEntryIndex = resultadosSorteo.findIndex(r => r.fecha === fecha && r.tipoLoteria.toLowerCase() === tipoLoteria.toLowerCase());
+        let existingEntryIndex = resultadosSorteo.findIndex(r =>
+            r.fecha === fecha && r.tipoLoteria.toLowerCase() === tipoLoteria.toLowerCase()
+        );
 
         if (existingEntryIndex !== -1) {
             // Actualizar resultados existentes
