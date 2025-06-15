@@ -354,7 +354,7 @@ app.post('/api/comprar', async (req, res) => {
         );
 
         if (conflictos.length > 0) {
-            return res.status(409).json({ message: `Los números ${conflictos.join(', ')} ya han sido comprados. Por favor, selecciona otros.`, conflictos });
+            return res.status(409).json({ message: `Los números ${conflictos.join(', ')} ya han sido comprados. Por favor, selecciona otros.` });
         }
 
         // Marcar los números como comprados
@@ -508,8 +508,13 @@ app.post('/api/horarios', async (req, res) => {
     if (!tipo || (tipo !== 'zulia' && tipo !== 'chance')) {
         return res.status(400).json({ message: 'Tipo de lotería inválido. Debe ser "zulia" o "chance".' });
     }
-    if (!Array.isArray(horarios) || !horarios.every(h => typeof h === 'string' && h.match(/^\d{2}:\d{2} (AM|PM)$/))) {
-        return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings como ["HH:MM AM/PM"].' });
+    // ELIMINADA: Validación de formato de horarios. Ahora acepta cualquier string en el array.
+    // if (!Array.isArray(horarios) || !horarios.every(h => typeof h === 'string' && h.match(/^\d{2}:\d{2} (AM|PM)$/))) {
+    //     return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings como ["HH:MM AM/PM"].' });
+    // }
+    // Solo verificar que sea un array de strings.
+    if (!Array.isArray(horarios) || !horarios.every(h => typeof h === 'string')) {
+        return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings.' });
     }
     try {
         horariosZulia[tipo] = horarios; // Actualiza el array específico dentro del objeto horariosZulia
