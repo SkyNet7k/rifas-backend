@@ -526,6 +526,33 @@ app.post('/api/horarios', async (req, res) => {
     }
 });
 
+// NUEVA RUTA: Endpoint para obtener los resultados de Zulia por fecha
+// Esta ruta es la que el frontend está llamando con un parámetro 'fecha'
+app.get('/api/resultados-zulia', async (req, res) => {
+    const { fecha } = req.query; // Obtener el parámetro de fecha de la consulta
+
+    if (!fecha) {
+        // Si no se proporciona fecha, se devuelve un error 400
+        return res.status(400).json({ message: 'Se requiere el parámetro "fecha" para consultar resultados de Zulia.' });
+    }
+
+    try {
+        const allResultados = await readJsonFile(RESULTADOS_SORTEO_FILE);
+        // Filtramos por la fecha proporcionada y por tipoLoteria 'zulia'
+        const resultsForDateAndZulia = allResultados.filter(r =>
+            r.fecha === fecha && r.tipoLoteria.toLowerCase() === 'zulia'
+        );
+
+        // Se devuelve un array de resultados. Si no hay, será un array vacío.
+        // El frontend ya busca el `find(r => r.fecha === fecha)` después.
+        res.status(200).json(resultsForDateAndZulia);
+    } catch (error) {
+        console.error('Error al obtener resultados de Zulia:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener resultados de Zulia.', error: error.message });
+    }
+});
+
+
 // Endpoint para obtener los últimos resultados del sorteo
 app.get('/api/resultados-sorteo', (req, res) => {
     res.json(resultadosSorteo);
