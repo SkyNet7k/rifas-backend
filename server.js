@@ -136,6 +136,8 @@ async function readJsonFile(filePath) {
         const data = await fs.readFile(filePath, 'utf8');
         // Manejar el caso de archivo vacío (ej. "[]" o "{}")
         if (data.trim() === '') {
+            // Devuelve un array vacío para archivos que se espera que contengan arrays (ventas, resultados, etc.)
+            // y un objeto vacío para configuraciones o premios (que son objetos).
             if (filePath === VENTAS_FILE || filePath === RESULTADOS_SORTEO_FILE || filePath === COMPROBANTES_FILE || filePath === NUMEROS_FILE || filePath === GANADORES_FILE) {
                 return [];
             }
@@ -314,10 +316,20 @@ app.post('/api/numeros', async (req, res) => {
     }
 });
 
-// Obtener ventas
-app.get('/api/ventas', (req, res) => {
-    res.json(ventas);
+// NUEVA RUTA AGREGADA: Obtener ventas
+// Esta es la ruta que tu panel de administrador necesita para cargar las ventas.
+app.get('/api/ventas', async (req, res) => {
+    try {
+        // Asegúrate de leer el archivo VENTAS_FILE directamente aquí para obtener los datos más recientes
+        const currentVentas = await readJsonFile(VENTAS_FILE);
+        console.log('Enviando ventas al frontend:', currentVentas.length, 'ventas.');
+        res.status(200).json(currentVentas);
+    } catch (error) {
+        console.error('Error al obtener ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener ventas.', error: error.message });
+    }
 });
+
 
 // *** INICIO DE LA SOLUCIÓN: MANEJAR SOLICITUDES GET INESPERADAS A /api/compra ***
 app.get('/api/compra', (req, res) => {
