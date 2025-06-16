@@ -194,7 +194,7 @@ function configureMailer() {
         transporter = nodemailer.createTransport({
             host: configuracion.mail_config.host,
             port: configuracion.mail_config.port,
-            secure: configuracion.mail_config.secure,
+            secure: false, // TLS
             auth: {
                 user: configuracion.mail_config.user,
                 pass: configuracion.mail_config.pass
@@ -264,7 +264,7 @@ app.get('/api/configuracion', async (req, res) => {
 });
 
 // Actualizar configuración (Cambiado de POST a PUT)
-app.put('/api/configuracion', async (req, res) => { // CAMBIO CLAVE: Aquí cambiamos de app.post a app.put
+app.put('/api/configuracion', async (req, res) => {
     const newConfig = req.body;
     try {
         // Fusionar solo los campos permitidos y existentes
@@ -282,8 +282,6 @@ app.put('/api/configuracion', async (req, res) => { // CAMBIO CLAVE: Aquí cambi
 
         // Manejar admin_email_for_reports específicamente para asegurar que sea un array
         if (newConfig.admin_email_for_reports !== undefined) {
-            // Si el valor enviado no es un array, lo convertimos en uno que contenga solo ese valor.
-            // Esto es útil si el frontend envía un string.
             configuracion.admin_email_for_reports = Array.isArray(newConfig.admin_email_for_reports)
                                                       ? newConfig.admin_email_for_reports
                                                       : [newConfig.admin_email_for_reports].filter(Boolean); // Filtra valores falsy
@@ -316,11 +314,9 @@ app.post('/api/numeros', async (req, res) => {
     }
 });
 
-// NUEVA RUTA AGREGADA: Obtener ventas
-// Esta es la ruta que tu panel de administrador necesita para cargar las ventas.
+// Ruta para obtener ventas
 app.get('/api/ventas', async (req, res) => {
     try {
-        // Asegúrate de leer el archivo VENTAS_FILE directamente aquí para obtener los datos más recientes
         const currentVentas = await readJsonFile(VENTAS_FILE);
         console.log('Enviando ventas al frontend:', currentVentas.length, 'ventas.');
         res.status(200).json(currentVentas);
@@ -331,24 +327,22 @@ app.get('/api/ventas', async (req, res) => {
 });
 
 
-// *** INICIO DE LA SOLUCIÓN: MANEJAR SOLICITUDES GET INESPERADAS A /api/compra ***
+// Manejar solicitudes GET inesperadas a /api/compra
 app.get('/api/compra', (req, res) => {
-    // Esta ruta no está diseñada para manejar solicitudes GET para la compra de tickets.
-    // La compra se realiza mediante una solicitud POST a /api/comprar.
     res.status(404).json({
         message: 'Esta ruta no soporta solicitudes GET. Para realizar una una compra, utiliza el método POST en /api/comprar.',
         hint: 'Si estás intentando obtener información de ventas, usa la ruta GET /api/ventas.'
     });
 });
-// *** FIN DE LA SOLUCIÓN ***
 
 
 // Ruta para la compra de tickets
 app.post('/api/comprar', async (req, res) => {
-    const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, fechaSorteo, horaSorteo } = req.body;
+    // Solo obtenemos los datos necesarios del body, pero la fecha del sorteo será la configurada en el backend.
+    const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, horaSorteo } = req.body; // 'fechaSorteo' se ignora de req.body para el drawDate
 
-    if (!numerosSeleccionados || numerosSeleccionados.length === 0 || !valorUsd || !valorBs || !metodoPago || !comprador || !telefono || !fechaSorteo || !horaSorteo) {
-        return res.status(400).json({ message: 'Faltan datos requeridos para la compra.' });
+    if (!numerosSeleccionados || numerosSeleccionados.length === 0 || !valorUsd || !valorBs || !metodoPago || !comprador || !telefono || !horaSorteo) {
+        return res.status(400).json({ message: 'Faltan datos requeridos para la compra (números, valor, método de pago, comprador, teléfono, hora del sorteo).' });
     }
 
     // Verificar si la página está bloqueada
@@ -384,38 +378,36 @@ app.post('/api/comprar', async (req, res) => {
         const nuevaVenta = {
             id: Date.now(), // ID único para la venta
             purchaseDate: now.toISOString(), // Usar ISO string para consistencia
-            drawDate: fechaSorteo, // Fecha del sorteo (YYYY-MM-DD)
-            drawTime: horaSorteo, // NUEVO: Añadir la hora del sorteo
+            drawDate: configuracion.fecha_sorteo, // *** CLAVE: Usar la fecha configurada en el backend ***
+            drawTime: horaSorteo, // Hora del sorteo, que sí viene del cliente
             drawNumber: configuracion.numero_sorteo_correlativo, // Número correlativo del sorteo
             ticketNumber: numeroTicket,
             buyerName: comprador,
             buyerPhone: telefono,
-            numbers: numerosSeleccionados, // Renombrado a 'numbers' para consistencia con frontend
-            valueUSD: parseFloat(valorUsd), // Renombrado a 'valueUSD'
-            valueBs: parseFloat(valorBs), // Renombrado a 'valueBs'
+            numbers: numerosSeleccionados,
+            valueUSD: parseFloat(valorUsd),
+            valueBs: parseFloat(valorBs),
             paymentMethod: metodoPago,
             paymentReference: referenciaPago,
             voucherURL: null, // Se llenará si se sube un comprobante
-            validationStatus: 'Pendiente' // Renombrado a 'validationStatus'
+            validationStatus: 'Pendiente'
         };
 
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
         await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados en el archivo
-        numeros = currentNumeros; // CAMBIO CLAVE: Actualizar la variable global 'numeros' en memoria
+        numeros = currentNumeros; // Actualizar la variable global 'numeros' en memoria
         await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
 
         // Enviar notificación a WhatsApp
-        const whatsappMessage = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${fechaSorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
+        const whatsappMessage = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
             configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
                 const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessage}`;
                 console.log(`URL de WhatsApp para ${adminNumber}: ${whatsappUrl}`);
-                // En un entorno real, no abrirías la URL directamente aquí.
-                // Esto es solo para depuración o si tienes un servicio que pueda enviar el mensaje directamente.
             });
         }
 
@@ -468,9 +460,8 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
 
 
         // Envío de correo electrónico con el comprobante adjunto
-        // Ahora se usa la función sendEmail con la configuración admin_email_for_reports que puede ser un array
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const subject = `Nuevo Comprobante de Pago para Venta #${ventas[ventaIndex].ticketNumber}`; // Usar ticketNumber
+            const subject = `Nuevo Comprobante de Pago para Venta #${ventas[ventaIndex].ticketNumber}`;
             const htmlContent = `
                 <p>Se ha subido un nuevo comprobante de pago para la venta con Ticket Nro. <strong>${ventas[ventaIndex].ticketNumber}</strong>.</p>
                 <p><b>Comprador:</b> ${ventas[ventaIndex].buyerName}</p>
@@ -510,27 +501,20 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 // Endpoint para obtener horarios de Zulia (y Chance)
 app.get('/api/horarios-zulia', (req, res) => {
-    // Se devuelve el objeto completo de horarios que contiene 'zulia' y 'chance'
     res.json(horariosZulia);
 });
 
 // Endpoint para actualizar horarios de Zulia (y Chance)
-// Se modifica para aceptar el tipo de lotería en la ruta o cuerpo
 app.post('/api/horarios', async (req, res) => {
-    const { tipo, horarios } = req.body; // 'tipo' puede ser 'zulia' o 'chance'
+    const { tipo, horarios } = req.body;
     if (!tipo || (tipo !== 'zulia' && tipo !== 'chance')) {
         return res.status(400).json({ message: 'Tipo de lotería inválido. Debe ser "zulia" o "chance".' });
     }
-    // ELIMINADA: Validación de formato de horarios. Ahora acepta cualquier string en el array.
-    // if (!Array.isArray(horarios) || !horarios.every(h => typeof h === 'string' && h.match(/^\d{2}:\d{2} (AM|PM)$/))) {
-    //     return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings como ["HH:MM AM/PM"].' });
-    // }
-    // Solo verificar que sea un array de strings.
     if (!Array.isArray(horarios) || !horarios.every(h => typeof h === 'string')) {
         return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings.' });
     }
     try {
-        horariosZulia[tipo] = horarios; // Actualiza el array específico dentro del objeto horariosZulia
+        horariosZulia[tipo] = horarios;
         await writeJsonFile(HORARIOS_ZULIA_FILE, horariosZulia);
         res.json({ message: `Horarios de ${tipo} actualizados con éxito.`, horarios: horariosZulia[tipo] });
     } catch (error) {
@@ -539,25 +523,20 @@ app.post('/api/horarios', async (req, res) => {
     }
 });
 
-// NUEVA RUTA: Endpoint para obtener los resultados de Zulia por fecha
-// Esta ruta es la que el frontend está llamando con un parámetro 'fecha'
+// Endpoint para obtener los resultados de Zulia por fecha
 app.get('/api/resultados-zulia', async (req, res) => {
-    const { fecha } = req.query; // Obtener el parámetro de fecha de la consulta
+    const { fecha } = req.query;
 
     if (!fecha) {
-        // Si no se proporciona fecha, se devuelve un error 400
         return res.status(400).json({ message: 'Se requiere el parámetro "fecha" para consultar resultados de Zulia.' });
     }
 
     try {
         const allResultados = await readJsonFile(RESULTADOS_SORTEO_FILE);
-        // Filtramos por la fecha proporcionada y por tipoLoteria 'zulia'
         const resultsForDateAndZulia = allResultados.filter(r =>
             r.fecha === fecha && r.tipoLoteria.toLowerCase() === 'zulia'
         );
 
-        // Se devuelve un array de resultados. Si no hay, será un array vacío.
-        // El frontend ya busca el `find(r => r.fecha === fecha)` después.
         res.status(200).json(resultsForDateAndZulia);
     } catch (error) {
         console.error('Error al obtener resultados de Zulia:', error);
@@ -573,7 +552,7 @@ app.get('/api/resultados-sorteo', (req, res) => {
 
 // Endpoint para guardar/actualizar los resultados del sorteo
 app.post('/api/resultados-sorteo', async (req, res) => {
-    const { fecha, tipoLoteria, resultadosPorHora } = req.body; // resultadosPorHora es un array de { hora, tripleA, tripleB }
+    const { fecha, tipoLoteria, resultadosPorHora } = req.body;
 
     if (!fecha || !moment(fecha, 'YYYY-MM-DD', true).isValid() || !tipoLoteria || !Array.isArray(resultadosPorHora)) {
         return res.status(400).json({ message: 'Faltan datos requeridos (fecha, tipoLoteria, resultadosPorHora) o el formato es inválido.' });
@@ -588,11 +567,9 @@ app.post('/api/resultados-sorteo', async (req, res) => {
         );
 
         if (existingEntryIndex !== -1) {
-            // Actualizar resultados existentes
             resultadosSorteo[existingEntryIndex].resultados = resultadosPorHora;
             resultadosSorteo[existingEntryIndex].ultimaActualizacion = now.format('YYYY-MM-DD HH:mm:ss');
         } else {
-            // Añadir nuevos resultados
             resultadosSorteo.push({
                 fecha,
                 tipoLoteria,
@@ -602,7 +579,6 @@ app.post('/api/resultados-sorteo', async (req, res) => {
         }
         await writeJsonFile(RESULTADOS_SORTEO_FILE, resultadosSorteo);
 
-        // Actualizar ultima_fecha_resultados_zulia en la configuración si es el día actual y tipo Zulia
         if (fecha === currentDay && tipoLoteria === 'zulia') {
             configuracion.ultima_fecha_resultados_zulia = fecha;
             await writeJsonFile(CONFIG_FILE, configuracion);
@@ -622,40 +598,34 @@ app.post('/api/corte-ventas', async (req, res) => {
         const now = moment().tz("America/Caracas");
         const todayFormatted = now.format('YYYY-MM-DD');
 
-        // Filtrar las ventas para obtener las del día actual (para el reporte)
         const ventasDelDia = ventas.filter(venta =>
             moment(venta.purchaseDate).tz("America/Caracas").format('YYYY-MM-DD') === todayFormatted
         );
 
-        // Sumar los valores en USD y Bs
         const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valueUSD, 0);
         const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + venta.valueBs, 0);
 
-        // Generar un reporte en Excel
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Corte de Ventas');
 
-        // Añadir encabezados
         worksheet.columns = [
             { header: 'Campo', key: 'field', width: 20 },
             { header: 'Valor', key: 'value', width: 30 }
         ];
 
-        // Añadir datos generales del corte
         worksheet.addRow({ field: 'Fecha del Corte', value: now.format('YYYY-MM-DD HH:mm:ss') });
         worksheet.addRow({ field: 'Total Ventas USD', value: totalVentasUSD.toFixed(2) });
         worksheet.addRow({ field: 'Total Ventas Bs', value: totalVentasBs.toFixed(2) });
         worksheet.addRow({ field: 'Número de Ventas', value: ventasDelDia.length });
 
-        // Añadir una sección para las ventas detalladas
-        worksheet.addRow({}); // Fila vacía para espacio
+        worksheet.addRow({});
         worksheet.addRow({ field: 'Detalle de Ventas del Día' });
-        worksheet.addRow({}); // Fila vacía para espacio
+        worksheet.addRow({});
 
-        // Encabezados de la tabla de ventas
         const ventasHeaders = [
             { header: 'Fecha/Hora Compra', key: 'purchaseDate', width: 20 },
             { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
+            { header: 'Hora Sorteo', key: 'drawTime', width: 15 }, // Añadido
             { header: 'Nro. Sorteo', key: 'drawNumber', width: 15 },
             { header: 'Nro. Ticket', key: 'ticketNumber', width: 15 },
             { header: 'Comprador', key: 'buyerName', width: 20 },
@@ -668,13 +638,13 @@ app.post('/api/corte-ventas', async (req, res) => {
             { header: 'URL Comprobante', key: 'voucherURL', width: 30 },
             { header: 'Estado Validación', key: 'validationStatus', width: 20 }
         ];
-        worksheet.addRow(ventasHeaders.map(h => h.header)); // Añade los nombres de las columnas
+        worksheet.addRow(ventasHeaders.map(h => h.header));
 
-        // Añadir las filas de ventas
         ventasDelDia.forEach(venta => {
             worksheet.addRow({
                 purchaseDate: moment(venta.purchaseDate).tz("America/Caracas").format('YYYY-MM-DD HH:mm:ss'),
                 drawDate: venta.drawDate,
+                drawTime: venta.drawTime || 'N/A', // Añadido
                 drawNumber: venta.drawNumber,
                 ticketNumber: venta.ticketNumber,
                 buyerName: venta.buyerName,
@@ -689,12 +659,10 @@ app.post('/api/corte-ventas', async (req, res) => {
             });
         });
 
-        // Guardar el archivo Excel
         const excelFileName = `Corte_Ventas_${todayFormatted}.xlsx`;
         const excelFilePath = path.join(REPORTS_DIR, excelFileName);
         await workbook.xlsx.writeFile(excelFilePath);
 
-        // Envío de correo electrónico con el reporte adjunto
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
             const subject = `Reporte de Corte de Ventas ${todayFormatted}`;
             const htmlContent = `
@@ -716,14 +684,9 @@ app.post('/api/corte-ventas', async (req, res) => {
             }
         }
 
-
-        // Reiniciar los números a "no comprados"
         numeros = numeros.map(n => ({ ...n, comprado: false }));
-        // Se ELIMINA la línea que filtraba las ventas para mantener el historial completo.
-        // ventas = ventas.filter(venta => moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') !== todayFormatted);
-
         await writeJsonFile(NUMEROS_FILE, numeros);
-        await writeJsonFile(VENTAS_FILE, ventas); // Guardar el archivo de ventas SIN FILTRAR
+        await writeJsonFile(VENTAS_FILE, ventas);
 
         res.status(200).json({ message: 'Corte de ventas realizado con éxito y números reiniciados. El historial de ventas se ha mantenido.' });
 
@@ -735,31 +698,22 @@ app.post('/api/corte-ventas', async (req, res) => {
 
 
 // Tarea programada para reinicio diario de números y actualización de fecha de sorteo
-cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:00 (medianoche)
+cron.schedule('0 0 * * *', async () => {
     console.log('Ejecutando tarea programada: reinicio de números y actualización de fecha de sorteo...');
     try {
         const now = moment().tz("America/Caracas");
         const todayFormatted = now.format('YYYY-MM-DD');
         const currentDrawDate = configuracion.fecha_sorteo;
 
-        // Comprobar si la fecha de sorteo es anterior a hoy
         if (moment(currentDrawDate).isBefore(todayFormatted, 'day')) {
             console.log(`La fecha de sorteo (${currentDrawDate}) es anterior a hoy (${todayFormatted}). Reiniciando números y actualizando fecha.`);
-            // Reiniciar los números
             numeros = numeros.map(n => ({ ...n, comprado: false }));
             await writeJsonFile(NUMEROS_FILE, numeros);
             console.log('Números reiniciados a no comprados.');
 
-            // Reiniciar ventas para la fecha anterior (opcional, si quieres mantener un historial de ventas completas y luego hacer cortes)
-            // Si el corte de ventas ya limpia ventas del día, esto no sería necesario aquí a medianoche.
-            // ventas = ventas.filter(venta => moment(venta.fecha_hora_compra).tz("America/Caracas").format('YYYY-MM-DD') !== currentDrawDate);
-            // await writeJsonFile(VENTAS_FILE, ventas);
-            // console.log(`Ventas del día ${currentDrawDate} limpiadas.`);
-
-            // Actualizar la fecha del próximo sorteo a mañana y el correlativo
             configuracion.fecha_sorteo = now.clone().add(1, 'days').format('YYYY-MM-DD');
             configuracion.numero_sorteo_correlativo = (configuracion.numero_sorteo_correlativo || 0) + 1;
-            configuracion.ultimo_numero_ticket = 0; // Reiniciar el último número de ticket usado
+            configuracion.ultimo_numero_ticket = 0;
             await writeJsonFile(CONFIG_FILE, configuracion);
             console.log(`Fecha del sorteo actualizada automáticamente a: ${configuracion.fecha_sorteo} y correlativo a ${configuracion.numero_sorteo_correlativo}.`);
         } else {
@@ -777,21 +731,18 @@ cron.schedule('0 0 * * *', async () => { // Se ejecuta todos los días a las 00:
 
 // 1. GET /api/premios: Obtener premios por fecha
 app.get('/api/premios', async (req, res) => {
-    const { fecha } = req.query; // Espera un parámetro de consulta 'fecha' (ej. '2025-06-03')
+    const { fecha } = req.query;
 
     if (!fecha || !moment(fecha, 'YYYY-MM-DD', true).isValid()) {
         return res.status(400).json({ message: 'Se requiere una fecha válida (YYYY-MM-DD) para obtener los premios.' });
     }
 
-    // Formatear la fecha para que coincida con la clave en el JSON, asegurando zona horaria
     const fechaFormateada = moment.tz(fecha, "America/Caracas").format('YYYY-MM-DD');
 
     try {
         const allPremios = await readJsonFile(PREMIOS_FILE);
-        // Devuelve los premios del día o un objeto vacío si no existen
-        const premiosDelDia = allPremios[fechaFormateada] || {}; // Si no hay premios para la fecha, es un objeto vacío
+        const premiosDelDia = allPremios[fechaFormateada] || {};
 
-        // Rellenar con valores por defecto si no hay premios para esa fecha o si algún sorteo está incompleto
         const premiosParaFrontend = {
             sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
             sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
@@ -814,14 +765,11 @@ app.post('/api/premios', async (req, res) => {
         return res.status(400).json({ message: 'La fecha del sorteo (YYYY-MM-DD) es requerida y debe ser válida para guardar premios.' });
     }
 
-    // Formatear la fecha para que coincida con la clave en el JSON, asegurando zona horaria
     const fechaFormateada = moment.tz(fechaSorteo, "America/Caracas").format('YYYY-MM-DD');
 
     try {
         const allPremios = await readJsonFile(PREMIOS_FILE);
 
-        // Actualizar o crear la entrada para la fecha específica
-        // Nos aseguramos de que solo se guarden Triple A y Triple B, ignorando Triple C si se envía.
         allPremios[fechaFormateada] = {
             sorteo12PM: sorteo12PM ? {
                 tripleA: sorteo12PM.tripleA || '',
@@ -853,7 +801,7 @@ app.post('/api/premios', async (req, res) => {
     }
 });
 
-// NUEVA RUTA: Ruta POST para enviar un correo de prueba
+// Ruta POST para enviar un correo de prueba
 app.post('/api/send-test-email', async (req, res) => {
     try {
         const { to, subject, html } = req.body;
@@ -862,7 +810,7 @@ app.post('/api/send-test-email', async (req, res) => {
             return res.status(400).json({ message: 'Faltan parámetros: "to", "subject" y "html" son obligatorios.' });
         }
 
-        const emailSent = await sendEmail(to, subject, html); // 'to' puede ser un string aquí, la función sendEmail lo maneja
+        const emailSent = await sendEmail(to, subject, html);
 
         if (emailSent) {
             res.status(200).json({ message: 'Correo de prueba enviado exitosamente.' });
@@ -876,12 +824,11 @@ app.post('/api/send-test-email', async (req, res) => {
 });
 
 
-// NUEVA RUTA: Endpoint para actualizar el estado de validación de una venta
-app.put('/api/tickets/validate/:id', async (req, res) => { // CAMBIO DE RUTA: /api/ventas/:id/validar a /api/tickets/validate/:id para coincidir con el frontend
-    const ventaId = parseInt(req.params.id); // Asegúrate de que el ID sea un entero
-    const { validationStatus } = req.body; // Renombrado de estado_validacion a validationStatus
+// Endpoint para actualizar el estado de validación de una venta
+app.put('/api/tickets/validate/:id', async (req, res) => {
+    const ventaId = parseInt(req.params.id);
+    const { validationStatus } = req.body;
 
-    // Validar el estado de validación recibido
     const estadosValidos = ['Confirmado', 'Falso', 'Pendiente'];
     if (!validationStatus || !estadosValidos.includes(validationStatus)) {
         return res.status(400).json({ message: 'Estado de validación inválido. Debe ser "Confirmado", "Falso" o "Pendiente".' });
@@ -894,33 +841,26 @@ app.put('/api/tickets/validate/:id', async (req, res) => { // CAMBIO DE RUTA: /a
             return res.status(404).json({ message: 'Venta no encontrada.' });
         }
 
-        // Obtener el estado de validación actual antes de actualizar
-        const oldValidationStatus = ventas[ventaIndex].validationStatus; // Renombrado
+        const oldValidationStatus = ventas[ventaIndex].validationStatus;
 
-        // Actualizar el campo validationStatus
-        ventas[ventaIndex].validationStatus = validationStatus; // Renombrado
+        ventas[ventaIndex].validationStatus = validationStatus;
 
-        // Si el estado cambia a 'Falso' y no era 'Falso' antes, anular la venta y liberar los números
         if (validationStatus === 'Falso' && oldValidationStatus !== 'Falso') {
-            const numerosAnulados = ventas[ventaIndex].numbers; // Renombrado a 'numbers'
+            const numerosAnulados = ventas[ventaIndex].numbers;
             if (numerosAnulados && numerosAnulados.length > 0) {
-                // Leer el estado más reciente de los números desde el archivo para asegurar consistencia
                 let currentNumeros = await readJsonFile(NUMEROS_FILE);
 
                 numerosAnulados.forEach(numAnulado => {
                     const numObj = currentNumeros.find(n => n.numero === numAnulado);
                     if (numObj) {
-                        numObj.comprado = false; // Marcar como disponible
+                        numObj.comprado = false;
                     }
                 });
                 await writeJsonFile(NUMEROS_FILE, currentNumeros);
-                // También actualizar la variable global 'numeros' en memoria
                 numeros = currentNumeros;
                 console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} han sido puestos nuevamente disponibles.`);
             }
         }
-        // NOTA: Si el estado cambia de 'Falso' a 'Confirmado', los números NO se vuelven a marcar como comprados automáticamente aquí.
-        // Se asume que una vez anulados, si se confirman de nuevo, se debe gestionar manualmente o con otra lógica.
 
         await writeJsonFile(VENTAS_FILE, ventas);
 
@@ -932,35 +872,32 @@ app.put('/api/tickets/validate/:id', async (req, res) => { // CAMBIO DE RUTA: /a
 });
 
 
-// NUEVA RUTA: Endpoint para exportar toda la base de datos en un archivo ZIP
+// Endpoint para exportar toda la base de datos en un archivo ZIP
 app.get('/api/export-database', async (req, res) => {
     const archive = archiver('zip', {
-        zlib: { level: 9 } // Nivel de compresión
+        zlib: { level: 9 }
     });
 
     const archiveName = `rifas_db_backup_${moment().format('YYYYMMDD_HHmmss')}.zip`;
 
-    res.attachment(archiveName); // Establece el nombre del archivo de descarga
-    archive.pipe(res); // Envía el archivo ZIP como respuesta al cliente
+    res.attachment(archiveName);
+    archive.pipe(res);
 
     try {
         for (const filePath of DATABASE_FILES) {
             const fileName = path.basename(filePath);
             try {
-                // Asegurarse de que el archivo existe antes de intentar adjuntarlo
                 await fs.access(filePath);
                 archive.file(filePath, { name: fileName });
             } catch (fileError) {
                 if (fileError.code === 'ENOENT') {
                     console.warn(`Archivo no encontrado, omitiendo: ${fileName}`);
-                    // Opcional: Crear un archivo vacío o un placeholder si el archivo no existe
-                    // archive.append(Buffer.from(''), { name: fileName });
                 } else {
-                    throw fileError; // Relanza otros errores de archivo
+                    throw fileError;
                 }
             }
         }
-        archive.finalize(); // Finaliza el archivo ZIP
+        archive.finalize();
         console.log('Base de datos exportada y enviada como ZIP.');
     } catch (error) {
         console.error('Error al exportar la base de datos:', error);
@@ -968,7 +905,7 @@ app.get('/api/export-database', async (req, res) => {
     }
 });
 
-// NUEVA RUTA: Endpoint para generar el enlace de WhatsApp para un cliente (pago confirmado)
+// Endpoint para generar el enlace de WhatsApp para un cliente (pago confirmado)
 app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     const { ventaId } = req.body;
 
@@ -977,22 +914,20 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     }
 
     try {
-        // Buscar la venta por su ID
         const venta = ventas.find(v => v.id === ventaId);
 
         if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp.' });
         }
 
-        // Construir el mensaje de confirmación para el cliente
-        const customerPhoneNumber = venta.buyerPhone; // Renombrado
-        const ticketNumber = venta.ticketNumber; // Renombrado
-        const purchasedNumbers = venta.numbers.join(', '); // Renombrado
-        const valorUsd = venta.valueUSD.toFixed(2); // Renombrado
-        const valorBs = venta.valueBs.toFixed(2); // Renombrado
-        const metodoPago = venta.paymentMethod; // Renombrado
-        const referenciaPago = venta.paymentReference; // Renombrado
-        const fechaCompra = moment(venta.purchaseDate).tz("America/Caracas").format('DD/MM/YYYY HH:mm'); // Renombrado
+        const customerPhoneNumber = venta.buyerPhone;
+        const ticketNumber = venta.ticketNumber;
+        const purchasedNumbers = venta.numbers.join(', ');
+        const valorUsd = venta.valueUSD.toFixed(2);
+        const valorBs = venta.valueBs.toFixed(2);
+        const metodoPago = venta.paymentMethod;
+        const referenciaPago = venta.paymentReference;
+        const fechaCompra = moment(venta.purchaseDate).tz("America/Caracas").format('DD/MM/YYYY HH:mm');
 
         const whatsappMessage = encodeURIComponent(
             `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. 🎉\n\n` +
@@ -1016,7 +951,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     }
 });
 
-// NUEVA RUTA: Endpoint para generar el enlace de WhatsApp para notificar pago falso
+// Endpoint para generar el enlace de WhatsApp para notificar pago falso
 app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
     const { ventaId } = req.body;
 
@@ -1025,16 +960,15 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
     }
 
     try {
-        // Buscar la venta por su ID
         const venta = ventas.find(v => v.id === ventaId);
 
         if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp de pago falso.' });
         }
 
-        const customerPhoneNumber = venta.buyerPhone; // Renombrado
-        const ticketNumber = venta.ticketNumber; // Renombrado
-        const comprador = venta.buyerName || 'Estimado cliente'; // Renombrado
+        const customerPhoneNumber = venta.buyerPhone;
+        const ticketNumber = venta.ticketNumber;
+        const comprador = venta.buyerName || 'Estimado cliente';
 
         const whatsappMessage = encodeURIComponent(
             `¡Hola ${comprador}! 👋\n\n` +
@@ -1054,9 +988,7 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
     }
 });
 
-// NUEVA RUTA: POST /api/tickets/procesar-ganadores
-// Este endpoint procesa los tickets vendidos para una fecha/sorteo/lotería dados
-// y almacena los tickets ganadores en ganadores.json.
+// POST /api/tickets/procesar-ganadores
 app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     const { fecha, numeroSorteo, tipoLoteria } = req.body;
 
@@ -1065,14 +997,12 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     }
 
     try {
-        // Cargar los datos más recientes
         const allVentas = await readJsonFile(VENTAS_FILE);
         const allResultadosSorteo = await readJsonFile(RESULTADOS_SORTEO_FILE);
         const allPremios = await readJsonFile(PREMIOS_FILE);
 
         const ticketsGanadoresParaEsteSorteo = [];
 
-        // 1. Encontrar los resultados del sorteo para la fecha y tipoLoteria
         const resultadosDelDia = allResultadosSorteo.find(r =>
             r.fecha === fecha && r.tipoLoteria.toLowerCase() === tipoLoteria.toLowerCase()
         );
@@ -1081,26 +1011,21 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             return res.status(200).json({ message: 'No se encontraron resultados de sorteo para esta fecha y lotería para procesar ganadores.' });
         }
 
-        // 2. Obtener los valores de los premios para la fecha
-        const premiosDelDia = allPremios[fecha]; // Acceder directamente por fecha formateada
+        const premiosDelDia = allPremios[fecha];
         if (!premiosDelDia) {
             return res.status(200).json({ message: 'No se encontraron configuraciones de premios para esta fecha para procesar ganadores.' });
         }
 
-        // 3. Iterar sobre los tickets vendidos y determinar ganadores
         allVentas.forEach(venta => {
-            // Asegurarse de que la venta sea para la fecha y el número de sorteo correctos
             if (venta.drawDate === fecha && venta.drawNumber.toString() === numeroSorteo.toString()) {
                 let coincidentNumbers = [];
                 let totalPotentialPrizeUSD = 0;
                 let totalPotentialPrizeBs = 0;
 
-                // Para cada resultado por hora en el día del sorteo:
                 resultadosDelDia.resultados.forEach(r => {
                     const winningTripleA = r.tripleA ? r.tripleA.toString().padStart(3, '0') : null;
                     const winningTripleB = r.tripleB ? r.tripleB.toString().padStart(3, '0') : null;
 
-                    // Verificar si alguno de los números del ticket coincide con Triple A o Triple B
                     let currentCoincidentNumbersForHour = [];
 
                     if (winningTripleA && venta.numbers.includes(winningTripleA)) {
@@ -1112,7 +1037,6 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
 
                     if (currentCoincidentNumbersForHour.length > 0) {
                         let prizeConfigForHour;
-                        // Mapear la hora del resultado a la clave de premios
                         if (r.hora.includes('12:45 PM')) {
                             prizeConfigForHour = premiosDelDia.sorteo12PM;
                         } else if (r.hora.includes('04:45 PM')) {
@@ -1129,13 +1053,12 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                                 totalPotentialPrizeUSD += parseFloat(prizeConfigForHour.valorTripleB);
                             }
                         }
-                        // Acumular todos los números coincidentes de las diferentes horas
                         coincidentNumbers = Array.from(new Set([...coincidentNumbers, ...currentCoincidentNumbersForHour]));
                     }
                 });
 
                 if (coincidentNumbers.length > 0) {
-                    totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar; // Usar la tasa del dólar actual
+                    totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar;
                     ticketsGanadoresParaEsteSorteo.push({
                         ticketNumber: venta.ticketNumber,
                         buyerName: venta.buyerName,
@@ -1152,7 +1075,6 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             }
         });
 
-        // Almacenar los ganadores procesados en ganadoresSorteos
         const now = moment().tz("America/Caracas").toISOString();
         const newWinnersEntry = {
             drawDate: fecha,
@@ -1162,7 +1084,6 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             processedAt: now
         };
 
-        // Buscar si ya existe una entrada para este sorteo y actualizarla, o añadirla
         const existingEntryIndex = ganadoresSorteos.findIndex(entry =>
             entry.drawDate === fecha &&
             entry.drawNumber.toString() === numeroSorteo.toString() &&
@@ -1187,8 +1108,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
 });
 
 
-// NUEVA RUTA: GET /api/tickets/ganadores
-// Este endpoint ahora lee los tickets ganadores de ganadores.json
+// GET /api/tickets/ganadores
 app.get('/api/tickets/ganadores', async (req, res) => {
     const { fecha, numeroSorteo, tipoLoteria } = req.query;
 
@@ -1197,10 +1117,6 @@ app.get('/api/tickets/ganadores', async (req, res) => {
     }
 
     try {
-        // Cargar los ganadores procesados (ya están en memoria si loadInitialData se ejecutó)
-        // Opcionalmente, puedes volver a leer el archivo aquí para asegurar los datos más recientes
-        // const currentGanadoresSorteos = await readJsonFile(GANADORES_FILE);
-
         const foundEntry = ganadoresSorteos.find(entry =>
             entry.drawDate === fecha &&
             entry.drawNumber.toString() === numeroSorteo.toString() &&
@@ -1223,12 +1139,10 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
     loadInitialData().then(() => {
-        configureMailer(); // Configurar el mailer después de cargar la configuración inicial
+        configureMailer();
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
-            // console.log(`Panel de administración disponible en: https://paneladmin01.netlify.app/`); // Esto es solo un ejemplo si lo usas en Netlify
-            // console.log(`Frontend principal disponible en: https://tuoportunidadeshoy.netlify.app/`); // Esto es solo un ejemplo si lo usas en Netlify
         });
     });
 });
