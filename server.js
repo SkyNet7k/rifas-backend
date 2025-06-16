@@ -385,6 +385,7 @@ app.post('/api/comprar', async (req, res) => {
             id: Date.now(), // ID único para la venta
             purchaseDate: now.toISOString(), // Usar ISO string para consistencia
             drawDate: fechaSorteo, // Fecha del sorteo (YYYY-MM-DD)
+            drawTime: horaSorteo, // NUEVO: Añadir la hora del sorteo
             drawNumber: configuracion.numero_sorteo_correlativo, // Número correlativo del sorteo
             ticketNumber: numeroTicket,
             buyerName: comprador,
