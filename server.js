@@ -317,8 +317,7 @@ app.post('/api/numeros', async (req, res) => {
     }
 });
 
-<<<<<<< HEAD
-// Ruta para obtener ventas
+// Ruta para obtener ventas (versión que usa await readJsonFile)
 app.get('/api/ventas', async (req, res) => {
     try {
         const currentVentas = await readJsonFile(VENTAS_FILE);
@@ -332,14 +331,6 @@ app.get('/api/ventas', async (req, res) => {
 
 
 // Manejar solicitudes GET inesperadas a /api/compra
-=======
-// Obtener ventas
-app.get('/api/ventas', (req, res) => {
-    res.json(ventas);
-});
-
-// *** INICIO DE LA SOLUCIÓN: MANEJAR SOLICITUDES GET INESPERADAS A /api/compra ***
->>>>>>> e41dd37 (Revert "feat: Agrega la ruta GET /api/ventas y mejora la lectura de JSON en el backend")
 app.get('/api/compra', (req, res) => {
     res.status(404).json({
         message: 'Esta ruta no soporta solicitudes GET. Para realizar una una compra, utiliza el método POST en /api/comprar.',
