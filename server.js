@@ -174,7 +174,12 @@ async function loadInitialData() {
     try {
         configuracion = await readJsonFile(CONFIG_FILE);
         numeros = await readJsonFile(NUMEROS_FILE);
-        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE); // Leer como objeto
+        // MODIFICACIÓN: Asegurar que zulia y chance sean arrays, incluso si el archivo está vacío o malformado
+        const loadedHorariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE);
+        horariosZulia = {
+            zulia: Array.isArray(loadedHorariosZulia.zulia) ? loadedHorariosZulia.zulia : [],
+            chance: Array.isArray(loadedHorariosZulia.chance) ? loadedHorariosZulia.chance : []
+        };
         ventas = await readJsonFile(VENTAS_FILE);
         comprobantes = await readJsonFile(COMPROBANTES_FILE);
         resultadosSorteo = await readJsonFile(RESULTADOS_SORTEO_FILE); // Leer el nuevo archivo
