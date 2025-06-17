@@ -136,8 +136,6 @@ async function readJsonFile(filePath) {
         const data = await fs.readFile(filePath, 'utf8');
         // Manejar el caso de archivo vacío (ej. "[]" o "{}")
         if (data.trim() === '') {
-            // Devuelve un array vacío para archivos que se espera que contengan arrays (ventas, resultados, etc.)
-            // y un objeto vacío para configuraciones o premios (que son objetos).
             if (filePath === VENTAS_FILE || filePath === RESULTADOS_SORTEO_FILE || filePath === COMPROBANTES_FILE || filePath === NUMEROS_FILE || filePath === GANADORES_FILE) {
                 return [];
             }
@@ -319,6 +317,7 @@ app.post('/api/numeros', async (req, res) => {
     }
 });
 
+<<<<<<< HEAD
 // Ruta para obtener ventas
 app.get('/api/ventas', async (req, res) => {
     try {
@@ -333,6 +332,14 @@ app.get('/api/ventas', async (req, res) => {
 
 
 // Manejar solicitudes GET inesperadas a /api/compra
+=======
+// Obtener ventas
+app.get('/api/ventas', (req, res) => {
+    res.json(ventas);
+});
+
+// *** INICIO DE LA SOLUCIÓN: MANEJAR SOLICITUDES GET INESPERADAS A /api/compra ***
+>>>>>>> e41dd37 (Revert "feat: Agrega la ruta GET /api/ventas y mejora la lectura de JSON en el backend")
 app.get('/api/compra', (req, res) => {
     res.status(404).json({
         message: 'Esta ruta no soporta solicitudes GET. Para realizar una una compra, utiliza el método POST en /api/comprar.',
