@@ -379,7 +379,7 @@ app.post('/api/comprar', async (req, res) => {
 
         // Marcar los números como comprados
         numerosSeleccionados.forEach(numSel => {
-            const numObj = currentNumeros.find(n => numObj.numero === numSel);
+            const numObj = currentNumeros.find(n => n.numero === numSel); // Corregido: Usar 'n' en lugar de 'numObj'
             if (numObj) {
                 numObj.comprado = true;
             }
@@ -1026,7 +1026,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🎉🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
