@@ -84,10 +84,10 @@ async function ensureDataAndComprobantesDirs() {
                 "pagina_bloqueada": false,
                 "mail_config": {
                     "host": "smtp.gmail.com",
-                    "port": 587,
-                    "secure": false,
-                    "user": "tu_correo@gmail.com", // Placeholder
-                    "pass": "tu_contraseña_o_app_password",   // Placeholder
+                    "port": 465,
+                    "secure": true, // Cambiado a true para 465
+                    "user": process.env.EMAIL_USER || "tu_correo@gmail.com", // Usar variable de entorno o placeholder
+                    "pass": process.env.EMAIL_PASS || "tu_contraseña_o_app_password",   // Usar variable de entorno o placeholder
                     "senderName": "Sistema de Rifas"
                 },
                 "admin_whatsapp_numbers": [],
@@ -193,14 +193,18 @@ async function loadInitialData() {
 // Configuración de Nodemailer
 let transporter;
 function configureMailer() {
-    if (configuracion.mail_config && configuracion.mail_config.user && configuracion.mail_config.pass) {
+    // Usar variables de entorno si están disponibles, de lo contrario, usar configuracion.json
+    const emailUser = process.env.EMAIL_USER || configuracion.mail_config.user;
+    const emailPass = process.env.EMAIL_PASS || configuracion.mail_config.pass;
+
+    if (configuracion.mail_config && emailUser && emailPass) {
         transporter = nodemailer.createTransport({
             host: configuracion.mail_config.host,
             port: configuracion.mail_config.port,
-            secure: false, // TLS
+            secure: configuracion.mail_config.secure, // Usar el valor de secure de la configuración
             auth: {
-                user: configuracion.mail_config.user,
-                pass: configuracion.mail_config.pass
+                user: emailUser,
+                pass: emailPass
             }
         });
         console.log('Nodemailer configurado.');
@@ -404,7 +408,7 @@ app.post('/api/comprar', async (req, res) => {
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
 
-        // Enviar notificación a WhatsApp
+        // Enviar notificación a WhatsApp (al administrador)
         const whatsappMessage = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
@@ -933,7 +937,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         const fechaCompra = moment(venta.purchaseDate).tz("America/Caracas").format('DD/MM/YYYY HH:mm');
 
         const whatsappMessage = encodeURIComponent(
-            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. 🎉\n\n` +
+            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. �\n\n` +
             `Detalles de su ticket:\n` +
             `*Número de Ticket:* ${ticketNumber}\n` +
             `*Números Jugados:* ${purchasedNumbers}\n` +
@@ -990,6 +994,57 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp para pago falso.', error: error.message });
     }
 });
+
+// Endpoint NUEVO: Para enviar notificación de ticket ganador vía WhatsApp
+app.post('/api/notify-winner', async (req, res) => {
+    const {
+        ventaId,
+        buyerPhone,
+        buyerName,
+        numbers,
+        drawDate,
+        drawTime,
+        ticketNumber,
+        coincidentNumbers,
+        totalPotentialPrizeBs,
+        totalPotentialPrizeUSD
+    } = req.body;
+
+    if (!buyerPhone || !buyerName || !numbers || !drawDate || !drawTime || !ticketNumber || !coincidentNumbers || totalPotentialPrizeBs === undefined || totalPotentialPrizeUSD === undefined) {
+        return res.status(400).json({ message: 'Faltan datos requeridos para enviar la notificación de ganador.' });
+    }
+
+    try {
+        const formattedCoincidentNumbers = Array.isArray(coincidentNumbers) ? coincidentNumbers.join(', ') : coincidentNumbers;
+        const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
+
+        const whatsappMessage = encodeURIComponent(
+            `¡Felicidades, ${buyerName}! 🎉🎉🎉\n\n` +
+            `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
+            `Detalles del Ticket:\n` +
+            `*Nro. Ticket:* ${ticketNumber}\n` +
+            `*Números Jugados:* ${formattedPurchasedNumbers}\n` +
+            `*Fecha del Sorteo:* ${drawDate}\n` +
+            `*Hora del Sorteo:* ${drawTime}\n` +
+            `*Números Coincidentes:* ${formattedCoincidentNumbers}\n\n` +
+            `*¡Has ganado!* 💰\n` +
+            `*Premio Potencial:* $${parseFloat(totalPotentialPrizeUSD).toFixed(2)} USD (Bs ${parseFloat(totalPotentialPrizeBs).toFixed(2)})\n\n` +
+            `Por favor, contáctanos para coordinar la entrega de tu premio.`
+        );
+
+        const whatsappLink = `https://api.whatsapp.com/send?phone=${buyerPhone}&text=${whatsappMessage}`;
+
+        // Aquí podrías agregar lógica para registrar el envío de la notificación
+        console.log(`Generado enlace de WhatsApp para notificar a ${buyerName} (${buyerPhone}): ${whatsappLink}`);
+
+        res.status(200).json({ message: 'Enlace de notificación de WhatsApp generado con éxito. Se intentará abrir WhatsApp.', whatsappLink: whatsappLink });
+
+    } catch (error) {
+        console.error('Error al generar el enlace de WhatsApp para notificar al ganador:', error);
+        res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp.', error: error.message });
+    }
+});
+
 
 // POST /api/tickets/procesar-ganadores
 app.post('/api/tickets/procesar-ganadores', async (req, res) => {
@@ -1149,3 +1204,4 @@ ensureDataAndComprobantesDirs().then(() => {
         });
     });
 });
+�
