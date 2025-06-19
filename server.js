@@ -166,6 +166,13 @@ let resultadosSorteo = [];
 let premios = {};
 let ganadoresSorteos = []; // NUEVO: Variable global para almacenar los ganadores de los sorteos procesados
 
+// --- CONSTANTES PARA LA NUEVA LÓGICA DE SUSPENSIÓN DE SORTEO ---
+const SALES_THRESHOLD_PERCENTAGE = 80; // Porcentaje mínimo de ventas para no suspender (80%)
+const DRAW_SUSPENSION_HOUR = 12; // Hora límite para la verificación (12 PM)
+const DRAW_SUSPENSION_MINUTE = 30; // Minuto límite para la verificación (30 minutos, es decir, 12:30 PM)
+const TOTAL_RAFFLE_NUMBERS = 1000; // Número total de boletos disponibles en la rifa (000-999)
+const CARACAS_TIMEZONE = "America/Caracas"; // Zona horaria para operaciones de fecha/hora
+
 
 // Carga inicial de datos
 async function loadInitialData() {
@@ -372,7 +379,7 @@ app.post('/api/comprar', async (req, res) => {
 
         // Marcar los números como comprados
         numerosSeleccionados.forEach(numSel => {
-            const numObj = currentNumeros.find(n => n.numero === numSel);
+            const numObj = currentNumeros.find(n => numObj.numero === numSel);
             if (numObj) {
                 numObj.comprado = true;
             }
@@ -937,7 +944,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         const fechaCompra = moment(venta.purchaseDate).tz("America/Caracas").format('DD/MM/YYYY HH:mm');
 
         const whatsappMessage = encodeURIComponent(
-            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. �\n\n` +
+            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. 🎉\n\n` +
             `Detalles de su ticket:\n` +
             `*Número de Ticket:* ${ticketNumber}\n` +
             `*Números Jugados:* ${purchasedNumbers}\n` +
@@ -1194,13 +1201,143 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 });
 
 
+// --- NUEVA FUNCIÓN: Lógica central para la verificación y suspensión del sorteo ---
+async function performDrawSuspensionCheck(nowMoment) {
+    console.log(`[performDrawSuspensionCheck] Iniciando verificación para posible suspensión de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
+
+    try {
+        // Recargar la configuración y tickets para asegurar que tenemos los datos más recientes
+        // Asegúrate de usar las funciones de lectura/escritura que ya tienes (readJsonFile, writeJsonFile)
+        const currentConfig = await readJsonFile(CONFIG_FILE); // Lee la última configuración
+        const currentTickets = await readJsonFile(VENTAS_FILE); // Lee los últimos tickets (ventas)
+
+        // Usamos la fecha del sorteo configurada en el panel de administración
+        const currentDrawDateStr = currentConfig.fecha_sorteo; // Fecha del sorteo actual desde config.json
+        const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
+
+        // Comprobar si la fecha de `nowMoment` es el día del sorteo configurado
+        // Y si la hora de `nowMoment` es posterior a las 12:30 PM del día del sorteo.
+        if (nowMoment.isSame(currentDrawDateMoment, 'day') &&
+            (nowMoment.hour() > DRAW_SUSPENSION_HOUR ||
+             (nowMoment.hour() === DRAW_SUSPENSION_HOUR && nowMoment.minute() > DRAW_SUSPENSION_MINUTE))) {
+
+            console.log(`[performDrawSuspensionCheck] Es el día del sorteo (${currentDrawDateStr}) y la hora (${nowMoment.format('HH:mm')}) es posterior a las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE}. Procediendo con la verificación de ventas.`);
+
+            // Contar tickets vendidos para la fecha del sorteo actual
+            // Se asume que 'numeros' global representa el estado actual de los 1000 números
+            const soldTicketsForCurrentDraw = currentTickets.filter(ticket =>
+                ticket.drawDate === currentDrawDateStr
+            ).length;
+
+            // TOTAL_RAFFLE_NUMBERS ya está definido arriba como 1000
+            const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
+            const soldPercentage = (soldTicketsForCurrentDraw / totalPossibleTickets) * 100;
+
+            console.log(`[performDrawSuspensionCheck] Tickets vendidos para el sorteo del ${currentDrawDateStr}: ${soldTicketsForCurrentDraw}/${totalPossibleTickets} (${soldPercentage.toFixed(2)}%)`);
+
+            if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
+                console.log(`[performDrawSuspensionCheck] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Iniciando suspensión del sorteo.`);
+
+                // 1. Calcular la próxima fecha de sorteo
+                const nextDrawDateMoment = currentDrawDateMoment.clone().add(1, 'days');
+                const nextDrawDateStr = nextDrawDateMoment.format('YYYY-MM-DD');
+                console.log(`[performDrawSuspensionCheck] Reprogramando sorteo para la nueva fecha: ${nextDrawDateStr}`);
+
+                // 2. Actualizar la fecha del sorteo en la configuración global y guardar
+                currentConfig.fecha_sorteo = nextDrawDateStr;
+                await writeJsonFile(CONFIG_FILE, currentConfig); // Guarda la config actualizada
+                // Actualiza la variable global `configuracion` en memoria
+                configuracion = currentConfig;
+                console.log('[performDrawSuspensionCheck] Fecha del sorteo actualizada en configuracion.json.');
+
+                // 3. Reasignar los tickets del sorteo actual a la nueva fecha
+                // Esto asegura que los números comprados previamente sigan siendo válidos para el sorteo reprogramado.
+                const updatedTickets = currentTickets.map(ticket => {
+                    if (ticket.drawDate === currentDrawDateStr) {
+                        return { ...ticket, drawDate: nextDrawDateStr }; // Actualizar la fecha del sorteo
+                    }
+                    return ticket;
+                });
+                await writeJsonFile(VENTAS_FILE, updatedTickets); // Guarda los tickets actualizados
+                // Actualiza la variable global `ventas` en memoria
+                ventas = updatedTickets;
+                console.log('[performDrawSuspensionCheck] Tickets reasignados a la nueva fecha de sorteo.');
+
+                // 4. Reiniciar los números disponibles a "no comprados" para el *nuevo* sorteo
+                // Esto asegura que la grilla para el nuevo día esté fresca.
+                const resetNumeros = numeros.map(n => ({ ...n, comprado: false }));
+                await writeJsonFile(NUMEROS_FILE, resetNumeros);
+                // Actualiza la variable global `numeros` en memoria
+                numeros = resetNumeros;
+                console.log('[performDrawSuspensionCheck] Números disponibles reiniciados para la nueva fecha.');
+
+
+                console.log('[performDrawSuspensionCheck] Sorteo suspendido y reprogramado con éxito.');
+                return { success: true, message: `Sorteo del ${currentDrawDateStr} suspendido y reprogramado para ${nextDrawDateStr}.`, newDate: nextDrawDateStr };
+            } else {
+                console.log(`[performDrawSuspensionCheck] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. No es necesario suspender el sorteo.`);
+                return { success: false, message: `Ventas cumplen el umbral. Sorteo del ${currentDrawDateStr} procede.`, salesPercentage: soldPercentage };
+            }
+        } else {
+            console.log(`[performDrawSuspensionCheck] No es el día del sorteo configurado (${currentDrawDateStr}) o aún no son las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE}. No se realiza la verificación de ventas.`);
+            return { success: false, message: 'Condición de fecha/hora para verificación no cumplida.', salesPercentage: soldPercentage };
+        }
+    } catch (error) {
+        console.error('[performDrawSuspensionCheck] ERROR durante la verificación/suspensión del sorteo:', error);
+        return { success: false, message: `Error interno: ${error.message}` };
+        // Aquí podrías añadir una notificación de error al administrador (ej. enviar un email)
+    }
+}
+
+
+// --- NUEVO ENDPOINT PARA SIMULAR LA SUSPENSIÓN DEL SORTEO ---
+app.post('/api/simulate-draw-suspension', async (req, res) => {
+    console.log('API: Recibida solicitud para simular suspensión de sorteo.');
+    try {
+        // Cargar la configuración para obtener la fecha del sorteo actual
+        await loadInitialData(); // Asegura que `configuracion` y `ventas` estén actualizadas en memoria
+        const currentDrawDateStr = configuracion.fecha_sorteo;
+
+        // Crear un objeto Moment que simule ser el día del sorteo pero después de la hora de corte.
+        // Esto asegura que la condición de tiempo dentro de performDrawSuspensionCheck se cumpla.
+        const simulatedMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE)
+                                  .set({ hour: DRAW_SUSPENSION_HOUR, minute: DRAW_SUSPENSION_MINUTE + 5, second: 0 }); // 5 minutos después del corte
+
+        const result = await performDrawSuspensionCheck(simulatedMoment);
+
+        if (result.success) {
+            res.status(200).json({ message: result.message, newDrawDate: result.newDate });
+        } else {
+            res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
+        }
+    } catch (error) {
+        console.error('Error en la API de simulación de suspensión de sorteo:', error);
+        res.status(500).json({ message: 'Error interno del servidor al simular suspensión de sorteo.', error: error.message });
+    }
+});
+
+
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
     loadInitialData().then(() => {
-        configureMailer();
+        configureMailer(); // Asegura que el mailer se configure después de cargar la configuración
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
+
+            // --- Tarea programada para suspensión de sorteo (Cron Job Real) ---
+            // Se ejecuta cada día a las 12:35 PM (hora de Caracas)
+            cron.schedule('35 12 * * *', async () => {
+                console.log('CRON JOB: Ejecutando tarea programada para verificar ventas (suspensión).');
+                // Llama a la función performDrawSuspensionCheck con el momento actual real
+                await performDrawSuspensionCheck(moment().tz(CARACAS_TIMEZONE));
+            }, {
+                timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
+            });
+            // --- FIN TAREA PROGRAMADA ---
         });
     });
+}).catch(err => {
+    console.error('Failed to initialize data and start server:', err);
+    process.exit(1); // Sale del proceso si la carga inicial de datos falla
 });
