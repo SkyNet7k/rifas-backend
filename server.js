@@ -251,7 +251,7 @@ async function sendEmail(to, subject, html, attachments = []) {
         await transporter.sendMail(mailOptions);
         console.log('Correo enviado exitosamente.');
         return true;
-    } catch (error) {
+    }  catch (error) {
         console.error('Error al enviar correo:', error);
         return false;
     }
@@ -423,6 +423,7 @@ app.post('/api/comprar', async (req, res) => {
 
     } catch (error) {
         console.error('Error al procesar la compra:', error);
+        // MODIFICACIÓN: Asegurar que la respuesta sea siempre un JSON válido en caso de error.
         res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
     }
 });
