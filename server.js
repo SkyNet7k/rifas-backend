@@ -603,14 +603,14 @@ app.post('/api/resultados-sorteo', async (req, res) => {
 });
 
 
-// Endpoint para el corte de ventas
+// Endpoint para el Corte de Ventas (anteriormente corte-ventas, ahora con lógica de reseteo condicional)
 app.post('/api/corte-ventas', async (req, res) => {
     try {
-        const now = moment().tz("America/Caracas");
+        const now = moment().tz(CARACAS_TIMEZONE);
         const todayFormatted = now.format('YYYY-MM-DD');
 
         const ventasDelDia = ventas.filter(venta =>
-            moment(venta.purchaseDate).tz("America/Caracas").format('YYYY-MM-DD') === todayFormatted
+            moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD') === todayFormatted
         );
 
         const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valueUSD, 0);
@@ -653,7 +653,7 @@ app.post('/api/corte-ventas', async (req, res) => {
 
         ventasDelDia.forEach(venta => {
             worksheet.addRow({
-                purchaseDate: moment(venta.purchaseDate).tz("America/Caracas").format('YYYY-MM-DD HH:mm:ss'),
+                purchaseDate: moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss'),
                 drawDate: venta.drawDate,
                 drawTime: venta.drawTime || 'N/A', // Añadido
                 drawNumber: venta.drawNumber,
@@ -695,18 +695,86 @@ app.post('/api/corte-ventas', async (req, res) => {
             }
         }
 
-        // Reiniciar TODOS los números a 'comprado: false' y limpiar originalDrawNumber
-        numeros = numeros.map(n => ({ ...n, comprado: false, originalDrawNumber: null }));
-        await writeJsonFile(NUMEROS_FILE, numeros);
-        console.log('Todos los números han sido reiniciados a no comprados (disponibles) debido al corte de ventas.');
+        // --- INICIO DE LA NUEVA LÓGICA DE CORTE DE VENTAS Y RESETEO CONDICIONAL ---
 
-        await writeJsonFile(VENTAS_FILE, ventas); // No estoy seguro de por qué se guardan las ventas aquí de nuevo, pero lo mantengo si es la lógica original.
+        // Recargar configuración y horarios para asegurar que estén al día
+        configuracion = await readJsonFile(CONFIG_FILE);
+        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE);
 
-        res.status(200).json({ message: 'Corte de ventas realizado con éxito y números reiniciados. El historial de ventas se ha mantenido.' });
+        const fechaSorteoConfigurada = configuracion.fecha_sorteo;
+        const zuliaTimes = horariosZulia.zulia; // Horarios del tipo 'zulia' (array de strings "HH:mm A")
+
+        let ultimaHoraSorteo = null;
+        if (Array.isArray(zuliaTimes) && zuliaTimes.length > 0) {
+            // Encontrar la hora más tardía del día para Zulia
+            ultimaHoraSorteo = zuliaTimes.reduce((latestTime, currentTimeStr) => {
+                const latestMoment = moment.tz(`${fechaSorteoConfigurada} ${latestTime}`, 'YYYY-MM-DD hh:mm A', CARACAS_TIMEZONE);
+                const currentMoment = moment.tz(`${fechaSorteoConfigurada} ${currentTimeStr}`, 'YYYY-MM-DD hh:mm A', CARACAS_TIMEZONE);
+                return currentMoment.isAfter(latestMoment) ? currentTimeStr : latestTime;
+            }, zuliaTimes[0]); // Se inicializa con el primer horario
+        }
+
+        const currentMomentInCaracas = moment().tz(CARACAS_TIMEZONE);
+        const drawDateMoment = moment(fechaSorteoConfigurada, 'YYYY-MM-DD').tz(CARACAS_TIMEZONE);
+
+        let shouldResetNumbers = false;
+        let message = 'Corte de ventas realizado. Los números no han sido reseteados según la hora de sorteo y reservas.';
+
+        if (ultimaHoraSorteo) {
+            const ultimaHoraSorteoMoment = moment.tz(`${fechaSorteoConfigurada} ${ultimaHoraSorteo}`, 'YYYY-MM-DD hh:mm A', CARACAS_TIMEZONE);
+
+            // Condición para resetear números:
+            // 1. Es el día del sorteo configurado Y ya ha pasado la última hora de sorteo de Zulia.
+            // 2. O la fecha actual ya es posterior a la fecha del sorteo configurada (maneja casos de días siguientes).
+            if ((currentMomentInCaracas.isSame(drawDateMoment, 'day') && currentMomentInCaracas.isSameOrAfter(ultimaHoraSorteoMoment)) ||
+                currentMomentInCaracas.isAfter(drawDateMoment, 'day')) {
+                
+                shouldResetNumbers = true;
+                message = 'Corte de ventas realizado. Números procesados y reseteados condicionalmente.';
+            } else {
+                console.log(`[Corte de Ventas] No se realizó el reseteo de números porque la última hora de sorteo de Zulia (${ultimaHoraSorteo}) aún no ha pasado para la fecha ${fechaSorteoConfigurada}, o la fecha actual es anterior al sorteo.`);
+            }
+        } else {
+            console.warn('[Corte de Ventas] No se encontraron horarios de Zulia válidos para determinar la última hora. El reseteo de números por tiempo no se ejecutará.');
+        }
+
+        if (shouldResetNumbers) {
+            // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
+            // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
+            const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
+            const nextDrawCorrelative = currentDrawCorrelative + 1;
+
+            const updatedNumeros = numeros.map(num => {
+                if (num.originalDrawNumber !== null) {
+                    const numOriginalDrawNumber = parseInt(num.originalDrawNumber);
+                    // Si el número está reservado para el sorteo actual o el siguiente, NO lo reseteamos.
+                    if (numOriginalDrawNumber === currentDrawCorrelative || numOriginalDrawNumber === nextDrawCorrelative) {
+                        return num; // Mantener este número con su estado actual (comprado: true, originalDrawNumber)
+                    }
+                }
+                // Si no tiene originalDrawNumber, o su reserva ya pasó (caducó), resetearlo.
+                return {
+                    ...num,
+                    comprado: false,
+                    originalDrawNumber: null
+                };
+            });
+
+            numeros = updatedNumeros; // Actualizar la variable global en memoria
+            await writeJsonFile(NUMEROS_FILE, numeros);
+            console.log('Todos los números han sido procesados. Los no reservados han sido reiniciados a disponibles.');
+        }
+
+        // Se guarda el archivo de ventas nuevamente. Esto puede ser útil si hubo alguna modificación
+        // en las ventas a través de la interfaz de administración que no se reflejó de inmediato en memoria.
+        await writeJsonFile(VENTAS_FILE, ventas);
+
+
+        res.status(200).json({ message: message });
 
     } catch (error) {
-        console.error('Error al realizar corte de ventas:', error);
-        res.status(500).json({ message: 'Error interno del servidor al realizar corte de ventas.', error: error.message });
+        console.error('Error al realizar Corte de Ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
     }
 });
 
@@ -949,7 +1017,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         const valorBs = venta.valueBs.toFixed(2);
         const metodoPago = venta.paymentMethod;
         const referenciaPago = venta.paymentReference;
-        const fechaCompra = moment(venta.purchaseDate).tz("America/Caracas").format('DD/MM/YYYY HH:mm');
+        const fechaCompra = moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('DD/MM/YYYY HH:mm');
 
         const whatsappMessage = encodeURIComponent(
             `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. \n\n` +
@@ -1148,7 +1216,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             }
         });
 
-        const now = moment().tz("America/Caracas").toISOString();
+        const now = moment().tz(CARACAS_TIMEZONE).toISOString();
         const newWinnersEntry = {
             drawDate: fecha,
             drawNumber: parseInt(numeroSorteo),
