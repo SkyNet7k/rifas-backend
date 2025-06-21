@@ -762,6 +762,7 @@ app.get('/api/premios', async (req, res) => {
         const premiosDelDia = allPremios[fechaFormateada] || {};
 
         const premiosParaFrontend = {
+            fechaSorteo: fechaFormateada, // AÑADIDO: Incluir la fecha del sorteo
             sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
             sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
             sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' }
@@ -950,7 +951,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         const fechaCompra = moment(venta.purchaseDate).tz("America/Caracas").format('DD/MM/YYYY HH:mm');
 
         const whatsappMessage = encodeURIComponent(
-            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. �\n\n` +
+            `¡Hola! 👋 Su compra ha sido *confirmada* con éxito. \n\n` +
             `Detalles de su ticket:\n` +
             `*Número de Ticket:* ${ticketNumber}\n` +
             `*Números Jugados:* ${purchasedNumbers}\n` +
