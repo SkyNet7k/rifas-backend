@@ -1589,8 +1589,8 @@ ensureDataAndComprobantesDirs().then(() => {
             console.log(`API Base URL: ${API_BASE_URL}`);
 
             // --- Tarea programada para verificación de sorteo (Cron Job Real) ---
-            // Se ejecuta cada día a las 12:15 PM (hora de Caracas)
-            cron.schedule('15 12 * * *', async () => {
+            // Se ejecuta cada día a las 12:35 PM (hora de Caracas)
+            cron.schedule('35 12 * * *', async () => {
                 console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
                 // Llama a la función cerrarSorteoManualmente con el momento actual real
                 const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
