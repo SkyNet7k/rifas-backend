@@ -174,7 +174,7 @@ let ganadoresSorteos = []; // NUEVO: Variable global para almacenar los ganadore
 // --- CONSTANTES PARA LA LÓGICA DE CIERRE MANUAL DEL SORTEO ---
 const SALES_THRESHOLD_PERCENTAGE = 80; // Porcentaje mínimo de ventas para no suspender (80%)
 const DRAW_SUSPENSION_HOUR = 12; // Hora límite para la verificación (12 PM)
-const DRAW_SUSPENSION_MINUTE = 30; // Minuto límite para la verificación (30 minutos, es decir, 12:30 PM)
+const DRAW_SUSPENSION_MINUTE = 15; // Minuto límite para la verificación (15 minutos, es decir, 12:15 PM)
 const TOTAL_RAFFLE_NUMBERS = 1000; // Número total de boletos disponibles en la rifa (000-999)
 const CARACAS_TIMEZONE = "America/Caracas"; // Zona horaria para operaciones de fecha/hora
 
@@ -1435,8 +1435,8 @@ async function cerrarSorteoManualmente(nowMoment) {
 
         // 2. Lógica de cierre/anulación del sorteo actual
         // La verificación para ejecutar esta lógica es si:
-        // - Es el día del sorteo y la hora es igual o posterior al corte (12:30 PM), O
-        // - La fecha actual es posterior a la fecha del sorteo configurada (esto maneja casos donde el botón se presiona un día después, por ejemplo).
+        // - Es el día del sorteo y la hora es igual o posterior al corte (12:15 PM), O
+        // - La fecha actual es posterior a la fecha del sorteo configurada (maneja casos de días siguientes).
         if ((nowMoment.isSame(currentDrawDateMoment, 'day') &&
              (nowMoment.hour() > DRAW_SUSPENSION_HOUR ||
               (nowMoment.hour() === DRAW_SUSPENSION_HOUR && nowMoment.minute() >= DRAW_SUSPENSION_MINUTE))) ||
@@ -1500,8 +1500,8 @@ async function cerrarSorteoManualmente(nowMoment) {
             return { success: true, message: message, closedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
         } else {
-            console.log(`[cerrarSorteoManualmente] La fecha o la hora actual no cumplen con los criterios para el cierre manual del sorteo actual. Asegúrate de que sea el día del sorteo y después de las 12:30 PM, o que la fecha actual sea posterior a la del sorteo.`, nowMoment.format('YYYY-MM-DD HH:mm'), currentDrawDateMoment.format('YYYY-MM-DD HH:mm'));
-            return { success: false, message: 'La fecha o la hora actual no cumplen con los criterios para el cierre manual del sorteo actual. Asegúrate de que sea el día del sorteo y después de las 12:30 PM, o que la fecha actual sea posterior a la del sorteo.', salesPercentage: 0 };
+            console.log(`[cerrarSorteoManualmente] La fecha o la hora actual no cumplen con los criterios para el cierre manual del sorteo actual. Asegúrate de que sea el día del sorteo y después de las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE} PM, o que la fecha actual sea posterior a la del sorteo.`, nowMoment.format('YYYY-MM-DD HH:mm'), currentDrawDateMoment.format('YYYY-MM-DD HH:mm'));
+            return { success: false, message: `La fecha o la hora actual no cumplen con los criterios para el cierre manual del sorteo actual. Asegúrate de que sea el día del sorteo y después de las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE} PM, o que la fecha actual sea posterior a la del sorteo.`, salesPercentage: 0 };
         }
     } catch (error) {
         console.error('[cerrarSorteoManualmente] ERROR durante la verificación/anulación/cierre del sorteo:', error);
@@ -1589,8 +1589,8 @@ ensureDataAndComprobantesDirs().then(() => {
             console.log(`API Base URL: ${API_BASE_URL}`);
 
             // --- Tarea programada para verificación de sorteo (Cron Job Real) ---
-            // Se ejecuta cada día a las 12:35 PM (hora de Caracas)
-            cron.schedule('35 12 * * *', async () => {
+            // Se ejecuta cada día a las 12:15 PM (hora de Caracas)
+            cron.schedule('15 12 * * *', async () => {
                 console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
                 // Llama a la función cerrarSorteoManualmente con el momento actual real
                 const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
