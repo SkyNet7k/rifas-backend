@@ -308,7 +308,9 @@ app.put('/api/configuracion', async (req, res) => {
 
 // Obtener estado de los números
 app.get('/api/numeros', (req, res) => {
-    res.json(numeros);
+    // DEBUG: Log para ver qué se envía cuando se solicita el estado de los números
+    console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros.');
+    res.json(numeros); // 'numeros' es la variable global que se mantiene en memoria
 });
 
 // Actualizar estado de los números (usado internamente o por admin)
@@ -316,6 +318,7 @@ app.post('/api/numeros', async (req, res) => {
     numeros = req.body; // Se espera el array completo de números
     try {
         await writeJsonFile(NUMEROS_FILE, numeros);
+        console.log('DEBUG_BACKEND: Números actualizados y guardados en archivo.');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
         console.error('Error al actualizar números:', error);
@@ -347,21 +350,26 @@ app.get('/api/compra', (req, res) => {
 
 // Ruta para la compra de tickets
 app.post('/api/comprar', async (req, res) => {
+    console.log('DEBUG_BACKEND: Recibida solicitud POST /api/comprar.');
     // Solo obtenemos los datos necesarios del body, pero la fecha del sorteo será la configurada en el backend.
     const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, horaSorteo } = req.body; // 'fechaSorteo' se ignora de req.body para el drawDate
 
     if (!numerosSeleccionados || numerosSeleccionados.length === 0 || !valorUsd || !valorBs || !metodoPago || !comprador || !telefono || !horaSorteo) {
+        console.error('DEBUG_BACKEND: Faltan datos requeridos para la compra.');
         return res.status(400).json({ message: 'Faltan datos requeridos para la compra (números, valor, método de pago, comprador, teléfono, hora del sorteo).' });
     }
 
     // Verificar si la página está bloqueada
     if (configuracion.pagina_bloqueada) {
+        console.warn('DEBUG_BACKEND: Página bloqueada, denegando compra.');
         return res.status(403).json({ message: 'La página está bloqueada para nuevas compras en este momento.' });
     }
 
     try {
         // Cargar los números más recientes para evitar conflictos
+        // Esto es CRÍTICO: Asegurarse de que `numeros` esté actualizado ANTES de modificarlo
         const currentNumeros = await readJsonFile(NUMEROS_FILE);
+        console.log('DEBUG_BACKEND: Números actuales cargados desde archivo para verificar conflictos.');
 
         // Verificar si los números ya están comprados
         const conflictos = numerosSeleccionados.filter(n =>
@@ -369,6 +377,7 @@ app.post('/api/comprar', async (req, res) => {
         );
 
         if (conflictos.length > 0) {
+            console.warn(`DEBUG_BACKEND: Conflicto de números: ${conflictos.join(', ')} ya comprados.`);
             return res.status(409).json({ message: `Los números ${conflictos.join(', ')} ya han sido comprados. Por favor, selecciona otros.` });
         }
 
@@ -378,8 +387,17 @@ app.post('/api/comprar', async (req, res) => {
             if (numObj) {
                 numObj.comprado = true;
                 numObj.originalDrawNumber = configuracion.numero_sorteo_correlativo; // Guardar el correlativo del sorteo en que se compró
+                console.log(`DEBUG_BACKEND: Número ${numSel} marcado como comprado.`);
+            } else {
+                console.warn(`DEBUG_BACKEND: Intento de marcar número no encontrado en la lista: ${numSel}`);
             }
         });
+
+        // DEBUG: Imprimir el estado de los números seleccionados después de marcarlos como comprados
+        console.log('DEBUG_BACKEND: Estado de números seleccionados después de marcarlos como comprados (en memoria antes de guardar):',
+            currentNumeros.filter(n => numerosSeleccionados.includes(n.numero))
+        );
+
 
         const now = moment().tz("America/Caracas");
         configuracion.ultimo_numero_ticket = (configuracion.ultimo_numero_ticket || 0) + 1;
@@ -405,11 +423,17 @@ app.post('/api/comprar', async (req, res) => {
 
         ventas.push(nuevaVenta);
         await writeJsonFile(VENTAS_FILE, ventas);
+        console.log('DEBUG_BACKEND: Ventas guardadas en archivo.');
+
         await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados en el archivo
         numeros = currentNumeros; // Actualizar la variable global 'numeros' en memoria
+        console.log('DEBUG_BACKEND: Números actualizados y guardados en archivo. Variable global "numeros" actualizada.');
+
         await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
+        console.log('DEBUG_BACKEND: Configuración actualizada y guardada en archivo.');
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
+        console.log('DEBUG_BACKEND: Respuesta de compra enviada al frontend.');
 
         // Enviar notificación a WhatsApp (al administrador)
         const whatsappMessage = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
@@ -417,12 +441,13 @@ app.post('/api/comprar', async (req, res) => {
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
             configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
                 const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessage}`;
-                console.log(`URL de WhatsApp para ${adminNumber}: ${whatsappUrl}`);
+                console.log(`DEBUG_BACKEND: URL de WhatsApp generada para ${adminNumber}: ${whatsappUrl}`);
             });
         }
+        console.log('DEBUG_BACKEND: Proceso de compra en backend finalizado.');
 
     } catch (error) {
-        console.error('Error al procesar la compra:', error);
+        console.error('ERROR_BACKEND: Error al procesar la compra:', error);
         // MODIFICACIÓN: Asegurar que la respuesta sea siempre un JSON válido en caso de error.
         res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
     }
