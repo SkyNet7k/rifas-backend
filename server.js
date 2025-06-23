@@ -90,8 +90,10 @@ async function ensureDataAndComprobantesDirs() {
                     "pass": process.env.EMAIL_PASS || "tu_contraseña_o_app_password",   // Usar variable de entorno o placeholder
                     "senderName": "Sistema de Rifas"
                 },
-                // INICIO CAMBIO: Agregar números de WhatsApp aquí
+                // INICIO CAMBIO: Agregar números de WhatsApp y configuración de umbral aquí
                 "admin_whatsapp_numbers": ["584126083355", "584143630488", "584124723776"],
+                "last_sales_notification_count": 0, // Nuevo: Contador para la última notificación de ventas por umbral
+                "sales_notification_threshold": 20, // Nuevo: Umbral de ventas para enviar notificación (ej. cada 20 ventas)
                 // FIN CAMBIO
                 "admin_email_for_reports": ["tu_correo@gmail.com"], // Ahora es un array por defecto
                 "ultima_fecha_resultados_zulia": null
@@ -260,17 +262,16 @@ async function sendEmail(to, subject, html, attachments = []) {
 }
 
 
-// --- INICIO NUEVA FUNCIONALIDAD: Envío de notificaciones de ventas por WhatsApp ---
-
+// --- INICIO: Función para enviar notificaciones de ventas por WhatsApp (Resumen) ---
 /**
  * Envía una notificación de las ventas actuales por WhatsApp a los números de administrador configurados.
  * Esto genera una URL de wa.me y la imprime en consola, ya que el envío directo de WhatsApp requiere integración con una API externa.
  */
 async function sendSalesNotificationWhatsapp() {
     try {
-        await loadInitialData(); // Cargar los datos más recientes
+        // Cargar los datos más recientes para el mensaje de resumen
+        await loadInitialData();
         const now = moment().tz(CARACAS_TIMEZONE);
-        const todayFormatted = now.format('YYYY-MM-DD');
 
         // Filtrar ventas para la fecha del sorteo actual configurada
         const ventasParaFechaSorteo = ventas.filter(venta =>
@@ -288,15 +289,15 @@ async function sendSalesNotificationWhatsapp() {
         const encodedMessage = encodeURIComponent(messageText);
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
-            console.log(`\n--- Notificación de Ventas WhatsApp (${now.format('DD/MM/YYYY HH:mm:ss')}) ---`);
+            console.log(`\n--- Notificación de Ventas WhatsApp (Resumen - ${now.format('DD/MM/YYYY HH:mm:ss')}) ---`);
             configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
                 const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${encodedMessage}`;
                 console.log(`[WhatsApp Link for ${adminNumber}]: ${whatsappUrl}`);
             });
-            console.log('--- Fin Notificación de Ventas WhatsApp ---\n');
+            console.log('--- Fin Notificación de Ventas WhatsApp (Resumen) ---\n');
             console.log('NOTA: Los enlaces de WhatsApp se han generado y mostrado en la consola. Para el envío automático real, se requiere una integración con un proveedor de WhatsApp API (ej. Twilio, Vonage, WhatsApp Business API).');
         } else {
-            console.warn('No hay números de WhatsApp de administrador configurados para enviar notificaciones.');
+            console.warn('No hay números de WhatsApp de administrador configurados para enviar notificaciones de resumen de ventas.');
         }
 
     } catch (error) {
@@ -304,7 +305,7 @@ async function sendSalesNotificationWhatsapp() {
     }
 }
 
-// --- FIN NUEVA FUNCIONALIDAD: Envío de notificaciones de ventas por WhatsApp ---
+// --- FIN: Función para enviar notificaciones de ventas por WhatsApp (Resumen) ---
 
 
 // --- RUTAS DE LA API ---
@@ -334,14 +335,20 @@ app.put('/api/configuracion', async (req, res) => {
                                                       ? newConfig.admin_email_for_reports
                                                       : [newConfig.admin_email_for_reports].filter(Boolean); // Filtra valores falsy
         }
-        // INICIO CAMBIO: Asegurar que admin_whatsapp_numbers sea un array
+        // Asegurar que admin_whatsapp_numbers sea un array
         if (newConfig.admin_whatsapp_numbers !== undefined) {
             configuracion.admin_whatsapp_numbers = Array.isArray(newConfig.admin_whatsapp_numbers)
                                                     ? newConfig.admin_whatsapp_numbers
                                                     : [newConfig.admin_whatsapp_numbers].filter(Boolean);
         }
-        // FIN CAMBIO
-
+        // Asegurar que last_sales_notification_count sea un número (puede venir como string de un input)
+        if (newConfig.last_sales_notification_count !== undefined) {
+            configuracion.last_sales_notification_count = parseInt(newConfig.last_sales_notification_count, 10);
+        }
+        // Asegurar que sales_notification_threshold sea un número
+        if (newConfig.sales_notification_threshold !== undefined) {
+            configuracion.sales_notification_threshold = parseInt(newConfig.sales_notification_threshold, 10);
+        }
 
         await writeJsonFile(CONFIG_FILE, configuracion);
         res.json({ message: 'Configuración actualizada con éxito', configuracion: configuracion });
@@ -450,26 +457,60 @@ app.post('/api/comprar', async (req, res) => {
         };
 
         ventas.push(nuevaVenta);
+        // Guardar archivos actualizados antes de la lógica de notificación de umbral
         await writeJsonFile(VENTAS_FILE, ventas);
-        await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados en el archivo
-        numeros = currentNumeros; // Actualizar la variable global 'numeros' en memoria
-        await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
+        await writeJsonFile(NUMEROS_FILE, currentNumeros);
+        await writeJsonFile(CONFIG_FILE, configuracion); // Asegura que 'ultimo_numero_ticket' esté actualizado
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
 
-        // Enviar notificación a WhatsApp (al administrador)
-        const whatsappMessage = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
+        // Enviar notificación a WhatsApp (al administrador) de *compra individual*
+        const whatsappMessageIndividual = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
             configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
-                const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessage}`;
-                console.log(`URL de WhatsApp para ${adminNumber}: ${whatsappUrl}`);
+                const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessageIndividual}`;
+                console.log(`URL de WhatsApp para ${adminNumber} (Compra Individual): ${whatsappUrl}`);
             });
         }
 
+        // --- INICIO: Lógica para Notificación de Ventas por Umbral (Resumen) ---
+        try {
+            // Re-leer configuración y ventas para obtener los conteos más actualizados para la lógica
+            const latestConfig = await readJsonFile(CONFIG_FILE);
+            const latestVentas = await readJsonFile(VENTAS_FILE);
+
+            // Contar tickets confirmados o pendientes para la fecha del sorteo actual
+            const currentTotalSales = latestVentas.filter(sale =>
+                sale.drawDate === latestConfig.fecha_sorteo && (sale.validationStatus === 'Confirmado' || sale.validationStatus === 'Pendiente')
+            ).length;
+
+            const prevNotifiedCount = latestConfig.last_sales_notification_count || 0;
+            const notificationThreshold = latestConfig.sales_notification_threshold || 20; // Por defecto 20
+
+            // Determinar si se ha cruzado un nuevo múltiplo del umbral de notificación
+            const currentMultiple = Math.floor(currentTotalSales / notificationThreshold);
+            const prevMultiple = Math.floor(prevNotifiedCount / notificationThreshold);
+
+            if (currentMultiple > prevMultiple) {
+                console.log(`[WhatsApp Notificación Resumen] Ventas actuales (${currentTotalSales}) han cruzado un nuevo múltiplo (${currentMultiple * notificationThreshold}) del umbral (${notificationThreshold}). Enviando notificación de resumen.`);
+                await sendSalesNotificationWhatsapp(); // Esta función ya carga los datos más recientes internamente
+
+                // Actualizar el contador de la última notificación en la configuración
+                latestConfig.last_sales_notification_count = currentMultiple * notificationThreshold; // Actualiza al múltiplo exacto
+                await writeJsonFile(CONFIG_FILE, latestConfig);
+                console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${latestConfig.last_sales_notification_count}`);
+            } else {
+                console.log(`[WhatsApp Notificación Resumen Check] Ventas actuales (${currentTotalSales}) no han cruzado un nuevo múltiplo del umbral (${notificationThreshold}). Último contador notificado: ${prevNotifiedCount}. No se envió notificación de resumen.`);
+            }
+
+        } catch (notificationError) {
+            console.error('Error durante la verificación de notificación de ventas por umbral:', notificationError);
+        }
+        // --- FIN: Lógica para Notificación de Ventas por Umbral (Resumen) ---
+
     } catch (error) {
         console.error('Error al procesar la compra:', error);
-        // MODIFICACIÓN: Asegurar que la respuesta sea siempre un JSON válido en caso de error.
         res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
     }
 });
@@ -595,7 +636,8 @@ app.get('/api/resultados-zulia', async (req, res) => {
         );
 
         res.status(200).json(resultsForDateAndZulia);
-    } catch (error) {
+    }
+    catch (error) {
         console.error('Error al obtener resultados de Zulia:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de Zulia.', error: error.message });
     }
@@ -788,7 +830,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
             // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
             const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelative = currentDrawCorrelative + 1;
+            const nextDrawCorrelative = currentDrawCorrelativo + 1;
 
             const updatedNumeros = numeros.map(num => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
@@ -1529,15 +1571,9 @@ ensureDataAndComprobantesDirs().then(() => {
             });
             // --- FIN TAREA PROGRAMADA ---
 
-            // --- INICIO NUEVO CRON JOB: Notificación de ventas por WhatsApp cada 55 minutos ---
-            // Se ejecuta cada 55 minutos (en el minuto 0, 55, 50, etc. de cada hora)
-            cron.schedule('0 */55 * * * *', async () => {
-                console.log('CRON JOB: Ejecutando tarea programada de notificación de ventas por WhatsApp.');
-                await sendSalesNotificationWhatsapp();
-            }, {
-                timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
-            });
-            // --- FIN NUEVO CRON JOB ---
+            // --- REMOVIDO: Cron Job de Notificación de ventas por WhatsApp (ahora activado por umbral de ventas) ---
+            // cron.schedule('* * * * *', async () => { /* ... */ });
+            // --- FIN REMOVIDO ---
         });
     });
 }).catch(err => {
