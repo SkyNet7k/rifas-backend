@@ -90,7 +90,11 @@ async function ensureDataAndComprobantesDirs() {
                     "pass": process.env.EMAIL_PASS || "tu_contraseña_o_app_password",   // Usar variable de entorno o placeholder
                     "senderName": "Sistema de Rifas"
                 },
-                "admin_whatsapp_numbers": [],
+                // INICIO CAMBIO: Agregar números de WhatsApp y configuración de umbral aquí
+                "admin_whatsapp_numbers": ["584126083355", "584143630488", "584124723776"],
+                "last_sales_notification_count": 0, // Nuevo: Contador para la última notificación de ventas por umbral
+                "sales_notification_threshold": 20, // Nuevo: Umbral de ventas para enviar notificación (ej. cada 20 ventas)
+                // FIN CAMBIO
                 "admin_email_for_reports": ["tu_correo@gmail.com"], // Ahora es un array por defecto
                 "ultima_fecha_resultados_zulia": null
             }),
@@ -258,15 +262,51 @@ async function sendEmail(to, subject, html, attachments = []) {
 }
 
 
-// --- CRON JOBS (si los tienes definidos) ---
-/*
-// Ejemplo: Reiniciar tickets diarios a medianoche
-cron.schedule('0 0 * * *', async () => {
-    console.log('Ejecutando tarea diaria: Reiniciar tickets...');
-    // Lógica para reiniciar tickets o realizar otras tareas diarias
-    // await reiniciarTicketsDiarios();
-});
-*/
+// --- INICIO: Función para enviar notificaciones de ventas por WhatsApp (Resumen) ---
+/**
+ * Envía una notificación de las ventas actuales por WhatsApp a los números de administrador configurados.
+ * Esto genera una URL de wa.me y la imprime en consola, ya que el envío directo de WhatsApp requiere integración con una API externa.
+ */
+async function sendSalesNotificationWhatsapp() {
+    try {
+        // Cargar los datos más recientes para el mensaje de resumen
+        await loadInitialData();
+        const now = moment().tz(CARACAS_TIMEZONE);
+
+        // Filtrar ventas para la fecha del sorteo actual configurada
+        const ventasParaFechaSorteo = ventas.filter(venta =>
+            venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+        );
+
+        const totalVentas = ventasParaFechaSorteo.length;
+
+        const messageText = `*Actualización de Ventas Lotería:*\n\n` +
+                            `Fecha Sorteo: *${configuracion.fecha_sorteo}*\n` +
+                            `Sorteo Nro: *${configuracion.numero_sorteo_correlativo}*\n` +
+                            `Total de Ventas Actuales (Confirmadas/Pendientes): *${totalVentas}* tickets vendidos.\n\n` +
+                            `Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}`;
+
+        const encodedMessage = encodeURIComponent(messageText);
+
+        if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
+            console.log(`\n--- Notificación de Ventas WhatsApp (Resumen - ${now.format('DD/MM/YYYY HH:mm:ss')}) ---`);
+            configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
+                const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${encodedMessage}`;
+                console.log(`[WhatsApp Link for ${adminNumber}]: ${whatsappUrl}`);
+            });
+            console.log('--- Fin Notificación de Ventas WhatsApp (Resumen) ---\n');
+            console.log('NOTA: Los enlaces de WhatsApp se han generado y mostrado en la consola. Para el envío automático real, se requiere una integración con un proveedor de WhatsApp API (ej. Twilio, Vonage, WhatsApp Business API).');
+        } else {
+            console.warn('No hay números de WhatsApp de administrador configurados para enviar notificaciones de resumen de ventas.');
+        }
+
+    } catch (error) {
+        console.error('Error al enviar notificación de ventas por WhatsApp:', error);
+    }
+}
+
+// --- FIN: Función para enviar notificaciones de ventas por WhatsApp (Resumen) ---
+
 
 // --- RUTAS DE LA API ---
 
@@ -295,7 +335,20 @@ app.put('/api/configuracion', async (req, res) => {
                                                       ? newConfig.admin_email_for_reports
                                                       : [newConfig.admin_email_for_reports].filter(Boolean); // Filtra valores falsy
         }
-
+        // Asegurar que admin_whatsapp_numbers sea un array
+        if (newConfig.admin_whatsapp_numbers !== undefined) {
+            configuracion.admin_whatsapp_numbers = Array.isArray(newConfig.admin_whatsapp_numbers)
+                                                    ? newConfig.admin_whatsapp_numbers
+                                                    : [newConfig.admin_whatsapp_numbers].filter(Boolean);
+        }
+        // Asegurar que last_sales_notification_count sea un número (puede venir como string de un input)
+        if (newConfig.last_sales_notification_count !== undefined) {
+            configuracion.last_sales_notification_count = parseInt(newConfig.last_sales_notification_count, 10);
+        }
+        // Asegurar que sales_notification_threshold sea un número
+        if (newConfig.sales_notification_threshold !== undefined) {
+            configuracion.sales_notification_threshold = parseInt(newConfig.sales_notification_threshold, 10);
+        }
 
         await writeJsonFile(CONFIG_FILE, configuracion);
         res.json({ message: 'Configuración actualizada con éxito', configuracion: configuracion });
@@ -422,6 +475,7 @@ app.post('/api/comprar', async (req, res) => {
         };
 
         ventas.push(nuevaVenta);
+        // Guardar archivos actualizados antes de la lógica de notificación de umbral
         await writeJsonFile(VENTAS_FILE, ventas);
         console.log('DEBUG_BACKEND: Ventas guardadas en archivo.');
 
@@ -435,16 +489,51 @@ app.post('/api/comprar', async (req, res) => {
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
         console.log('DEBUG_BACKEND: Respuesta de compra enviada al frontend.');
 
-        // Enviar notificación a WhatsApp (al administrador)
-        const whatsappMessage = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
+        // Enviar notificación a WhatsApp (al administrador) de *compra individual*
+        const whatsappMessageIndividual = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
             configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
-                const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessage}`;
-                console.log(`DEBUG_BACKEND: URL de WhatsApp generada para ${adminNumber}: ${whatsappUrl}`);
+                const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessageIndividual}`;
+                console.log(`DEBUG_BACKEND: URL de WhatsApp generada para ${adminNumber} (Compra Individual): ${whatsappUrl}`);
             });
         }
         console.log('DEBUG_BACKEND: Proceso de compra en backend finalizado.');
+
+        // --- INICIO: Lógica para Notificación de Ventas por Umbral (Resumen) ---
+        try {
+            // Re-leer configuración y ventas para obtener los conteos más actualizados para la lógica
+            const latestConfig = await readJsonFile(CONFIG_FILE);
+            const latestVentas = await readJsonFile(VENTAS_FILE);
+
+            // Contar tickets confirmados o pendientes para la fecha del sorteo actual
+            const currentTotalSales = latestVentas.filter(sale =>
+                sale.drawDate === latestConfig.fecha_sorteo && (sale.validationStatus === 'Confirmado' || sale.validationStatus === 'Pendiente')
+            ).length;
+
+            const prevNotifiedCount = latestConfig.last_sales_notification_count || 0;
+            const notificationThreshold = latestConfig.sales_notification_threshold || 20; // Por defecto 20
+
+            // Determinar si se ha cruzado un nuevo múltiplo del umbral de notificación
+            const currentMultiple = Math.floor(currentTotalSales / notificationThreshold);
+            const prevMultiple = Math.floor(prevNotifiedCount / notificationThreshold);
+
+            if (currentMultiple > prevMultiple) {
+                console.log(`[WhatsApp Notificación Resumen] Ventas actuales (${currentTotalSales}) han cruzado un nuevo múltiplo (${currentMultiple * notificationThreshold}) del umbral (${notificationThreshold}). Enviando notificación de resumen.`);
+                await sendSalesNotificationWhatsapp(); // Esta función ya carga los datos más recientes internamente
+
+                // Actualizar el contador de la última notificación en la configuración
+                latestConfig.last_sales_notification_count = currentMultiple * notificationThreshold; // Actualiza al múltiplo exacto
+                await writeJsonFile(CONFIG_FILE, latestConfig);
+                console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${latestConfig.last_sales_notification_count}`);
+            } else {
+                console.log(`[WhatsApp Notificación Resumen Check] Ventas actuales (${currentTotalSales}) no han cruzado un nuevo múltiplo del umbral (${notificationThreshold}). Último contador notificado: ${prevNotifiedCount}. No se envió notificación de resumen.`);
+            }
+
+        } catch (notificationError) {
+            console.error('Error durante la verificación de notificación de ventas por umbral:', notificationError);
+        }
+        // --- FIN: Lógica para Notificación de Ventas por Umbral (Resumen) ---
 
     } catch (error) {
         console.error('ERROR_BACKEND: Error al procesar la compra:', error);
@@ -574,7 +663,8 @@ app.get('/api/resultados-zulia', async (req, res) => {
         );
 
         res.status(200).json(resultsForDateAndZulia);
-    } catch (error) {
+    }
+    catch (error) {
         console.error('Error al obtener resultados de Zulia:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de Zulia.', error: error.message });
     }
@@ -770,7 +860,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             const nextDrawCorrelative = currentDrawCorrelative + 1;
 
             const updatedNumeros = numeros.map(num => {
-                if (num.originalDrawNumber !== null) {
+                if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
                     const numOriginalDrawNumber = parseInt(num.originalDrawNumber);
                     // Si el número está reservado para el sorteo actual o el siguiente, NO lo reseteamos.
                     if (numOriginalDrawNumber === currentDrawCorrelative || numOriginalDrawNumber === nextDrawCorrelative) {
@@ -1320,6 +1410,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         const currentTickets = await readJsonFile(VENTAS_FILE);
 
         const currentDrawDateStr = currentConfig.fecha_sorteo;
+        // CORRECCIÓN CLAVE: Usar currentDrawDateStr como base para el momento del sorteo
         const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
         const currentDrawCorrelative = currentConfig.numero_sorteo_correlativo;
 
@@ -1430,6 +1521,7 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
         // Crear un objeto Moment que simule ser el día del sorteo pero después de la hora de corte.
         // Si la fecha actual ya es posterior a la del sorteo, simplemente usamos now para que la lógica de 'isAfter' funcione.
         const simulatedMoment = moment().tz(CARACAS_TIMEZONE);
+        // CORRECCIÓN: Usar currentDrawDateStr para inicializar el momento del sorteo
         const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
 
         // Si el sorteo actual es para una fecha pasada y no ha sido procesado, simulamos la hora de corte para forzar la evaluación.
@@ -1460,6 +1552,34 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
 });
 
 
+// --- ENDPOINT PARA SIMULAR VERIFICACIÓN DE SUSPENSIÓN ---
+// Este endpoint es para probar la lógica de cierre del sorteo basada en el 80% de ventas,
+// sin la necesidad de un "cierre manual" que también avanza el sorteo.
+// Es útil para pruebas o verificaciones intermedias.
+app.post('/api/simulate-draw-suspension', async (req, res) => {
+    console.log('API: Recibida solicitud para simular verificación de suspensión de sorteo.');
+    try {
+        await loadInitialData(); // Carga los últimos datos
+        const now = moment().tz(CARACAS_TIMEZONE);
+
+        // La función `cerrarSorteoManualmente` contiene la lógica del 80% y de liberación de números.
+        // Al llamarla aquí, se ejecutará esa lógica, pero NO se avanzará la fecha del sorteo ni el correlativo,
+        // ya que la condición de `advanceDrawConfiguration` está dentro de `cerrarSorteoManualmente`
+        // y solo se ejecuta si se cumplen las condiciones de cierre/anulación.
+        const result = await cerrarSorteoManualmente(now); // Pasa el momento actual real
+
+        if (result.success) {
+            res.status(200).json({ message: result.message, closedDate: result.closedDate, salesPercentage: result.salesPercentage });
+        } else {
+            res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
+        }
+    } catch (error) {
+        console.error('Error en la API de simulación de suspensión de sorteo:', error);
+        res.status(500).json({ message: 'Error interno del servidor al simular suspensión de sorteo.', error: error.message });
+    }
+});
+
+
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
     loadInitialData().then(() => {
@@ -1479,6 +1599,10 @@ ensureDataAndComprobantesDirs().then(() => {
                 timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
             });
             // --- FIN TAREA PROGRAMADA ---
+
+            // --- REMOVIDO: Cron Job de Notificación de ventas por WhatsApp (ahora activado por umbral de ventas) ---
+            // cron.schedule('* * * * *', async () => { /* ... */ });
+            // --- FIN REMOVIDO ---
         });
     });
 }).catch(err => {
