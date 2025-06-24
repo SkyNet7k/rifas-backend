@@ -857,7 +857,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
             // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
             const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelative = currentDrawCorrelative + 1;
+            const nextDrawCorrelative = currentDrawCorrelativo + 1;
 
             const updatedNumeros = numeros.map(num => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
@@ -892,41 +892,6 @@ app.post('/api/corte-ventas', async (req, res) => {
         res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
     }
 });
-
-
-// Tarea programada para reinicio diario de números y actualización de fecha de sorteo
-// Esta tarea ha sido ELIMINADA a petición del usuario. Su lógica será definida de otra manera.
-/*
-cron.schedule('0 0 * * *', async () => {
-    console.log('Ejecutando tarea programada: actualización de fecha de sorteo...');
-    try {
-        const now = moment().tz("America/Caracas");
-        const todayFormatted = now.format('YYYY-MM-DD');
-        const currentDrawDate = configuracion.fecha_sorteo;
-
-        // Solo avanza la fecha si la actual es pasada
-        if (moment(currentDrawDate).isBefore(todayFormatted, 'day')) {
-            console.log(`La fecha de sorteo configurada (${currentDrawDate}) es anterior a hoy (${todayFormatted}). Actualizando fecha del sorteo.`);
-            
-            configuracion.fecha_sorteo = now.clone().add(1, 'days').format('YYYY-MM-DD'); // Avanza al día siguiente
-            configuracion.numero_sorteo_correlativo = (configuracion.numero_sorteo_correlativo || 0) + 1;
-            configuracion.ultimo_numero_ticket = 0; // Reinicia el contador de tickets para la nueva fecha
-            await writeJsonFile(CONFIG_FILE, configuracion);
-            console.log(`Fecha del sorteo actualizada automáticamente a: ${configuracion.fecha_sorteo} y correlativo a ${configuracion.numero_sorteo_correlativo}.`);
-            
-            // IMPORTANTE: NO SE REINICIAN LOS NÚMEROS AQUÍ. Los números permanecen comprados globalmente.
-            // Solo el endpoint /api/corte-ventas puede reiniciar el pool de números.
-
-        } else {
-            console.log(`No es necesario actualizar la fecha de sorteo. La fecha de sorteo actual (${currentDrawDate}) es posterior o igual a hoy (${todayFormatted}).`);
-        }
-    } catch (error) {
-        console.error('Error en la tarea programada de actualización de fecha de sorteo:', error);
-    }
-}, {
-    timezone: "America/Caracas"
-});
-*/
 
 
 // --- RUTAS PARA PREMIOS ---
@@ -1391,14 +1356,41 @@ app.get('/api/tickets/ganadores', async (req, res) => {
     }
 });
 
+// Función para liberar números que ya excedieron la reserva de 2 sorteos
+async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros) {
+    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
+    let changed = false;
+    currentNumeros.forEach(numObj => {
+        // Un número está comprado y tiene un correlativo de sorteo original
+        if (numObj.comprado && numObj.originalDrawNumber !== null) {
+            // Si el correlativo actual es 2 o más que el correlativo original de compra
+            // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
+            if (currentDrawCorrelative >= (numObj.originalDrawNumber + 2)) {
+                numObj.comprado = false;
+                numObj.originalDrawNumber = null;
+                changed = true;
+                console.log(`Número ${numObj.numero} liberado. Comprado originalmente para sorteo ${numObj.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
+            }
+        }
+    });
+    if (changed) {
+        await writeJsonFile(NUMEROS_FILE, currentNumeros);
+        numeros = currentNumeros; // Update global variable
+        console.log('[liberateOldReservedNumbers] Números procesados y archivo guardado.');
+    } else {
+        console.log('[liberateOldReservedNumbers] No hay números antiguos para liberar en este momento.');
+    }
+}
+
 // Función auxiliar para avanzar la configuración del sorteo (fecha, correlativo, último ticket)
-async function advanceDrawConfiguration(currentConfig, nowMoment) {
-    currentConfig.fecha_sorteo = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
-    currentConfig.numero_sorteo_correlativo = (currentConfig.numero_sortivo_correlativo || 0) + 1;
+async function advanceDrawConfiguration(currentConfig, targetDate) {
+    currentConfig.fecha_sorteo = targetDate; // Set to the specific target date
+    currentConfig.numero_sorteo_correlativo = (currentConfig.numero_sorteo_correlativo || 0) + 1;
     currentConfig.ultimo_numero_ticket = 0;
     await writeJsonFile(CONFIG_FILE, currentConfig);
     console.log(`Configuración avanzada para el siguiente sorteo: Fecha ${currentConfig.fecha_sorteo}, Correlativo ${currentConfig.numero_sorteo_correlativo}.`);
 }
+
 
 /**
  * Evalúa el estado del sorteo actual basándose en el porcentaje de ventas
@@ -1482,32 +1474,21 @@ async function cerrarSorteoManualmente(nowMoment) {
         const currentDrawDateStr = currentConfig.fecha_sorteo;
         const currentDrawCorrelative = currentConfig.numero_sorteo_correlativo;
 
-        // Primero, evaluar el estado del sorteo (anular/cerrar ventas)
+        // Step 1: Evaluate sales status (anular/cerrar ventas)
         const evaluationResult = await evaluateDrawStatusOnly(nowMoment);
         if (!evaluationResult.success) {
             return evaluationResult; // Propagar el error si la evaluación inicial falla
         }
 
-        // 1. Lógica para liberar números que ya excedieron la reserva de 2 sorteos
-        console.log(`[cerrarSorteoManualmente] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
-        currentNumeros.forEach(numObj => {
-            // Un número está comprado y tiene un correlativo de sorteo original
-            if (numObj.comprado && numObj.originalDrawNumber !== null) {
-                // Si el correlativo actual es 2 o más que el correlativo original de compra
-                // (ej: comprado para 1, reservado para 1 y 2. Se libera para 3. Si actual es 3 o más)
-                if (currentDrawCorrelative >= (numObj.originalDrawNumber + 2)) {
-                    numObj.comprado = false;
-                    numObj.originalDrawNumber = null;
-                    console.log(`Número ${numObj.numero} liberado. Comprado originalmente para sorteo ${numObj.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
-                }
-            }
-        });
-        await writeJsonFile(NUMEROS_FILE, currentNumeros);
-        numeros = currentNumeros; // Actualiza la variable global en memoria
-        console.log('[cerrarSorteoManualmente] Números procesados para liberación.');
+        // Step 2: Liberate numbers based on the *current* draw correlative
+        await liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros);
 
-        // 2. Avanzar la configuración del sorteo (fecha, correlativo, último ticket)
-        await advanceDrawConfiguration(currentConfig, nowMoment); // currentConfig se pasa por referencia/valor para modificación y guardado
+
+        // Step 3: Advance the configuration to the next day
+        // Pass the new date as a formatted string
+        const nextDayDate = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
+        await advanceDrawConfiguration(currentConfig, nextDayDate);
+
 
         return {
             success: true,
@@ -1579,6 +1560,46 @@ app.post('/api/suspender-sorteo', async (req, res) => {
 });
 
 
+// --- NUEVO ENDPOINT: Establecer fecha de sorteo manualmente (después de suspensión) ---
+app.post('/api/set-manual-draw-date', async (req, res) => {
+    const { newDrawDate } = req.body;
+    console.log(`API: Recibida solicitud para establecer fecha de sorteo manualmente a: ${newDrawDate}.`);
+
+    if (!newDrawDate || !moment(newDrawDate, 'YYYY-MM-DD', true).isValid()) {
+        return res.status(400).json({ message: 'Fecha de sorteo inválida. Debe serYYYY-MM-DD.' });
+    }
+
+    try {
+        let currentConfig = await readJsonFile(CONFIG_FILE);
+        let currentNumeros = await readJsonFile(NUMEROS_FILE);
+
+        const currentDrawCorrelativeBeforeAdvance = currentConfig.numero_sorteo_correlativo;
+
+        // 1. Avanzar la configuración a la fecha manualmente establecida
+        // Esto también incrementa el correlativo y resetea el contador de tickets.
+        await advanceDrawConfiguration(currentConfig, newDrawDate);
+        // `currentConfig` ahora contiene el nuevo correlativo y fecha
+
+        // 2. Liberar números reservados que ya no son válidos con el NUEVO correlativo.
+        // Se usa el correlativo de sorteo que `advanceDrawConfiguration` acaba de establecer en `currentConfig`
+        await liberateOldReservedNumbers(currentConfig.numero_sorteo_correlativo, currentNumeros);
+
+        // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
+        currentConfig = await readJsonFile(CONFIG_FILE);
+
+        res.status(200).json({
+            success: true,
+            message: `Fecha del sorteo actualizada manualmente a ${newDrawDate}. El número de sorteo ha avanzado al ${currentConfig.numero_sorteo_correlativo} y los números reservados antiguos han sido liberados.`,
+            newConfig: currentConfig
+        });
+
+    } catch (error) {
+        console.error('Error en la API de set-manual-draw-date:', error);
+        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.message });
+    }
+});
+
+
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
     loadInitialData().then(() => {
@@ -1599,9 +1620,13 @@ ensureDataAndComprobantesDirs().then(() => {
             });
             // --- FIN TAREA PROGRAMADA ---
 
-            // --- REMOVIDO: Cron Job de Notificación de ventas por WhatsApp (ahora activado por umbral de ventas) ---
-            // cron.schedule('* * * * *', async () => { /* ... */ });
-            // --- FIN REMOVIDO ---
+            // --- Tarea programada para Notificación de ventas por WhatsApp (activado también por umbral) ---
+            // Se ejecuta cada 30 minutos.
+            cron.schedule('*/30 * * * *', async () => {
+                console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp.');
+                await sendSalesNotificationWhatsapp(); // Llama a la función para enviar el resumen
+            });
+            // --- FIN TAREA PROGRAMADA ---
         });
     });
 }).catch(err => {
