@@ -1394,25 +1394,99 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 // Función auxiliar para avanzar la configuración del sorteo (fecha, correlativo, último ticket)
 async function advanceDrawConfiguration(currentConfig, nowMoment) {
     currentConfig.fecha_sorteo = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
-    currentConfig.numero_sorteo_correlativo = (currentConfig.numero_sorteo_correlativo || 0) + 1;
+    currentConfig.numero_sorteo_correlativo = (currentConfig.numero_sortivo_correlativo || 0) + 1;
     currentConfig.ultimo_numero_ticket = 0;
     await writeJsonFile(CONFIG_FILE, currentConfig);
     console.log(`Configuración avanzada para el siguiente sorteo: Fecha ${currentConfig.fecha_sorteo}, Correlativo ${currentConfig.numero_sorteo_correlativo}.`);
 }
 
-// --- Lógica central para la verificación y anulación/cierre del sorteo por porcentaje de ventas ---
+/**
+ * Evalúa el estado del sorteo actual basándose en el porcentaje de ventas
+ * y actualiza el estado de los tickets, sin avanzar la fecha del sorteo.
+ * @param {moment.Moment} nowMoment - El objeto moment actual para la hora de Caracas.
+ * @returns {Promise<Object>} Resultado de la evaluación.
+ */
+async function evaluateDrawStatusOnly(nowMoment) {
+    console.log(`[evaluateDrawStatusOnly] Iniciando evaluación de estado de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
+
+    try {
+        // Cargar los datos más recientes para asegurar la precisión
+        let currentConfig = await readJsonFile(CONFIG_FILE);
+        let currentTickets = await readJsonFile(VENTAS_FILE);
+
+        const currentDrawDateStr = currentConfig.fecha_sorteo;
+
+        // Contar tickets vendidos (confirmados) para la fecha del sorteo actual
+        const soldTicketsForCurrentDraw = currentTickets.filter(venta =>
+            venta.drawDate === currentDrawDateStr && venta.validationStatus === 'Confirmado'
+        ).length;
+
+        const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
+        const soldPercentage = (soldTicketsForCurrentDraw / totalPossibleTickets) * 100;
+
+        console.log(`[evaluateDrawStatusOnly] Tickets vendidos para el sorteo del ${currentDrawDateStr}: ${soldTicketsForCurrentDraw}/${totalPossibleTickets} (${soldPercentage.toFixed(2)}%)`);
+
+        let message = '';
+        let updatedVentas = [...currentTickets]; // Crear una copia para modificar
+
+        if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
+            console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Marcando tickets como anulados.`);
+
+            updatedVentas = currentTickets.map(venta => {
+                // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como anuladas
+                if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
+                    venta.validationStatus = 'Anulado por bajo porcentaje'; // Nuevo estado
+                    venta.voidedReason = 'Ventas insuficientes para el sorteo';
+                    venta.voidedAt = nowMoment.toISOString();
+                }
+                return venta;
+            });
+            message = `Sorteo del ${currentDrawDateStr} marcado como anulado por ventas insuficientes.`;
+        } else {
+            // Si las ventas son suficientes, el sorteo se cierra automáticamente para nuevas ventas.
+            console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Marcando tickets como cerrados.`);
+
+            updatedVentas = currentTickets.map(venta => {
+                // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como cerradas por suficiencia de ventas
+                if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
+                    venta.validationStatus = 'Cerrado por Suficiencia de Ventas'; // Nuevo estado final para ventas de este sorteo
+                    venta.closedReason = 'Ventas suficientes para el sorteo';
+                    venta.closedAt = nowMoment.toISOString();
+                }
+                return venta;
+            });
+            message = `Sorteo del ${currentDrawDateStr} marcado como cerrado por suficiencia de ventas.`;
+        }
+
+        await writeJsonFile(VENTAS_FILE, updatedVentas);
+        ventas = updatedVentas; // Actualiza la variable global en memoria
+        console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado.');
+
+        return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
+
+    } catch (error) {
+        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo:', error);
+        return { success: false, message: `Error interno al evaluar estado de sorteo: ${error.message}` };
+    }
+}
+
+
+// --- Lógica central para la verificación, anulación/cierre y AVANCE del sorteo (Cierre Manual) ---
 async function cerrarSorteoManualmente(nowMoment) {
-    console.log(`[cerrarSorteoManualmente] Iniciando verificación para posible anulación/cierre de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
+    console.log(`[cerrarSorteoManualmente] Iniciando cierre manual de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
         let currentConfig = await readJsonFile(CONFIG_FILE); // Usar let para permitir la modificación
         let currentNumeros = await readJsonFile(NUMEROS_FILE); // Cargar números para actualizar su estado
-        const currentTickets = await readJsonFile(VENTAS_FILE);
-
+        
         const currentDrawDateStr = currentConfig.fecha_sorteo;
-        // CORRECCIÓN CLAVE: Usar currentDrawDateStr como base para el momento del sorteo
-        const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
         const currentDrawCorrelative = currentConfig.numero_sorteo_correlativo;
+
+        // Primero, evaluar el estado del sorteo (anular/cerrar ventas)
+        const evaluationResult = await evaluateDrawStatusOnly(nowMoment);
+        if (!evaluationResult.success) {
+            return evaluationResult; // Propagar el error si la evaluación inicial falla
+        }
 
         // 1. Lógica para liberar números que ya excedieron la reserva de 2 sorteos
         console.log(`[cerrarSorteoManualmente] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
@@ -1432,85 +1506,24 @@ async function cerrarSorteoManualmente(nowMoment) {
         numeros = currentNumeros; // Actualiza la variable global en memoria
         console.log('[cerrarSorteoManualmente] Números procesados para liberación.');
 
+        // 2. Avanzar la configuración del sorteo (fecha, correlativo, último ticket)
+        await advanceDrawConfiguration(currentConfig, nowMoment); // currentConfig se pasa por referencia/valor para modificación y guardado
 
-        // 2. Lógica de cierre/anulación del sorteo actual
-        // La verificación para ejecutar esta lógica es si:
-        // - Es el día del sorteo y la hora es igual o posterior al corte (12:15 PM), O
-        // - La fecha actual es posterior a la fecha del sorteo configurada (maneja casos de días siguientes).
-        if ((nowMoment.isSame(currentDrawDateMoment, 'day') &&
-             (nowMoment.hour() > DRAW_SUSPENSION_HOUR ||
-              (nowMoment.hour() === DRAW_SUSPENSION_HOUR && nowMoment.minute() >= DRAW_SUSPENSION_MINUTE))) ||
-            nowMoment.isAfter(currentDrawDateMoment, 'day')) {
+        return {
+            success: true,
+            message: `${evaluationResult.message} y la configuración del sorteo ha avanzado para el siguiente.`,
+            closedDate: evaluationResult.evaluatedDate,
+            salesPercentage: evaluationResult.salesPercentage
+        };
 
-            if (nowMoment.isAfter(currentDrawDateMoment, 'day')) {
-                console.log(`[cerrarSorteoManualmente] La fecha actual (${nowMoment.format('YYYY-MM-DD')}) es posterior a la fecha del sorteo configurada (${currentDrawDateStr}). Procediendo con el cierre forzado/evaluación.`);
-            } else {
-                 console.log(`[cerrarSorteoManualmente] Es el día del sorteo (${currentDrawDateStr}) y la hora (${nowMoment.format('HH:mm')}) es igual o posterior a las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE}. Procediendo con la verificación de ventas.`);
-            }
-
-            // Contar tickets vendidos (confirmados) para la fecha del sorteo actual
-            const soldTicketsForCurrentDraw = currentTickets.filter(venta =>
-                venta.drawDate === currentDrawDateStr && venta.validationStatus === 'Confirmado'
-            ).length;
-
-            const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
-            const soldPercentage = (soldTicketsForCurrentDraw / totalPossibleTickets) * 100;
-
-            console.log(`[cerrarSorteoManualmente] Tickets vendidos para el sorteo del ${currentDrawDateStr}: ${soldTicketsForCurrentDraw}/${totalPossibleTickets} (${soldPercentage.toFixed(2)}%)`);
-
-            let message = '';
-            let updatedVentas = [...currentTickets]; // Crear una copia para modificar
-
-            if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
-                console.log(`[cerrarSorteoManualmente] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Iniciando anulación del sorteo.`);
-
-                updatedVentas = currentTickets.map(venta => {
-                    // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como anuladas
-                    if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
-                        venta.validationStatus = 'Anulado por bajo porcentaje'; // Nuevo estado
-                        venta.voidedReason = 'Ventas insuficientes para el sorteo';
-                        venta.voidedAt = nowMoment.toISOString();
-                    }
-                    return venta;
-                });
-                message = `Sorteo del ${currentDrawDateStr} anulado por ventas insuficientes. Los números comprados permanecen asociados a la venta anulada para esta fecha y no estarán disponibles en futuros sorteos sin un reinicio manual completo.`;
-            } else {
-                // Si las ventas son suficientes, el sorteo se cierra automáticamente para nuevas ventas.
-                console.log(`[cerrarSorteoManualmente] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Cerrando sorteo automáticamente.`);
-
-                updatedVentas = currentTickets.map(venta => {
-                    // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como cerradas por suficiencia de ventas
-                    if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
-                        venta.validationStatus = 'Cerrado por Suficiencia de Ventas'; // Nuevo estado final para ventas de este sorteo
-                        venta.closedReason = 'Ventas suficientes para el sorteo';
-                        venta.closedAt = nowMoment.toISOString();
-                    }
-                    return venta;
-                });
-                message = `Sorteo del ${currentDrawDateStr} cerrado automáticamente por suficiencia de ventas.`;
-            }
-
-            await writeJsonFile(VENTAS_FILE, updatedVentas);
-            ventas = updatedVentas; // Actualiza la variable global en memoria
-            console.log('[cerrarSorteoManualmente] Estado de ventas actualizado.');
-
-            // IMPORTANTE: Avanzar la configuración del sorteo DESPUÉS de procesar las ventas del sorteo actual
-            await advanceDrawConfiguration(currentConfig, nowMoment); // currentConfig se pasa por referencia/valor para modificación y guardado
-
-            return { success: true, message: message, closedDate: currentDrawDateStr, salesPercentage: soldPercentage };
-
-        } else {
-            console.log(`[cerrarSorteoManualmente] La fecha o la hora actual no cumplen con los criterios para el cierre manual del sorteo actual. Asegúrate de que sea el día del sorteo y después de las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE} PM, o que la fecha actual sea posterior a la del sorteo.`, nowMoment.format('YYYY-MM-DD HH:mm'), currentDrawDateMoment.format('YYYY-MM-DD HH:mm'));
-            return { success: false, message: `La fecha o la hora actual no cumplen con los criterios para el cierre manual del sorteo actual. Asegúrate de que sea el día del sorteo y después de las ${DRAW_SUSPENSION_HOUR}:${DRAW_SUSPENSION_MINUTE} PM, o que la fecha actual sea posterior a la del sorteo.`, salesPercentage: 0 };
-        }
     } catch (error) {
-        console.error('[cerrarSorteoManualmente] ERROR durante la verificación/anulación/cierre del sorteo:', error);
+        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo:', error);
         return { success: false, message: `Error interno: ${error.message}` };
     }
 }
 
 
-// --- ENDPOINT PARA CIERRE MANUAL DEL SORTEO ---
+// --- ENDPOINT PARA CIERRE MANUAL DEL SORTEO (Full Close + Advance) ---
 app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
     console.log('API: Recibida solicitud para cierre manual de sorteo.');
     try {
@@ -1519,24 +1532,16 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
         const currentDrawDateStr = configuracion.fecha_sorteo;
 
         // Crear un objeto Moment que simule ser el día del sorteo pero después de la hora de corte.
-        // Si la fecha actual ya es posterior a la del sorteo, simplemente usamos now para que la lógica de 'isAfter' funcione.
         const simulatedMoment = moment().tz(CARACAS_TIMEZONE);
-        // CORRECCIÓN: Usar currentDrawDateStr para inicializar el momento del sorteo
         const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
 
-        // Si el sorteo actual es para una fecha pasada y no ha sido procesado, simulamos la hora de corte para forzar la evaluación.
-        // Si el sorteo es para hoy, simulamos 5 minutos después del corte.
+        // Si el sorteo es para hoy, simulamos 5 minutos después del corte para asegurar que se ejecute la lógica
         if (simulatedMoment.isSame(currentDrawDateMoment, 'day')) {
              simulatedMoment.set({ hour: DRAW_SUSPENSION_HOUR, minute: DRAW_SUSPENSION_MINUTE + 5, second: 0 });
         } else if (simulatedMoment.isBefore(currentDrawDateMoment, 'day')) {
-            // Si el botón se presiona para una fecha de sorteo futura, esto no debería ocurrir idealmente.
-            // O podríamos forzarlo para que evalúe la fecha futura asumiendo que ya pasó la hora de corte.
-            // Por ahora, la lógica `cerrarSorteoManualmente` lo manejará como "condición no cumplida"
-            // si la fecha del sorteo es estrictamente en el futuro.
              return res.status(400).json({ message: 'No se puede cerrar manualmente un sorteo cuya fecha aún no ha llegado.' });
         }
         // Si simulatedMoment ya es una fecha posterior a currentDrawDateMoment, la lógica de la función lo manejará.
-
 
         const result = await cerrarSorteoManualmente(simulatedMoment);
 
@@ -1552,30 +1557,24 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
 });
 
 
-// --- ENDPOINT PARA SIMULAR VERIFICACIÓN DE SUSPENSIÓN ---
-// Este endpoint es para probar la lógica de cierre del sorteo basada en el 80% de ventas,
-// sin la necesidad de un "cierre manual" que también avanza el sorteo.
-// Es útil para pruebas o verificaciones intermedias.
-app.post('/api/simulate-draw-suspension', async (req, res) => {
-    console.log('API: Recibida solicitud para simular verificación de suspensión de sorteo.');
+// --- ENDPOINT PARA SUSPENDER SORTEO (Evaluate Sales Only) ---
+// Este endpoint permite evaluar las ventas y marcar los tickets, sin avanzar el sorteo.
+app.post('/api/suspender-sorteo', async (req, res) => {
+    console.log('API: Recibida solicitud para suspender sorteo (evaluación de ventas).');
     try {
         await loadInitialData(); // Carga los últimos datos
         const now = moment().tz(CARACAS_TIMEZONE);
 
-        // La función `cerrarSorteoManualmente` contiene la lógica del 80% y de liberación de números.
-        // Al llamarla aquí, se ejecutará esa lógica, pero NO se avanzará la fecha del sorteo ni el correlativo,
-        // ya que la condición de `advanceDrawConfiguration` está dentro de `cerrarSorteoManualmente`
-        // y solo se ejecuta si se cumplen las condiciones de cierre/anulación.
-        const result = await cerrarSorteoManualmente(now); // Pasa el momento actual real
+        const result = await evaluateDrawStatusOnly(now); // Llama a la nueva función de solo evaluación
 
         if (result.success) {
-            res.status(200).json({ message: result.message, closedDate: result.closedDate, salesPercentage: result.salesPercentage });
+            res.status(200).json({ message: result.message, evaluatedDate: result.evaluatedDate, salesPercentage: result.salesPercentage });
         } else {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de simulación de suspensión de sorteo:', error);
-        res.status(500).json({ message: 'Error interno del servidor al simular suspensión de sorteo.', error: error.message });
+        console.error('Error en la API de suspensión de sorteo:', error);
+        res.status(500).json({ message: 'Error interno del servidor al suspender sorteo.', error: error.message });
     }
 });
 
