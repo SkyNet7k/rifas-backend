@@ -857,7 +857,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
             // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
             const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelative = currentDrawCorrelativo + 1;
+            const nextDrawCorrelative = currentDrawCorrelative + 1;
 
             const updatedNumeros = numeros.map(num => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
@@ -1182,7 +1182,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🎉🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1410,7 +1410,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
 
         // Contar tickets vendidos (confirmados) para la fecha del sorteo actual
         const soldTicketsForCurrentDraw = currentTickets.filter(venta =>
-            venta.drawDate === currentDrawDateStr && venta.validationStatus === 'Confirmado'
+            venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
         ).length;
 
         const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
@@ -1454,6 +1454,9 @@ async function evaluateDrawStatusOnly(nowMoment) {
         ventas = updatedVentas; // Actualiza la variable global en memoria
         console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado.');
 
+        // Se envía la notificación de WhatsApp después de evaluar el sorteo
+        await sendSalesNotificationWhatsapp();
+
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
     } catch (error) {
@@ -1489,6 +1492,8 @@ async function cerrarSorteoManualmente(nowMoment) {
         const nextDayDate = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
         await advanceDrawConfiguration(currentConfig, nextDayDate);
 
+        // Se envía la notificación de WhatsApp después de que todo el proceso ha terminado
+        await sendSalesNotificationWhatsapp();
 
         return {
             success: true,
@@ -1566,7 +1571,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     console.log(`API: Recibida solicitud para establecer fecha de sorteo manualmente a: ${newDrawDate}.`);
 
     if (!newDrawDate || !moment(newDrawDate, 'YYYY-MM-DD', true).isValid()) {
-        return res.status(400).json({ message: 'Fecha de sorteo inválida. Debe serYYYY-MM-DD.' });
+        return res.status(400).json({ message: 'Fecha de sorteo inválida. Debe ser YYYY-MM-DD.' });
     }
 
     try {
@@ -1586,6 +1591,9 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
         // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
         currentConfig = await readJsonFile(CONFIG_FILE);
+
+        // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
+        await sendSalesNotificationWhatsapp();
 
         res.status(200).json({
             success: true,
@@ -1620,8 +1628,7 @@ ensureDataAndComprobantesDirs().then(() => {
             });
             // --- FIN TAREA PROGRAMADA ---
 
-            // --- Tarea programada para Notificación de ventas por WhatsApp (activado también por umbral) ---
-            // Se ejecuta cada 30 minutos.
+            // --- Tarea programada para Notificación de ventas por WhatsApp (cada 30 minutos) ---
             cron.schedule('*/30 * * * *', async () => {
                 console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp.');
                 await sendSalesNotificationWhatsapp(); // Llama a la función para enviar el resumen
