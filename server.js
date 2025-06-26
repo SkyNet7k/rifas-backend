@@ -289,8 +289,8 @@ async function sendWhatsappNotification(messageText) {
     }
 }
 
-// Función auxiliar para enviar notificación de resumen de ventas
-async function sendSalesSummaryWhatsappNotification() {
+// Función auxiliar para enviar notificación de resumen de ventas (WhatsApp y Email)
+async function sendSalesSummaryNotifications() {
     await loadInitialData(); // Asegura que la configuración y ventas estén al día
     const now = moment().tz(CARACAS_TIMEZONE);
 
@@ -298,13 +298,54 @@ async function sendSalesSummaryWhatsappNotification() {
         venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
     );
     const totalVentas = ventasParaFechaSorteo.length;
+    const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
+    const soldPercentage = (totalVentas / totalPossibleTickets) * 100;
 
-    const messageText = `*Actualización de Ventas Lotería:*\n\n` +
-                        `Fecha Sorteo: *${configuracion.fecha_sorteo}*\n` +
-                        `Sorteo Nro: *${configuracion.numero_sorteo_correlativo}*\n` +
-                        `Total de Ventas Actuales (Confirmadas/Pendientes): *${totalVentas}* tickets vendidos.\n\n` +
-                        `Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}`;
-    await sendWhatsappNotification(messageText);
+
+    // --- ENVIAR NOTIFICACIÓN POR WHATSAPP ---
+    const whatsappMessageText = `*Actualización de Ventas Lotería:*\n\n` +
+                                `Fecha Sorteo: *${configuracion.fecha_sorteo}*\n` +
+                                `Sorteo Nro: *${configuracion.numero_sorteo_correlativo}*\n` +
+                                `Total de Ventas Actuales (Confirmadas/Pendientes): *${totalVentas}* tickets vendidos.\n\n` +
+                                `Porcentaje de Ventas: *${soldPercentage.toFixed(2)}%*\n\n` +
+                                `Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}`;
+    await sendWhatsappNotification(whatsappMessageText);
+
+
+    // --- ENVIAR NOTIFICACIÓN POR CORREO ELECTRÓNICO CON EXCEL ---
+    try {
+        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
+            const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
+                ventasParaFechaSorteo, // Pasa los datos de ventas detallados
+                configuracion,
+                'Reporte de Ventas Periódico',
+                'Reporte_Ventas_Periodico'
+            );
+
+            const emailSubject = `Reporte de Ventas Periódico - ${now.format('YYYY-MM-DD HH:mm')}`;
+            const emailHtmlContent = `
+                <p>Se ha generado un reporte de ventas periódico para el sorteo del día <strong>${configuracion.fecha_sorteo}</strong>.</p>
+                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + venta.valueUSD, 0).toFixed(2)}</p>
+                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + venta.valueBs, 0).toFixed(2)}</p>
+                <p><b>Porcentaje de Tickets Vendidos:</b> ${soldPercentage.toFixed(2)}%</p>
+                <p>Adjunto encontrarás el detalle completo en formato Excel.</p>
+                <p>Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
+            `;
+            const attachments = [
+                {
+                    filename: excelFileName,
+                    path: excelFilePath,
+                    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                }
+            ];
+            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
+            if (!emailSent) {
+                console.error('Fallo al enviar el correo de reporte de ventas periódico.');
+            }
+        }
+    } catch (emailError) {
+        console.error('Error al generar o enviar el reporte de ventas periódico por correo:', emailError);
+    }
 }
 
 
@@ -519,7 +560,8 @@ app.post('/api/comprar', async (req, res) => {
 
             if (currentMultiple > prevMultiple) {
                 console.log(`[WhatsApp Notificación Resumen] Ventas actuales (${currentTotalSales}) han cruzado un nuevo múltiplo (${currentMultiple * notificationThreshold}) del umbral (${notificationThreshold}). Enviando notificación de resumen.`);
-                await sendSalesSummaryWhatsappNotification(); // Esta función ya carga los datos más recientes internamente
+                // Llama a la función que ahora maneja ambos tipos de notificaciones
+                await sendSalesSummaryNotifications(); // Esta función ya carga los datos más recientes internamente
 
                 // Actualizar el contador de la última notificación en la configuración
                 latestConfig.last_sales_notification_count = currentMultiple * notificationThreshold; // Actualiza al múltiplo exacto
@@ -717,78 +759,118 @@ app.post('/api/resultados-sorteo', async (req, res) => {
 });
 
 
+/**
+ * Genera un reporte de ventas en formato Excel y lo guarda en el directorio de reportes.
+ * @param {Array} salesData - Array de objetos de ventas a incluir en el reporte.
+ * @param {Object} config - Objeto de configuración actual (o relevante para el contexto del reporte).
+ * @param {string} reportTitle - Título principal del reporte (ej., "Corte de Ventas", "Reporte de Suspensión").
+ * @param {string} fileNamePrefix - Prefijo para el nombre del archivo (ej., "Corte_Ventas", "Reporte_Suspension").
+ * @returns {Promise<{excelFilePath: string, excelFileName: string}>} Objeto con la ruta y el nombre del archivo Excel generado.
+ */
+async function generateGenericSalesExcelReport(salesData, config, reportTitle, fileNamePrefix) {
+    const now = moment().tz(CARACAS_TIMEZONE);
+    const todayFormatted = now.format('YYYY-MM-DD');
+
+    const totalVentasUSD = salesData.reduce((sum, venta) => sum + venta.valueUSD, 0);
+    const totalVentasBs = salesData.reduce((sum, venta) => sum + venta.valueBs, 0);
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet(reportTitle);
+
+    worksheet.columns = [
+        { header: 'Campo', key: 'field', width: 25 },
+        { header: 'Valor', key: 'value', width: 40 }
+    ];
+
+    worksheet.addRow({ field: 'Título del Reporte', value: reportTitle });
+    worksheet.addRow({ field: 'Fecha y Hora del Reporte', value: now.format('YYYY-MM-DD HH:mm:ss') });
+    worksheet.addRow({ field: 'Fecha de Sorteo Reportado', value: config.fecha_sorteo || 'N/A' });
+    worksheet.addRow({ field: 'Número de Sorteo Reportado', value: config.numero_sorteo_correlativo || 'N/A' });
+    worksheet.addRow({ field: 'Total de Tickets Vendidos', value: salesData.length });
+    worksheet.addRow({ field: 'Total Vendido USD', value: totalVentasUSD.toFixed(2) });
+    worksheet.addRow({ field: 'Total Vendido Bs', value: totalVentasBs.toFixed(2) });
+
+    worksheet.addRow({}); // Espacio
+    worksheet.addRow({ field: 'Detalle de Ventas' });
+    worksheet.addRow({}); // Espacio
+
+    const ventasHeaders = [
+        { header: 'ID Interno Venta', key: 'id', width: 20 }, // Nuevo campo: ID interno de la venta
+        { header: 'Fecha/Hora Compra', key: 'purchaseDate', width: 25 },
+        { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
+        { header: 'Hora Sorteo', key: 'drawTime', width: 15 },
+        { header: 'Nro. Sorteo', key: 'drawNumber', width: 15 },
+        { header: 'Nro. Ticket', key: 'ticketNumber', width: 15 },
+        { header: 'Comprador', key: 'buyerName', width: 25 },
+        { header: 'Teléfono', key: 'buyerPhone', width: 20 },
+        { header: 'Números', key: 'numbers', width: 30 },
+        { header: 'Valor USD', key: 'valueUSD', width: 15 },
+        { header: 'Valor Bs', key: 'valueBs', width: 15 },
+        { header: 'Método de Pago', key: 'paymentMethod', width: 20 },
+        { header: 'Referencia Pago', key: 'paymentReference', width: 20 },
+        { header: 'URL Comprobante', key: 'voucherURL', width: 35 },
+        { header: 'Estado Validación', key: 'validationStatus', width: 25 },
+        { header: 'Razón Anulación', key: 'voidedReason', width: 30 }, // Nuevo campo: Razón de anulación
+        { header: 'Fecha Anulación', key: 'voidedAt', width: 25 },     // Nuevo campo: Fecha de anulación
+        { header: 'Razón Cierre', key: 'closedReason', width: 30 },     // Nuevo campo: Razón de cierre
+        { header: 'Fecha Cierre', key: 'closedAt', width: 25 }          // Nuevo campo: Fecha de cierre
+    ];
+    worksheet.addRow(ventasHeaders.map(h => h.header));
+
+    salesData.forEach(venta => {
+        worksheet.addRow({
+            id: venta.id, // Mapeo del ID interno
+            purchaseDate: moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss'),
+            drawDate: venta.drawDate,
+            drawTime: venta.drawTime || 'N/A',
+            drawNumber: venta.drawNumber,
+            ticketNumber: venta.ticketNumber,
+            buyerName: venta.buyerName,
+            buyerPhone: venta.buyerPhone,
+            numbers: venta.numbers.join(', '),
+            valueUSD: venta.valueUSD,
+            valueBs: venta.valueBs,
+            paymentMethod: venta.paymentMethod,
+            paymentReference: venta.paymentReference,
+            voucherURL: venta.voucherURL ? `${API_BASE_URL}${venta.voucherURL}` : '',
+            validationStatus: venta.validationStatus || 'Pendiente',
+            voidedReason: venta.voidedReason || '', // Mapeo de razón de anulación
+            voidedAt: venta.voidedAt ? moment(venta.voidedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '', // Mapeo de fecha de anulación
+            closedReason: venta.closedReason || '', // Mapeo de razón de cierre
+            closedAt: venta.closedAt ? moment(venta.closedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '' // Mapeo de fecha de cierre
+        });
+    });
+
+    const excelFileName = `${fileNamePrefix}_${todayFormatted}_${now.format('HHmmss')}.xlsx`;
+    const excelFilePath = path.join(REPORTS_DIR, excelFileName);
+    await workbook.xlsx.writeFile(excelFilePath);
+
+    return { excelFilePath, excelFileName };
+}
+
+
 // Endpoint para el Corte de Ventas (anteriormente corte-ventas, ahora con lógica de reseteo condicional)
 app.post('/api/corte-ventas', async (req, res) => {
     try {
         const now = moment().tz(CARACAS_TIMEZONE);
         const todayFormatted = now.format('YYYY-MM-DD');
 
+        // Solo las ventas confirmadas o pendientes para la fecha del sorteo actual
         const ventasDelDia = ventas.filter(venta =>
-            moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD') === todayFormatted
+            venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
         );
 
-        const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valueUSD, 0);
-        const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + venta.valueBs, 0);
-
-        const workbook = new ExcelJS.Workbook();
-        const worksheet = workbook.addWorksheet('Corte de Ventas');
-
-        worksheet.columns = [
-            { header: 'Campo', key: 'field', width: 20 },
-            { header: 'Valor', key: 'value', width: 30 }
-        ];
-
-        worksheet.addRow({ field: 'Fecha del Corte', value: now.format('YYYY-MM-DD HH:mm:ss') });
-        worksheet.addRow({ field: 'Total Ventas USD', value: totalVentasUSD.toFixed(2) });
-        worksheet.addRow({ field: 'Total Ventas Bs', value: totalVentasBs.toFixed(2) });
-        worksheet.addRow({ field: 'Número de Ventas', value: ventasDelDia.length });
-
-        worksheet.addRow({});
-        worksheet.addRow({ field: 'Detalle de Ventas del Día' });
-        worksheet.addRow({});
-
-        const ventasHeaders = [
-            { header: 'Fecha/Hora Compra', key: 'purchaseDate', width: 20 },
-            { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
-            { header: 'Hora Sorteo', key: 'drawTime', width: 15 }, // Añadido
-            { header: 'Nro. Sorteo', key: 'drawNumber', width: 15 },
-            { header: 'Nro. Ticket', key: 'ticketNumber', width: 15 },
-            { header: 'Comprador', key: 'buyerName', width: 20 },
-            { header: 'Teléfono', key: 'buyerPhone', width: 15 },
-            { header: 'Números', key: 'numbers', width: 30 },
-            { header: 'Valor USD', key: 'valueUSD', width: 15 },
-            { header: 'Valor Bs', key: 'valueBs', width: 15 },
-            { header: 'Método de Pago', key: 'paymentMethod', width: 20 },
-            { header: 'Referencia Pago', key: 'paymentReference', width: 20 },
-            { header: 'URL Comprobante', key: 'voucherURL', width: 30 },
-            { header: 'Estado Validación', key: 'validationStatus', width: 20 }
-        ];
-        worksheet.addRow(ventasHeaders.map(h => h.header));
-
-        ventasDelDia.forEach(venta => {
-            worksheet.addRow({
-                purchaseDate: moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss'),
-                drawDate: venta.drawDate,
-                drawTime: venta.drawTime || 'N/A', // Añadido
-                drawNumber: venta.drawNumber,
-                ticketNumber: venta.ticketNumber,
-                buyerName: venta.buyerName,
-                buyerPhone: venta.buyerPhone,
-                numbers: venta.numbers.join(', '),
-                valueUSD: venta.valueUSD,
-                valueBs: venta.valueBs,
-                paymentMethod: venta.paymentMethod,
-                paymentReference: venta.paymentReference,
-                voucherURL: venta.voucherURL ? `${API_BASE_URL}${venta.voucherURL}` : '',
-                validationStatus: venta.validationStatus || 'Pendiente'
-            });
-        });
-
-        const excelFileName = `Corte_Ventas_${todayFormatted}.xlsx`;
-        const excelFilePath = path.join(REPORTS_DIR, excelFileName);
-        await workbook.xlsx.writeFile(excelFilePath);
+        const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
+            ventasDelDia,
+            configuracion,
+            'Corte de Ventas',
+            'Corte_Ventas'
+        );
 
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
+            const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valueUSD, 0);
+            const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + venta.valueBs, 0);
+
             const subject = `Reporte de Corte de Ventas ${todayFormatted}`;
             const htmlContent = `
                 <p>Se ha realizado el corte de ventas para el día <strong>${todayFormatted}</strong>.</p>
@@ -856,7 +938,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
             // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
             const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelative = currentDrawCorrelativo + 1;
+            const nextDrawCorrelative = currentDrawCorrelative + 1;
 
             const updatedNumeros = numeros.map(num => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
@@ -1363,7 +1445,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros
         if (numObj.comprado && numObj.originalDrawNumber !== null) {
             // Si el correlativo actual es 2 o más que el correlativo original de compra
             // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
-            if (currentDrawCorrelativo >= (numObj.originalDrawNumber + 2)) {
+            if (currentDrawCorrelative >= (numObj.originalDrawNumber + 2)) {
                 numObj.comprado = false;
                 numObj.originalDrawNumber = null;
                 changed = true;
@@ -1408,21 +1490,24 @@ async function evaluateDrawStatusOnly(nowMoment) {
 
         const currentDrawDateStr = currentConfig.fecha_sorteo;
 
-        // Contar tickets vendidos (confirmados) para la fecha del sorteo actual
+        // **CORRECCIÓN AQUÍ:** Filtrar las ventas para obtener los objetos de venta, no solo la longitud.
         const soldTicketsForCurrentDraw = currentTickets.filter(venta =>
             venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
-        ).length;
+        );
+        const totalSoldTicketsCount = soldTicketsForCurrentDraw.length;
+
 
         const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
-        const soldPercentage = (soldTicketsForCurrentDraw / totalPossibleTickets) * 100;
+        const soldPercentage = (totalSoldTicketsCount / totalPossibleTickets) * 100;
 
-        console.log(`[evaluateDrawStatusOnly] Tickets vendidos para el sorteo del ${currentDrawDateStr}: ${soldTicketsForCurrentDraw}/${totalPossibleTickets} (${soldPercentage.toFixed(2)}%)`);
+        console.log(`[evaluateDrawStatusOnly] Tickets vendidos para el sorteo del ${currentDrawDateStr}: ${totalSoldTicketsCount}/${totalPossibleTickets} (${soldPercentage.toFixed(2)}%)`);
 
         let message = '';
         let whatsappMessageContent = '';
         let emailSubject = '';
         let emailHtmlContent = '';
         let updatedVentas = [...currentTickets]; // Crear una copia para modificar
+        let excelReport = { excelFilePath: null, excelFileName: null };
 
         if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
             console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Marcando tickets como anulados.`);
@@ -1443,10 +1528,19 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>Estimados administradores,</p>
                 <p>Se les informa que el sorteo del <strong>${currentDrawDateStr}</strong> ha sido <strong>ANULADO</strong>.</p>
                 <p><b>Razón:</b> Bajo porcentaje de ventas (${soldPercentage.toFixed(2)}%).</p>
+                <p>Adjunto encontrarás el reporte de ventas al momento de la suspensión.</p>
                 <p>Todos los tickets válidos para este sorteo han sido marcados para ser revalidados automáticamente para el próximo sorteo.</p>
                 <p>Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
+            // Generar Excel para el reporte de suspensión
+            excelReport = await generateGenericSalesExcelReport(
+                soldTicketsForCurrentDraw, // **PASANDO EL ARRAY DE OBJETOS DE VENTA**
+                currentConfig,
+                `Reporte de Suspensión del Sorteo ${currentDrawDateStr}`,
+                'Reporte_Suspension'
+            );
+
         } else {
             // Si las ventas son suficientes, el sorteo se cierra automáticamente para nuevas ventas.
             console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Marcando tickets como cerrados.`);
@@ -1467,9 +1561,17 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>Estimados administradores,</p>
                 <p>Se les informa que el sorteo del <strong>${currentDrawDateStr}</strong> ha sido <strong>CERRADO EXITOSAMENTE</strong>.</p>
                 <p><b>Detalles:</b> Se alcanzó o superó el porcentaje de ventas requerido (${soldPercentage.toFixed(2)}%).</p>
+                <p>Adjunto encontrarás el reporte de ventas al momento del cierre.</p>
                 <p>La página de compra para este sorteo ha sido bloqueada. Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
+            // Generar Excel para el reporte de cierre
+            excelReport = await generateGenericSalesExcelReport(
+                soldTicketsForCurrentDraw, // **PASANDO EL ARRAY DE OBJETOS DE VENTA**
+                currentConfig,
+                `Reporte de Cierre del Sorteo ${currentDrawDateStr}`,
+                'Reporte_Cierre'
+            );
         }
 
         await writeJsonFile(VENTAS_FILE, updatedVentas);
@@ -1479,9 +1581,15 @@ async function evaluateDrawStatusOnly(nowMoment) {
         // Enviar notificación de WhatsApp con el resultado de la evaluación
         await sendWhatsappNotification(whatsappMessageContent);
 
-        // Enviar notificación por correo electrónico
-        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent);
+        // Enviar notificación por correo electrónico con adjunto Excel
+        if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
+            const attachments = excelReport.excelFilePath ? [{
+                filename: excelReport.excelFileName,
+                path: excelReport.excelFilePath,
+                contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            }] : [];
+
+            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo de notificación de suspensión/cierre.');
             }
@@ -1496,7 +1604,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
     } catch (error) {
-        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo:', error);
+        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo:', error.stack || error.message);
         return { success: false, message: `Error interno al evaluar estado de sorteo: ${error.message}` };
     }
 }
@@ -1513,7 +1621,8 @@ async function cerrarSorteoManualmente(nowMoment) {
         const currentDrawDateStr = currentConfig.fecha_sorteo;
         const currentDrawCorrelative = currentConfig.numero_sorteo_correlativo;
 
-        // Step 1: Evaluate sales status (anular/cerrar ventas)
+        // Step 1: Evaluate sales status (anular/cerrar sales)
+        // This call to evaluateDrawStatusOnly will handle sending the WhatsApp and Email with Excel for the closure/suspension.
         const evaluationResult = await evaluateDrawStatusOnly(nowMoment);
         if (!evaluationResult.success) {
             return evaluationResult; // Propagar el error si la evaluación inicial falla
@@ -1532,18 +1641,18 @@ async function cerrarSorteoManualmente(nowMoment) {
         currentConfig = await readJsonFile(CONFIG_FILE); // Recargar config para el mensaje de WhatsApp/Email
 
         // Se envía una notificación de WhatsApp específica para el cierre manual
+        // Note: The Excel report and basic email were already sent by evaluateDrawStatusOnly. This is an additional summary.
         const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha *${currentConfig.fecha_sorteo}*.`;
         await sendWhatsappNotification(whatsappMessage);
 
-        // Enviar notificación por correo electrónico para el cierre manual
+        // Si se desea un correo EXTRA de confirmación de AVANCE:
         if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
-            const emailSubject = `NOTIFICACIÓN: Cierre Manual y Avance de Sorteo - ${evaluationResult.evaluatedDate}`;
+            const emailSubject = `CONFIRMACIÓN: Avance de Sorteo Manual - A Sorteo ${currentConfig.numero_sorteo_correlativo}`;
             const emailHtmlContent = `
                 <p>Estimados administradores,</p>
-                <p>Se ha realizado el <strong>cierre manual y avance del sorteo</strong>.</p>
-                <p><b>Fecha del Sorteo Finalizado:</b> ${evaluationResult.evaluatedDate}</p>
-                <p><b>Porcentaje de Ventas Alcanzado:</b> ${evaluationResult.salesPercentage.toFixed(2)}%</p>
-                <p>La configuración ha avanzado al Sorteo Nro. <b>${currentConfig.numero_sorteo_correlativo}</b> para la fecha <b>${currentConfig.fecha_sorteo}</b>.</p>
+                <p>Se les confirma que se ha realizado el <strong>avance de sorteo manual</strong>.</p>
+                <p><b>Sorteo Anterior:</b> Fecha ${evaluationResult.evaluatedDate}, Ventas ${evaluationResult.salesPercentage.toFixed(2)}%</p>
+                <p><b>Nuevo Sorteo Activo:</b> Nro. <b>${currentConfig.numero_sorteo_correlativo}</b> para la fecha <b>${currentConfig.fecha_sorteo}</b>.</p>
                 <p>La página de compra ha sido desbloqueada para nuevas ventas.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
@@ -1561,7 +1670,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         };
 
     } catch (error) {
-        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo:', error);
+        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo:', error.stack || error.message);
         return { success: false, message: `Error interno: ${error.message}` };
     }
 }
@@ -1595,7 +1704,7 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de cierre manual de sorteo:', error);
+        console.error('Error en la API de cierre manual de sorteo:', error.stack || error.message);
         res.status(500).json({ message: 'Error interno del servidor al cerrar el sorteo manualmente.', error: error.message });
     }
 });
@@ -1617,7 +1726,7 @@ app.post('/api/suspender-sorteo', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de suspensión de sorteo:', error);
+        console.error('Error en la API de suspensión de sorteo:', error.stack || error.message);
         res.status(500).json({ message: 'Error interno del servidor al suspender sorteo.', error: error.message });
     }
 });
@@ -1629,16 +1738,17 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     console.log(`API: Recibida solicitud para establecer fecha de sorteo manualmente a: ${newDrawDate}.`);
 
     if (!newDrawDate || !moment(newDrawDate, 'YYYY-MM-DD', true).isValid()) {
-        return res.status(400).json({ message: 'Fecha de sorteo inválida. Debe ser YYYY-MM-DD.' });
+        return res.status(400).json({ message: 'Fecha de sorteo inválida. Debe serYYYY-MM-DD.' });
     }
 
     try {
         let currentConfig = await readJsonFile(CONFIG_FILE);
         let currentNumeros = await readJsonFile(NUMEROS_FILE);
+        let currentVentas = await readJsonFile(VENTAS_FILE);
         
         // Guardamos la fecha y el correlativo anteriores para el mensaje de correo/WhatsApp
         const oldDrawDate = currentConfig.fecha_sorteo;
-        const oldDrawCorrelative = currentConfig.numero_sorteo_correlativo;
+        const oldDrawCorrelative = currentConfig.numero_sorteo_correlativo; 
 
         // 1. Avanzar la configuración a la fecha manualmente establecida
         await advanceDrawConfiguration(currentConfig, newDrawDate);
@@ -1650,11 +1760,24 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
         currentConfig = await readJsonFile(CONFIG_FILE);
 
+        // Filtrar ventas para el reporte Excel: Ventas del sorteo ANTERIOR que estaban confirmadas/pendientes.
+        const salesForOldDraw = currentVentas.filter(venta =>
+            venta.drawDate === oldDrawDate && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente' || venta.validationStatus === 'Cerrado por Suficiencia de Ventas' || venta.validationStatus === 'Anulado por bajo porcentaje')
+        );
+
+        // Generar Excel para el reporte de reprogramación
+        const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
+            salesForOldDraw,
+            { fecha_sorteo: oldDrawDate, numero_sorteo_correlativo: oldDrawCorrelative }, // Pass old config for report context
+            `Reporte de Reprogramación del Sorteo ${oldDrawDate}`,
+            'Reporte_Reprogramacion'
+        );
+
         // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
-        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelativo}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
+        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelative}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
         await sendWhatsappNotification(whatsappMessage);
 
-        // Enviar notificación por correo electrónico para la reprogramación
+        // Enviar notificación por correo electrónico para la reprogramación con adjunto Excel
         if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
             const emailSubject = `NOTIFICACIÓN: Sorteo Reprogramado - Nueva Fecha ${newDrawDate}`;
             const emailHtmlContent = `
@@ -1662,11 +1785,18 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
                 <p>Se les informa que el sorteo ha sido <strong>reprogramado manualmente</strong>.</p>
                 <p><b>Fecha Anterior:</b> ${oldDrawDate} (Sorteo Nro. ${oldDrawCorrelative})</p>
                 <p><b>Nueva Fecha:</b> ${newDrawDate} (Sorteo Nro. ${currentConfig.numero_sorteo_correlativo})</p>
+                <p>Adjunto encontrarás el reporte de ventas del sorteo anterior (${oldDrawDate}) al momento de la reprogramación.</p>
                 <p>La página de compra ha sido desbloqueada automáticamente.</p>
                 <p>Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
-            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent);
+            const attachments = excelFilePath ? [{
+                filename: excelFileName,
+                path: excelFilePath,
+                contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            }] : [];
+
+            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo de notificación de reprogramación.');
             }
@@ -1679,8 +1809,46 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error en la API de set-manual-draw-date:', error);
-        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.message });
+        console.error('Error en la API de set-manual-draw-date:', error.stack || error.message);
+        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.stack || error.message });
+    }
+});
+
+
+// NUEVO ENDPOINT: Notificación de ventas para desarrolladores
+app.post('/api/developer-sales-notification', async (req, res) => {
+    console.log('API: Recibida solicitud para notificación de ventas para desarrolladores.');
+    try {
+        await loadInitialData(); // Asegura que la configuración y ventas estén al día
+        const now = moment().tz(CARACAS_TIMEZONE);
+
+        const currentDrawDateStr = configuracion.fecha_sorteo;
+        const ventasParaFechaSorteo = ventas.filter(venta =>
+            venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+        );
+        const totalVentas = ventasParaFechaSorteo.length;
+        const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
+        const soldPercentage = (totalVentas / totalPossibleTickets) * 100;
+
+        let messageText = `*Notificación de Ventas para Desarrolladores*\n\n`;
+        messageText += `*Hora de Notificación:* ${now.format('DD/MM/YYYY HH:mm:ss')}\n`;
+        messageText += `*Fecha de Sorteo Activo:* ${currentDrawDateStr}\n`;
+        messageText += `*Tickets Vendidos:* ${totalVentas} de ${totalPossibleTickets}\n`;
+        messageText += `*Porcentaje de Ventas:* ${soldPercentage.toFixed(2)}%\n\n`;
+
+        if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
+            messageText += `*Estado:* Las ventas están por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido.`;
+        } else {
+            messageText += `*Estado:* Las ventas han alcanzado o superado el ${SALES_THRESHOLD_PERCENTAGE}% requerido.`;
+        }
+
+        await sendWhatsappNotification(messageText);
+
+        res.status(200).json({ message: 'Notificación de ventas para desarrolladores enviada exitosamente por WhatsApp.' });
+
+    } catch (error) {
+        console.error('Error al enviar notificación de ventas para desarrolladores:', error);
+        res.status(500).json({ message: 'Error interno del servidor al enviar notificación de ventas para desarrolladores.', error: error.message });
     }
 });
 
@@ -1705,10 +1873,10 @@ ensureDataAndComprobantesDirs().then(() => {
             });
             // --- FIN TAREA PROGRAMADA ---
 
-            // --- Tarea programada para Notificación de ventas por WhatsApp (cada 30 minutos) ---
-            cron.schedule('*/30 * * * *', async () => {
-                console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp.');
-                await sendSalesSummaryWhatsappNotification(); // Llama a la función para enviar el resumen
+            // --- Tarea programada para Notificación de ventas por WhatsApp y Email (cada 55 minutos) ---
+            cron.schedule('*/55 * * * *', async () => { // Cambiado a cada 55 minutos
+                console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp y Email.');
+                await sendSalesSummaryNotifications(); // Llama a la función que ahora envía ambos
             });
             // --- FIN TAREA PROGRAMADA ---
         });
