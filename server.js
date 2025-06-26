@@ -262,50 +262,53 @@ async function sendEmail(to, subject, html, attachments = []) {
 }
 
 
-// --- INICIO: Función para enviar notificaciones de ventas por WhatsApp (Resumen) ---
+// --- INICIO: Función para enviar notificaciones de ventas por WhatsApp (Resumen y Otros) ---
 /**
- * Envía una notificación de las ventas actuales por WhatsApp a los números de administrador configurados.
+ * Envía una notificación de resumen de ventas o mensajes personalizados por WhatsApp a los números de administrador configurados.
  * Esto genera una URL de wa.me y la imprime en consola, ya que el envío directo de WhatsApp requiere integración con una API externa.
+ * @param {string} messageText - El texto del mensaje a enviar.
  */
-async function sendSalesNotificationWhatsapp() {
+async function sendWhatsappNotification(messageText) {
     try {
-        // Cargar los datos más recientes para el mensaje de resumen
-        await loadInitialData();
-        const now = moment().tz(CARACAS_TIMEZONE);
-
-        // Filtrar ventas para la fecha del sorteo actual configurada
-        const ventasParaFechaSorteo = ventas.filter(venta =>
-            venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
-        );
-
-        const totalVentas = ventasParaFechaSorteo.length;
-
-        const messageText = `*Actualización de Ventas Lotería:*\n\n` +
-                            `Fecha Sorteo: *${configuracion.fecha_sorteo}*\n` +
-                            `Sorteo Nro: *${configuracion.numero_sorteo_correlativo}*\n` +
-                            `Total de Ventas Actuales (Confirmadas/Pendientes): *${totalVentas}* tickets vendidos.\n\n` +
-                            `Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}`;
-
         const encodedMessage = encodeURIComponent(messageText);
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
-            console.log(`\n--- Notificación de Ventas WhatsApp (Resumen - ${now.format('DD/MM/YYYY HH:mm:ss')}) ---`);
+            console.log(`\n--- Notificación de WhatsApp para Administradores ---`);
             configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
                 const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${encodedMessage}`;
                 console.log(`[WhatsApp Link for ${adminNumber}]: ${whatsappUrl}`);
             });
-            console.log('--- Fin Notificación de Ventas WhatsApp (Resumen) ---\n');
+            console.log('--- Fin Notificación de WhatsApp ---\n');
             console.log('NOTA: Los enlaces de WhatsApp se han generado y mostrado en la consola. Para el envío automático real, se requiere una integración con un proveedor de WhatsApp API (ej. Twilio, Vonage, WhatsApp Business API).');
         } else {
-            console.warn('No hay números de WhatsApp de administrador configurados para enviar notificaciones de resumen de ventas.');
+            console.warn('No hay números de WhatsApp de administrador configurados para enviar notificaciones.');
         }
 
     } catch (error) {
-        console.error('Error al enviar notificación de ventas por WhatsApp:', error);
+        console.error('Error al enviar notificación por WhatsApp:', error);
     }
 }
 
-// --- FIN: Función para enviar notificaciones de ventas por WhatsApp (Resumen) ---
+// Función auxiliar para enviar notificación de resumen de ventas
+async function sendSalesSummaryWhatsappNotification() {
+    await loadInitialData(); // Asegura que la configuración y ventas estén al día
+    const now = moment().tz(CARACAS_TIMEZONE);
+
+    const ventasParaFechaSorteo = ventas.filter(venta =>
+        venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+    );
+    const totalVentas = ventasParaFechaSorteo.length;
+
+    const messageText = `*Actualización de Ventas Lotería:*\n\n` +
+                        `Fecha Sorteo: *${configuracion.fecha_sorteo}*\n` +
+                        `Sorteo Nro: *${configuracion.numero_sorteo_correlativo}*\n` +
+                        `Total de Ventas Actuales (Confirmadas/Pendientes): *${totalVentas}* tickets vendidos.\n\n` +
+                        `Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}`;
+    await sendWhatsappNotification(messageText);
+}
+
+
+// --- FIN: Función para enviar notificaciones de ventas por WhatsApp (Resumen y Otros) ---
 
 
 // --- RUTAS DE LA API ---
@@ -492,12 +495,8 @@ app.post('/api/comprar', async (req, res) => {
         // Enviar notificación a WhatsApp (al administrador) de *compra individual*
         const whatsappMessageIndividual = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
 
-        if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
-            configuracion.admin_whatsapp_numbers.forEach(adminNumber => {
-                const whatsappUrl = `https://api.whatsapp.com/send?phone=${adminNumber}&text=${whatsappMessageIndividual}`;
-                console.log(`DEBUG_BACKEND: URL de WhatsApp generada para ${adminNumber} (Compra Individual): ${whatsappUrl}`);
-            });
-        }
+        // Utilizar la nueva función sendWhatsappNotification
+        await sendWhatsappNotification(whatsappMessageIndividual);
         console.log('DEBUG_BACKEND: Proceso de compra en backend finalizado.');
 
         // --- INICIO: Lógica para Notificación de Ventas por Umbral (Resumen) ---
@@ -520,7 +519,7 @@ app.post('/api/comprar', async (req, res) => {
 
             if (currentMultiple > prevMultiple) {
                 console.log(`[WhatsApp Notificación Resumen] Ventas actuales (${currentTotalSales}) han cruzado un nuevo múltiplo (${currentMultiple * notificationThreshold}) del umbral (${notificationThreshold}). Enviando notificación de resumen.`);
-                await sendSalesNotificationWhatsapp(); // Esta función ya carga los datos más recientes internamente
+                await sendSalesSummaryWhatsappNotification(); // Esta función ya carga los datos más recientes internamente
 
                 // Actualizar el contador de la última notificación en la configuración
                 latestConfig.last_sales_notification_count = currentMultiple * notificationThreshold; // Actualiza al múltiplo exacto
@@ -857,7 +856,7 @@ app.post('/api/corte-ventas', async (req, res) => {
             // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
             // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
             const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelative = currentDrawCorrelative + 1;
+            const nextDrawCorrelative = currentDrawCorrelativo + 1;
 
             const updatedNumeros = numeros.map(num => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
@@ -883,7 +882,6 @@ app.post('/api/corte-ventas', async (req, res) => {
         // Se guarda el archivo de ventas nuevamente. Esto puede ser útil si hubo alguna modificación
         // en las ventas a través de la interfaz de administración que no se reflejó de inmediato en memoria.
         await writeJsonFile(VENTAS_FILE, ventas);
-
 
         res.status(200).json({ message: message });
 
@@ -1182,7 +1180,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` + // Corregido: 🎉🥳🎉 para que no se muestre doble ?
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1365,7 +1363,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros
         if (numObj.comprado && numObj.originalDrawNumber !== null) {
             // Si el correlativo actual es 2 o más que el correlativo original de compra
             // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
-            if (currentDrawCorrelative >= (numObj.originalDrawNumber + 2)) {
+            if (currentDrawCorrelativo >= (numObj.originalDrawNumber + 2)) {
                 numObj.comprado = false;
                 numObj.originalDrawNumber = null;
                 changed = true;
@@ -1387,6 +1385,8 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
     currentConfig.fecha_sorteo = targetDate; // Set to the specific target date
     currentConfig.numero_sorteo_correlativo = (currentConfig.numero_sorteo_correlativo || 0) + 1;
     currentConfig.ultimo_numero_ticket = 0;
+    currentConfig.pagina_bloqueada = false; // Desbloquear la página automáticamente al avanzar
+    currentConfig.last_sales_notification_count = 0; // Resetear el contador de notificaciones de ventas
     await writeJsonFile(CONFIG_FILE, currentConfig);
     console.log(`Configuración avanzada para el siguiente sorteo: Fecha ${currentConfig.fecha_sorteo}, Correlativo ${currentConfig.numero_sorteo_correlativo}.`);
 }
@@ -1419,6 +1419,9 @@ async function evaluateDrawStatusOnly(nowMoment) {
         console.log(`[evaluateDrawStatusOnly] Tickets vendidos para el sorteo del ${currentDrawDateStr}: ${soldTicketsForCurrentDraw}/${totalPossibleTickets} (${soldPercentage.toFixed(2)}%)`);
 
         let message = '';
+        let whatsappMessageContent = '';
+        let emailSubject = '';
+        let emailHtmlContent = '';
         let updatedVentas = [...currentTickets]; // Crear una copia para modificar
 
         if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
@@ -1434,6 +1437,16 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 return venta;
             });
             message = `Sorteo del ${currentDrawDateStr} marcado como anulado por ventas insuficientes.`;
+            whatsappMessageContent = `*¡Alerta de Sorteo Suspendido!* 🚨\n\nEl sorteo del *${currentDrawDateStr}* ha sido *ANULADO* debido a un bajo porcentaje de ventas (${soldPercentage.toFixed(2)}%).\n\nTodos los tickets válidos para este sorteo serán revalidados automáticamente para el próximo sorteo.`;
+            emailSubject = `ALERTA: Sorteo Anulado - ${currentDrawDateStr}`;
+            emailHtmlContent = `
+                <p>Estimados administradores,</p>
+                <p>Se les informa que el sorteo del <strong>${currentDrawDateStr}</strong> ha sido <strong>ANULADO</strong>.</p>
+                <p><b>Razón:</b> Bajo porcentaje de ventas (${soldPercentage.toFixed(2)}%).</p>
+                <p>Todos los tickets válidos para este sorteo han sido marcados para ser revalidados automáticamente para el próximo sorteo.</p>
+                <p>Por favor, revisen el panel de administración para más detalles.</p>
+                <p>Atentamente,<br>El equipo de Rifas</p>
+            `;
         } else {
             // Si las ventas son suficientes, el sorteo se cierra automáticamente para nuevas ventas.
             console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Marcando tickets como cerrados.`);
@@ -1448,14 +1461,37 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 return venta;
             });
             message = `Sorteo del ${currentDrawDateStr} marcado como cerrado por suficiencia de ventas.`;
+            whatsappMessageContent = `*¡Sorteo Cerrado Exitosamente!* ✅\n\nEl sorteo del *${currentDrawDateStr}* ha sido *CERRADO* con éxito. Se alcanzó el porcentaje de ventas (${soldPercentage.toFixed(2)}%) requerido.`;
+            emailSubject = `NOTIFICACIÓN: Sorteo Cerrado Exitosamente - ${currentDrawDateStr}`;
+            emailHtmlContent = `
+                <p>Estimados administradores,</p>
+                <p>Se les informa que el sorteo del <strong>${currentDrawDateStr}</strong> ha sido <strong>CERRADO EXITOSAMENTE</strong>.</p>
+                <p><b>Detalles:</b> Se alcanzó o superó el porcentaje de ventas requerido (${soldPercentage.toFixed(2)}%).</p>
+                <p>La página de compra para este sorteo ha sido bloqueada. Por favor, revisen el panel de administración para más detalles.</p>
+                <p>Atentamente,<br>El equipo de Rifas</p>
+            `;
         }
 
         await writeJsonFile(VENTAS_FILE, updatedVentas);
         ventas = updatedVentas; // Actualiza la variable global en memoria
         console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado.');
 
-        // Se envía la notificación de WhatsApp después de evaluar el sorteo
-        await sendSalesNotificationWhatsapp();
+        // Enviar notificación de WhatsApp con el resultado de la evaluación
+        await sendWhatsappNotification(whatsappMessageContent);
+
+        // Enviar notificación por correo electrónico
+        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
+            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent);
+            if (!emailSent) {
+                console.error('Fallo al enviar el correo de notificación de suspensión/cierre.');
+            }
+        }
+
+
+        // Bloquear la página después de la evaluación
+        currentConfig.pagina_bloqueada = true;
+        await writeJsonFile(CONFIG_FILE, currentConfig);
+        console.log('[evaluateDrawStatusOnly] Página bloqueada para nuevas compras.');
 
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
@@ -1492,8 +1528,30 @@ async function cerrarSorteoManualmente(nowMoment) {
         const nextDayDate = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
         await advanceDrawConfiguration(currentConfig, nextDayDate);
 
-        // Se envía la notificación de WhatsApp después de que todo el proceso ha terminado
-        await sendSalesNotificationWhatsapp();
+        // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
+        currentConfig = await readJsonFile(CONFIG_FILE); // Recargar config para el mensaje de WhatsApp/Email
+
+        // Se envía una notificación de WhatsApp específica para el cierre manual
+        const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha *${currentConfig.fecha_sorteo}*.`;
+        await sendWhatsappNotification(whatsappMessage);
+
+        // Enviar notificación por correo electrónico para el cierre manual
+        if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
+            const emailSubject = `NOTIFICACIÓN: Cierre Manual y Avance de Sorteo - ${evaluationResult.evaluatedDate}`;
+            const emailHtmlContent = `
+                <p>Estimados administradores,</p>
+                <p>Se ha realizado el <strong>cierre manual y avance del sorteo</strong>.</p>
+                <p><b>Fecha del Sorteo Finalizado:</b> ${evaluationResult.evaluatedDate}</p>
+                <p><b>Porcentaje de Ventas Alcanzado:</b> ${evaluationResult.salesPercentage.toFixed(2)}%</p>
+                <p>La configuración ha avanzado al Sorteo Nro. <b>${currentConfig.numero_sorteo_correlativo}</b> para la fecha <b>${currentConfig.fecha_sorteo}</b>.</p>
+                <p>La página de compra ha sido desbloqueada para nuevas ventas.</p>
+                <p>Atentamente,<br>El equipo de Rifas</p>
+            `;
+            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent);
+            if (!emailSent) {
+                console.error('Fallo al enviar el correo de notificación de cierre manual y avance.');
+            }
+        }
 
         return {
             success: true,
@@ -1577,23 +1635,42 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     try {
         let currentConfig = await readJsonFile(CONFIG_FILE);
         let currentNumeros = await readJsonFile(NUMEROS_FILE);
-
-        const currentDrawCorrelativeBeforeAdvance = currentConfig.numero_sorteo_correlativo;
+        
+        // Guardamos la fecha y el correlativo anteriores para el mensaje de correo/WhatsApp
+        const oldDrawDate = currentConfig.fecha_sorteo;
+        const oldDrawCorrelative = currentConfig.numero_sorteo_correlativo;
 
         // 1. Avanzar la configuración a la fecha manualmente establecida
-        // Esto también incrementa el correlativo y resetea el contador de tickets.
         await advanceDrawConfiguration(currentConfig, newDrawDate);
         // `currentConfig` ahora contiene el nuevo correlativo y fecha
 
         // 2. Liberar números reservados que ya no son válidos con el NUEVO correlativo.
-        // Se usa el correlativo de sorteo que `advanceDrawConfiguration` acaba de establecer en `currentConfig`
         await liberateOldReservedNumbers(currentConfig.numero_sorteo_correlativo, currentNumeros);
 
         // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
         currentConfig = await readJsonFile(CONFIG_FILE);
 
         // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
-        await sendSalesNotificationWhatsapp();
+        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelativo}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
+        await sendWhatsappNotification(whatsappMessage);
+
+        // Enviar notificación por correo electrónico para la reprogramación
+        if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
+            const emailSubject = `NOTIFICACIÓN: Sorteo Reprogramado - Nueva Fecha ${newDrawDate}`;
+            const emailHtmlContent = `
+                <p>Estimados administradores,</p>
+                <p>Se les informa que el sorteo ha sido <strong>reprogramado manualmente</strong>.</p>
+                <p><b>Fecha Anterior:</b> ${oldDrawDate} (Sorteo Nro. ${oldDrawCorrelative})</p>
+                <p><b>Nueva Fecha:</b> ${newDrawDate} (Sorteo Nro. ${currentConfig.numero_sorteo_correlativo})</p>
+                <p>La página de compra ha sido desbloqueada automáticamente.</p>
+                <p>Por favor, revisen el panel de administración para más detalles.</p>
+                <p>Atentamente,<br>El equipo de Rifas</p>
+            `;
+            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent);
+            if (!emailSent) {
+                console.error('Fallo al enviar el correo de notificación de reprogramación.');
+            }
+        }
 
         res.status(200).json({
             success: true,
@@ -1631,7 +1708,7 @@ ensureDataAndComprobantesDirs().then(() => {
             // --- Tarea programada para Notificación de ventas por WhatsApp (cada 30 minutos) ---
             cron.schedule('*/30 * * * *', async () => {
                 console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp.');
-                await sendSalesNotificationWhatsapp(); // Llama a la función para enviar el resumen
+                await sendSalesSummaryWhatsappNotification(); // Llama a la función para enviar el resumen
             });
             // --- FIN TAREA PROGRAMADA ---
         });
