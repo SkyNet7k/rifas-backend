@@ -785,8 +785,10 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     worksheet.addRow({ field: 'Título del Reporte', value: reportTitle });
     worksheet.addRow({ field: 'Fecha y Hora del Reporte', value: now.format('YYYY-MM-DD HH:mm:ss') });
     worksheet.addRow({ field: 'Fecha de Sorteo Reportado', value: config.fecha_sorteo || 'N/A' });
-    worksheet.addRow({ field: 'Número de Sorteo Reportado', value: config.numero_sorteo_correlativo || 'N/A' });
-    worksheet.addRow({ field: 'Total de Tickets Vendidos', value: salesData.length });
+    // MODIFICACIÓN: Asegurar que el valor sea una cadena de texto
+    worksheet.addRow({ field: 'Número de Sorteo Reportado', value: String(config.numero_sorteo_correlativo || 'N/A') });
+    // MODIFICACIÓN: Asegurar que el valor sea una cadena de texto y que sea 0 si salesData es vacío
+    worksheet.addRow({ field: 'Total de Tickets Vendidos', value: String(salesData.length || 0) });
     worksheet.addRow({ field: 'Total Vendido USD', value: totalVentasUSD.toFixed(2) });
     worksheet.addRow({ field: 'Total Vendido Bs', value: totalVentasBs.toFixed(2) });
 
@@ -1533,6 +1535,12 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
+            // INICIO DEBUG LOGS PARA EL REPORTE
+            console.log(`DEBUG_REPORTE: Fecha de Sorteo actual (currentDrawDateStr): ${currentDrawDateStr}`);
+            console.log(`DEBUG_REPORTE: Tickets Confirmados/Pendientes para el sorteo actual (soldTicketsForCurrentDraw):`, soldTicketsForCurrentDraw);
+            console.log(`DEBUG_REPORTE: Cantidad de tickets Confirmados/Pendientes: ${soldTicketsForCurrentDraw.length}`);
+            console.log(`DEBUG_REPORTE: Número de sorteo correlativo de la configuración: ${currentConfig.numero_sorteo_correlativo}`);
+            // FIN DEBUG LOGS PARA EL REPORTE
             // Generar Excel para el reporte de suspensión
             excelReport = await generateGenericSalesExcelReport(
                 soldTicketsForCurrentDraw, // **PASANDO EL ARRAY DE OBJETOS DE VENTA**
@@ -1565,6 +1573,12 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>La página de compra para este sorteo ha sido bloqueada. Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
+            // INICIO DEBUG LOGS PARA EL REPORTE
+            console.log(`DEBUG_REPORTE: Fecha de Sorteo actual (currentDrawDateStr): ${currentDrawDateStr}`);
+            console.log(`DEBUG_REPORTE: Tickets Confirmados/Pendientes para el sorteo actual (soldTicketsForCurrentDraw):`, soldTicketsForCurrentDraw);
+            console.log(`DEBUG_REPORTE: Cantidad de tickets Confirmados/Pendientes: ${soldTicketsForCurrentDraw.length}`);
+            console.log(`DEBUG_REPORTE: Número de sorteo correlativo de la configuración: ${currentConfig.numero_sorteo_correlativo}`);
+            // FIN DEBUG LOGS PARA EL REPORTE
             // Generar Excel para el reporte de cierre
             excelReport = await generateGenericSalesExcelReport(
                 soldTicketsForCurrentDraw, // **PASANDO EL ARRAY DE OBJETOS DE VENTA**
