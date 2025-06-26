@@ -82,6 +82,7 @@ async function ensureDataAndComprobantesDirs() {
                 "numero_sorteo_correlativo": 1,
                 "ultimo_numero_ticket": 0,
                 "pagina_bloqueada": false,
+                "block_reason_message": "", // NUEVO CAMPO: Razón por la que la página está bloqueada
                 "mail_config": {
                     "host": "smtp.gmail.com",
                     "port": 465,
@@ -368,7 +369,7 @@ app.put('/api/configuracion', async (req, res) => {
     try {
         // Fusionar solo los campos permitidos y existentes
         Object.keys(newConfig).forEach(key => {
-            if (configuracion.hasOwnProperty(key) && key !== 'mail_config') {
+            if (configuracion.hasOwnProperty(key) && key !== 'mail_config' && key !== 'block_reason_message') { // No permitir que el frontend actualice block_reason_message directamente
                 configuracion[key] = newConfig[key];
             }
         });
@@ -1471,6 +1472,7 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
     currentConfig.ultimo_numero_ticket = 0;
     currentConfig.pagina_bloqueada = false; // Desbloquear la página automáticamente al avanzar
     currentConfig.last_sales_notification_count = 0; // Resetear el contador de notificaciones de ventas
+    currentConfig.block_reason_message = ""; // NUEVO: Limpiar la razón de bloqueo al avanzar el sorteo
     await writeJsonFile(CONFIG_FILE, currentConfig);
     console.log(`Configuración avanzada para el siguiente sorteo: Fecha ${currentConfig.fecha_sorteo}, Correlativo ${currentConfig.numero_sorteo_correlativo}.`);
 }
@@ -1535,6 +1537,10 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
+            // Establecer el mensaje de bloqueo para el cliente
+            currentConfig.pagina_bloqueada = true;
+            currentConfig.block_reason_message = "El sorteo ha sido ANULADO por bajo porcentaje de ventas. Tus tickets válidos han sido revalidados para el próximo sorteo. ¡Vuelve pronto!";
+
             // INICIO DEBUG LOGS PARA EL REPORTE
             console.log(`DEBUG_REPORTE: Fecha de Sorteo actual (currentDrawDateStr): ${currentDrawDateStr}`);
             console.log(`DEBUG_REPORTE: Tickets Confirmados/Pendientes para el sorteo actual (soldTicketsForCurrentDraw):`, soldTicketsForCurrentDraw);
@@ -1573,6 +1579,10 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>La página de compra para este sorteo ha sido bloqueada. Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
+            // Establecer el mensaje de bloqueo para el cliente
+            currentConfig.pagina_bloqueada = true;
+            currentConfig.block_reason_message = "El sorteo ha sido CERRADO exitosamente por haber alcanzado las ventas requeridas. No se aceptan más compras para este sorteo. ¡Gracias por participar!";
+
             // INICIO DEBUG LOGS PARA EL REPORTE
             console.log(`DEBUG_REPORTE: Fecha de Sorteo actual (currentDrawDateStr): ${currentDrawDateStr}`);
             console.log(`DEBUG_REPORTE: Tickets Confirmados/Pendientes para el sorteo actual (soldTicketsForCurrentDraw):`, soldTicketsForCurrentDraw);
@@ -1609,11 +1619,9 @@ async function evaluateDrawStatusOnly(nowMoment) {
             }
         }
 
-
-        // Bloquear la página después de la evaluación
-        currentConfig.pagina_bloqueada = true;
+        // Bloquear la página (ya se hizo arriba) y guardar la configuración con el mensaje
         await writeJsonFile(CONFIG_FILE, currentConfig);
-        console.log('[evaluateDrawStatusOnly] Página bloqueada para nuevas compras.');
+        console.log('[evaluateDrawStatusOnly] Página bloqueada para nuevas compras con mensaje actualizado.');
 
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
