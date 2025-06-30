@@ -9,43 +9,28 @@ const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
 const ExcelJS = require('exceljs');
-const moment = require('moment-timezone'); // Asegúrate de tener moment-timezone instalado: npm install moment-timezone exceljs
-const archiver = require('archiver'); // NUEVO: Importar archiver
+const moment = require('moment-timezone');
+const archiver = require('archiver');
+const admin = require('firebase-admin'); // <-- CAMBIO INTEGRADO: Agregado para Firebase Admin SDK
+const { v4: uuidv4 } = require('uuid'); // Para generar IDs únicos
+const { generateComprobantePDF } = require('./pdfGenerator'); // Asumiendo que tienes este archivo
+const crypto = require('crypto');
+const { log } = require('console');
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Constantes y configuraciones
+const CARACAS_TIMEZONE = 'America/Caracas';
 const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
-
-const corsOptions = {
-    origin: [
-        'https://paneladmin01.netlify.app',
-        'https://tuoportunidadeshoy.netlify.app',
-        'http://localhost:8080',
-        'http://127.0.0.1:5500',
-        'http://localhost:3000',
-    ],
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-    credentials: true,
-    optionsSuccessStatus: 204,
-};
-
-app.use(cors(corsOptions));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(fileUpload({
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
-    useTempFiles: true,
-    tempFileDir: '/tmp/' // Directorio temporal para archivos grandes
-}));
 
 // Rutas a tus archivos JSON
 const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json'); // Usado para Zulia y Chance en el frontend
-const VENTAS_FILE = path.join(__dirname, 'ventas.json');
+const VENTAS_FILE = path.join(__dirname, 'ventas.json'); // Todavía se usa para la lógica de archivo
 const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json');
 const RESULTADOS_SORTEO_FILE = path.join(__dirname, 'resultados_sorteo.json'); // Archivo para guardar resultados del sorteo por hora/tipo
 const PREMIOS_FILE = path.join(__dirname, 'premios.json'); // Precios de los premios por hora
@@ -56,7 +41,7 @@ const DATABASE_FILES = [
     CONFIG_FILE,
     NUMEROS_FILE,
     HORARIOS_ZULIA_FILE,
-    VENTAS_FILE,
+    VENTAS_FILE, // Todavía incluido para exportación de archivo local
     COMPROBANTES_FILE,
     RESULTADOS_SORTEO_FILE,
     PREMIOS_FILE,
@@ -166,11 +151,13 @@ async function writeJsonFile(filePath, data) {
 let configuracion = {};
 let numeros = []; // Esta es la variable global que necesita actualizarse
 let horariosZulia = { horarios_zulia: [] }; // Objeto para horarios, no solo array
-let ventas = [];
+let ventas = []; // <-- Sigue siendo para el archivo local ventas.json
 let comprobantes = [];
 let resultadosSorteo = [];
 let premios = {};
 let ganadoresSorteos = []; // NUEVO: Variable global para almacenar los ganadores de los sorteos procesados
+
+let db; // <-- CAMBIO INTEGRADO: Declara la variable para la instancia de Firestore
 
 // --- CONSTANTES PARA LA LÓGICA DE CIERRE MANUAL DEL SORTEO ---
 const SALES_THRESHOLD_PERCENTAGE = 80; // Porcentaje mínimo de ventas para no suspender (80%)
@@ -295,6 +282,7 @@ async function sendSalesSummaryNotifications() {
     await loadInitialData(); // Asegura que la configuración y ventas estén al día
     const now = moment().tz(CARACAS_TIMEZONE);
 
+    // Esta función seguirá leyendo de 'ventas' (el archivo local)
     const ventasParaFechaSorteo = ventas.filter(venta =>
         venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
     );
@@ -353,7 +341,55 @@ async function sendSalesSummaryNotifications() {
 // --- FIN: Función para enviar notificaciones de ventas por WhatsApp (Resumen y Otros) ---
 
 
-// --- RUTAS DE LA API ---
+// Firebase Admin SDK Initialization
+let serviceAccount;
+try {
+    const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+    if (!serviceAccountBase64) {
+        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set.');
+    }
+    const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
+    serviceAccount = JSON.parse(serviceAccountJson);
+
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+    });
+    db = admin.firestore(); // <-- CAMBIO INTEGRADO: Inicializa la referencia a Firestore
+    console.log('Firebase Admin SDK inicializado exitosamente.');
+} catch (error) {
+    console.error('Error al inicializar Firebase Admin SDK:', error);
+    process.exit(1);
+}
+
+
+// --- CAMBIO INTEGRADO: Función para guardar en Firestore ---
+/**
+ * Guarda un documento de venta en la colección 'ventas_sorteo' de Firestore.
+ * @param {object} ventaData - Los datos de la venta a guardar.
+ */
+async function guardarVentaEnFirestore(ventaData) {
+    if (!db) {
+        console.error('Error: Firestore no está inicializado.');
+        return { success: false, message: 'Firestore no está inicializado.' };
+    }
+    
+    try {
+        // Usa `add` para que Firestore genere un ID único para el documento
+        const docRef = await db.collection('ventas_sorteo').add(ventaData);
+        console.log('DEBUG_BACKEND: Venta guardada en Cloud Firestore con ID:', docRef.id);
+        return { success: true, docId: docRef.id };
+    } catch (error) {
+        console.error('Error al guardar la venta en Firestore:', error);
+        throw new Error('Error al guardar la venta en la base de datos de Firebase.');
+    }
+}
+// --- FIN CAMBIO INTEGRADO ---
+
+
+// ===============================================
+// === ENDPOINTS DE LA API =======================
+// ===============================================
 
 // Obtener configuración
 app.get('/api/configuracion', async (req, res) => {
@@ -425,6 +461,7 @@ app.post('/api/numeros', async (req, res) => {
 });
 
 // Ruta para obtener ventas (versión que usa await readJsonFile)
+// NOTA: Esta ruta seguirá leyendo del archivo local ventas.json
 app.get('/api/ventas', async (req, res) => {
     try {
         const currentVentas = await readJsonFile(VENTAS_FILE);
@@ -519,10 +556,17 @@ app.post('/api/comprar', async (req, res) => {
             validationStatus: 'Pendiente'
         };
 
+        // --- CAMBIO INTEGRADO: Guardar en Firestore ---
+        const firestoreSaveResult = await guardarVentaEnFirestore(nuevaVenta);
+        if (!firestoreSaveResult.success) {
+            throw new Error(firestoreSaveResult.message);
+        }
+        // --- FIN CAMBIO INTEGRADO ---
+        
+        // Mantener la lógica de guardado en el archivo JSON local para consistencia con otras partes que leen de allí
         ventas.push(nuevaVenta);
-        // Guardar archivos actualizados antes de la lógica de notificación de umbral
         await writeJsonFile(VENTAS_FILE, ventas);
-        console.log('DEBUG_BACKEND: Ventas guardadas en archivo.');
+        console.log('DEBUG_BACKEND: Ventas guardadas en archivo local.');
 
         await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados en el archivo
         numeros = currentNumeros; // Actualizar la variable global 'numeros' en memoria
@@ -545,8 +589,7 @@ app.post('/api/comprar', async (req, res) => {
         try {
             // Re-leer configuración y ventas para obtener los conteos más actualizados para la lógica
             const latestConfig = await readJsonFile(CONFIG_FILE);
-            const latestVentas = await readJsonFile(VENTAS_FILE);
-
+            const latestVentas = await readJsonFile(VENTAS_FILE); // Lee del archivo local
             // Contar tickets confirmados o pendientes para la fecha del sorteo actual
             const currentTotalSales = latestVentas.filter(sale =>
                 sale.drawDate === latestConfig.fecha_sorteo && (sale.validationStatus === 'Confirmado' || sale.validationStatus === 'Pendiente')
@@ -597,6 +640,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         return res.status(400).json({ message: 'Tipo de archivo no permitido. Solo se aceptan imágenes (JPG, PNG, GIF) y PDF.' });
     }
 
+    // Busca en las ventas del archivo local (el endpoint /api/ventas sigue leyendo de aquí)
     const ventaIndex = ventas.findIndex(v => v.id === ventaId);
     if (ventaIndex === -1) {
         return res.status(404).json({ message: 'Venta no encontrada.' });
@@ -611,6 +655,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
     try {
         await comprobanteFile.mv(filePath);
 
+        // Actualiza la URL del voucher en la venta en memoria y en el archivo local
         ventas[ventaIndex].voucherURL = `/uploads/${fileName}`; // Guardar URL relativa para acceso
         await writeJsonFile(VENTAS_FILE, ventas);
 
@@ -1076,6 +1121,7 @@ app.post('/api/send-test-email', async (req, res) => {
 
 
 // Endpoint para actualizar el estado de validación de una venta
+// NOTA: Esta ruta seguirá actualizando el archivo local ventas.json
 app.put('/api/tickets/validate/:id', async (req, res) => {
     const ventaId = parseInt(req.params.id);
     const { validationStatus } = req.body;
@@ -1150,6 +1196,58 @@ app.get('/api/export-database', async (req, res) => {
                 }
             }
         }
+        
+        // <-- CAMBIO INTEGRADO: Añade un archivo Excel con los datos de ventas de Firestore
+        const ventasSnapshot = await db.collection('ventas_sorteo').get();
+        const ventasFirestore = ventasSnapshot.docs.map(doc => doc.data());
+        
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Ventas_Firestore');
+        
+        worksheet.columns = [
+            { header: 'ID Interno Venta (Firestore)', key: 'id', width: 36 },
+            { header: 'Números', key: 'numbers', width: 20 },
+            { header: 'Cantidad', key: 'quantity', width: 10 },
+            { header: 'Valor (Bs)', key: 'valueBs', width: 15 },
+            { header: 'Valor ($)', key: 'valueUSD', width: 15 },
+            { header: 'Comprador', key: 'buyerName', width: 30 },
+            { header: 'Teléfono', key: 'buyerPhone', width: 20 },
+            { header: 'Método de Pago', key: 'paymentMethod', width: 20 },
+            { header: 'Referencia', key: 'paymentReference', width: 20 },
+            { header: 'Fecha de Compra', key: 'purchaseDate', width: 25 },
+            { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
+            { header: 'Hora Sorteo', key: 'drawTime', width: 15 },
+            { header: 'Nro. Sorteo', key: 'drawNumber', width: 15 },
+            { header: 'Nro. Ticket', key: 'ticketNumber', width: 15 },
+            { header: 'URL Comprobante', key: 'voucherURL', width: 35 },
+            { header: 'Estado Validación', key: 'validationStatus', width: 25 },
+        ];
+
+        ventasFirestore.forEach(venta => {
+            worksheet.addRow({
+                id: venta.id,
+                numbers: venta.numbers ? venta.numbers.join(', ') : '',
+                quantity: venta.cantidad,
+                valueBs: venta.valueBs,
+                valueUSD: venta.valueUSD,
+                buyerName: venta.buyerName,
+                buyerPhone: venta.buyerPhone,
+                paymentMethod: venta.paymentMethod,
+                paymentReference: venta.paymentReference,
+                purchaseDate: venta.purchaseDate,
+                drawDate: venta.drawDate,
+                drawTime: venta.drawTime,
+                drawNumber: venta.drawNumber,
+                ticketNumber: venta.ticketNumber,
+                voucherURL: venta.voucherURL ? `${API_BASE_URL}${venta.voucherURL}` : '',
+                validationStatus: venta.validationStatus,
+            });
+        });
+        
+        const excelBufferFirestore = await workbook.xlsx.writeBuffer();
+        archive.append(excelBufferFirestore, { name: 'ventas_firestore_backup.xlsx' });
+        // --- FIN CAMBIO INTEGRADO ---
+
         archive.finalize();
         console.log('Base de datos exportada y enviada como ZIP.');
     } catch (error) {
@@ -1167,7 +1265,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     }
 
     try {
-        const venta = ventas.find(v => v.id === ventaId);
+        const venta = ventas.find(v => v.id === ventaId); // Lee del archivo local
 
         if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp.' });
@@ -1213,7 +1311,7 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
     }
 
     try {
-        const venta = ventas.find(v => v.id === ventaId);
+        const venta = ventas.find(v => v.id === ventaId); // Lee del archivo local
 
         if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp de pago falso.' });
@@ -1265,7 +1363,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` + // Corregido: 🎉🥳🎉 para que no se muestre doble ?
+            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` + // Corregido: 🎉🥳🎉 para que no se muestre doble ?
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1301,6 +1399,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     }
 
     try {
+        // Estas rutas siguen leyendo de los archivos JSON locales
         const allVentas = await readJsonFile(VENTAS_FILE);
         const allResultadosSorteo = await readJsonFile(RESULTADOS_SORTEO_FILE);
         const allPremios = await readJsonFile(PREMIOS_FILE);
@@ -1421,7 +1520,7 @@ app.get('/api/tickets/ganadores', async (req, res) => {
     }
 
     try {
-        const foundEntry = ganadoresSorteos.find(entry =>
+        const foundEntry = ganadoresSorteos.find(entry => // Lee del archivo local
             entry.drawDate === fecha &&
             entry.drawNumber.toString() === numeroSorteo.toString() &&
             entry.lotteryType.toLowerCase() === tipoLoteria.toLowerCase()
@@ -1490,7 +1589,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
     try {
         // Cargar los datos más recientes para asegurar la precisión
         let currentConfig = await readJsonFile(CONFIG_FILE);
-        let currentTickets = await readJsonFile(VENTAS_FILE);
+        let currentTickets = await readJsonFile(VENTAS_FILE); // Lee del archivo local
 
         const currentDrawDateStr = currentConfig.fecha_sorteo;
 
@@ -1766,7 +1865,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     try {
         let currentConfig = await readJsonFile(CONFIG_FILE);
         let currentNumeros = await readJsonFile(NUMEROS_FILE);
-        let currentVentas = await readJsonFile(VENTAS_FILE);
+        let currentVentas = await readJsonFile(VENTAS_FILE); // Lee del archivo local
         
         // Guardamos la fecha y el correlativo anteriores para el mensaje de correo/WhatsApp
         const oldDrawDate = currentConfig.fecha_sorteo;
@@ -1796,7 +1895,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         );
 
         // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
-        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelative}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
+        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelativo}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
         await sendWhatsappNotification(whatsappMessage);
 
         // Enviar notificación por correo electrónico para la reprogramación con adjunto Excel
@@ -1845,7 +1944,7 @@ app.post('/api/developer-sales-notification', async (req, res) => {
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const currentDrawDateStr = configuracion.fecha_sorteo;
-        const ventasParaFechaSorteo = ventas.filter(venta =>
+        const ventasParaFechaSorteo = ventas.filter(venta => // Lee del archivo local
             venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
         );
         const totalVentas = ventasParaFechaSorteo.length;
@@ -1875,6 +1974,71 @@ app.post('/api/developer-sales-notification', async (req, res) => {
 });
 
 
+// Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
+app.post('/api/admin/limpiar-datos', async (req, res) => {
+    try {
+        // Limpia los datos en memoria y en archivos
+        ventas = [];
+        premios = [];
+        horariosZulia = [];
+        historialSorteos = [];
+        numeros = Array.from({ length: 1000 }, (_, i) => ({
+            numero: String(i).padStart(3, '0'),
+            comprado: false,
+            originalDrawNumber: 0
+        }));
+        await writeJsonFile(VENTAS_FILE, ventas); // Limpia el archivo local de ventas
+        await writeJsonFile(NUMEROS_FILE, numeros);
+        await writeJsonFile(PREMIOS_FILE, premios);
+        await writeJsonFile(HORARIOS_ZULIA_FILE, horariosZulia);
+        await writeJsonFile(GANADORES_FILE, ganadoresSorteos); // Limpia el archivo local de ganadores
+
+        // <-- CAMBIO INTEGRADO: Limpia la colección de ventas de Firestore
+        if (db) {
+            const ventasRef = db.collection('ventas_sorteo');
+            const snapshot = await ventasRef.get();
+            const batch = db.batch();
+            snapshot.docs.forEach(doc => {
+                batch.delete(doc.ref);
+            });
+            await batch.commit();
+            console.log('DEBUG_BACKEND: Colección de ventas de Firestore limpiada.');
+        } else {
+            console.warn('Firestore no está inicializado, no se pudo limpiar la colección de ventas.');
+        }
+        // --- FIN CAMBIO INTEGRADO ---
+
+        res.status(200).json({ success: true, message: 'Todos los datos de ventas, números y premios han sido limpiados.' });
+    } catch (error) {
+        console.error('Error al limpiar los datos:', error);
+        res.status(500).json({ success: false, message: 'Error interno del servidor al limpiar los datos.' });
+    }
+});
+
+
+// Tareas programadas (Cron Jobs)
+// ... (El resto de tus cron jobs y lógica permanece sin cambios) ...
+
+// --- Tarea programada para verificación de sorteo (Cron Job Real) ---
+// Se ejecuta cada día a las 12:15 PM (hora de Caracas)
+cron.schedule('15 12 * * *', async () => {
+    console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
+    // Llama a la función cerrarSorteoManualmente con el momento actual real
+    const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
+    console.log(`CRON JOB Resultado: ${cronResult.message}`);
+}, {
+    timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
+});
+// --- FIN TAREA PROGRAMADA ---
+
+// --- Tarea programada para Notificación de ventas por WhatsApp y Email (cada 55 minutos) ---
+cron.schedule('*/55 * * * *', async () => { // Cambiado a cada 55 minutos
+    console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp y Email.');
+    await sendSalesSummaryNotifications(); // Llama a la función que ahora envía ambos
+});
+// --- FIN TAREA PROGRAMADA ---
+
+
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
     loadInitialData().then(() => {
@@ -1883,24 +2047,6 @@ ensureDataAndComprobantesDirs().then(() => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
 
-            // --- Tarea programada para verificación de sorteo (Cron Job Real) ---
-            // Se ejecuta cada día a las 12:15 PM (hora de Caracas)
-            cron.schedule('15 12 * * *', async () => {
-                console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
-                // Llama a la función cerrarSorteoManualmente con el momento actual real
-                const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
-                console.log(`CRON JOB Resultado: ${cronResult.message}`);
-            }, {
-                timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
-            });
-            // --- FIN TAREA PROGRAMADA ---
-
-            // --- Tarea programada para Notificación de ventas por WhatsApp y Email (cada 55 minutos) ---
-            cron.schedule('*/55 * * * *', async () => { // Cambiado a cada 55 minutos
-                console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp y Email.');
-                await sendSalesSummaryNotifications(); // Llama a la función que ahora envía ambos
-            });
-            // --- FIN TAREA PROGRAMADA ---
         });
     });
 }).catch(err => {
