@@ -1413,7 +1413,7 @@ app.post('/api/notify-winner', async (req, res) => {
 
         const whatsappMessage = encodeURIComponent(
             `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
-            `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
+            `¡Tu ticket ha sido *GANADOR* en el sorteo! �\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
             `*Números Jugados:* ${formattedPurchasedNumbers}\n` +
@@ -1600,13 +1600,13 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 });
 
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
-async function liberateOldReservedNumbers(currentDrawCorrelative) {
-    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
+async function liberateOldReservedNumbers(currentDrawCorrelativo) {
+    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
     
     // Leer los números más recientes de Firestore para asegurar la precisión
     const numbersToLiberateSnapshot = await db.collection('raffle_numbers')
                                               .where('comprado', '==', true)
-                                              .where('originalDrawNumber', '<', currentDrawCorrelative - 1) // Liberar si originalDrawNumber es al menos 2 sorteos atrás
+                                              .where('originalDrawNumber', '<', currentDrawCorrelativo - 1) // Liberar si originalDrawNumber es al menos 2 sorteos atrás
                                               .get();
     const batch = db.batch();
     let changedCount = 0;
@@ -1615,7 +1615,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative) {
         const numRef = db.collection('raffle_numbers').doc(doc.id); // El ID del documento es el número
         batch.update(numRef, { comprado: false, originalDrawNumber: null });
         changedCount++;
-        console.log(`Número ${doc.id} liberado en Firestore. Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
+        console.log(`Número ${doc.id} liberado en Firestore. Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
     });
 
     if (changedCount > 0) {
@@ -2133,15 +2133,18 @@ cron.schedule('*/55 * * * *', async () => {
 });
 
 // Inicialización del servidor
-ensureDataAndComprobantesDirs().then(() => {
-    loadInitialData().then(() => { // Asegura que los datos se carguen desde Firestore antes de configurar el mailer y escuchar
+// Envuelve la lógica de inicialización en una IIFE asíncrona para permitir el uso de 'await'
+(async () => {
+    try {
+        await ensureDataAndComprobantesDirs();
+        await loadInitialData(); // Asegura que los datos se carguen desde Firestore antes de configurar el mailer y escuchar
         configureMailer(); // Configura el mailer con la configuración cargada
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
         });
-    });
-}).catch(err => {
-    console.error('Failed to initialize data and start server:', err);
-    process.exit(1);
-});
+    } catch (err) {
+        console.error('Failed to initialize data and start server:', err);
+        process.exit(1);
+    }
+})();
