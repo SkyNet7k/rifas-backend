@@ -1565,7 +1565,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros
         if (numObj.comprado && numObj.originalDrawNumber !== null) {
             // Si el correlativo actual es 2 o más que el correlativo original de compra
             // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
-            if (currentDrawCorrelative >= (numObj.originalDrawNumber + 2)) {
+            if (currentDrawCorrelativo >= (numObj.originalDrawNumber + 2)) {
                 numObj.comprado = false;
                 numObj.originalDrawNumber = null;
                 changed = true;
