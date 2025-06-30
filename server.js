@@ -39,9 +39,7 @@ const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
 let configuracion = {};
 let numeros = []; // Caché de los 1000 números de la rifa (estado comprado/no comprado)
 let horariosZulia = { zulia: [], chance: [] };
-// NOTA: 'ventas', 'resultadosSorteo' y 'ganadoresSorteos' NO se cargan al inicio
-// porque pueden ser colecciones muy grandes y agotar la cuota de Firestore.
-// Se leerán directamente de Firestore cuando se necesiten.
+let premios = {}; // Caché para los premios
 
 let db; // Instancia de Firestore
 
@@ -207,7 +205,7 @@ async function loadInitialData() {
             configuracion = configDoc;
         }
 
-        // Cargar números (colección de 1000 documentos, pero se carga una vez)
+        // Cargar números (solo si la colección está vacía, no se carga en caché de memoria si ya existe)
         let numerosSnapshot = await db.collection('raffle_numbers').get();
         if (numerosSnapshot.empty) {
             console.warn('Colección de números de rifa vacía. Inicializando con 1000 números por defecto.');
@@ -218,13 +216,18 @@ async function loadInitialData() {
                 batch.set(numRef, { numero: numStr, comprado: false, originalDrawNumber: null });
             }
             await batch.commit();
+            // Si se inicializa, la caché en memoria se llena.
             numeros = Array.from({ length: 1000 }, (_, i) => ({
                 numero: i.toString().padStart(3, '0'),
                 comprado: false,
                 originalDrawNumber: null
             }));
         } else {
-            numeros = numerosSnapshot.docs.map(doc => doc.data());
+            // Si la colección de números ya existe, NO la cargamos toda en memoria al inicio.
+            // La caché 'numeros' se mantendrá vacía o se actualizará solo con escrituras.
+            // Las lecturas del estado de los números se harán directamente a Firestore cuando sea necesario (ej. en la compra).
+            console.log('Colección de números de rifa ya existe. No se cargan todos los números en memoria al inicio.');
+            numeros = []; // Asegurarse de que la caché esté vacía o se maneje por demanda.
         }
 
         // Cargar horarios (documento único y pequeño)
@@ -253,7 +256,7 @@ async function loadInitialData() {
         // NOTA IMPORTANTE: Las colecciones 'sales', 'draw_results' y 'winners'
         // NO se cargan aquí al inicio, ya que pueden ser muy grandes y agotar la cuota.
         // Se leerán directamente de Firestore en los endpoints que las requieran.
-        console.log('Datos iniciales (configuración, números, horarios, premios) cargados desde Firestore y en caché.');
+        console.log('Datos iniciales (configuración, horarios, premios) cargados desde Firestore y en caché. Números de rifa manejados de forma optimizada.');
     } catch (error) {
         console.error('Error al cargar datos iniciales desde Firestore:', error);
         // Si hay un error crítico al cargar, es mejor salir o tener un fallback seguro
@@ -478,11 +481,21 @@ app.put('/api/configuracion', async (req, res) => {
 });
 
 
-// Obtener estado de los números
-app.get('/api/numeros', (req, res) => {
-    // Usa la caché en memoria. `numeros` se carga al inicio y se actualiza en escrituras.
-    console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde caché.');
-    res.json(numeros);
+// Obtener estado de los números (AHORA LEE DIRECTAMENTE DE FIRESTORE)
+app.get('/api/numeros', async (req, res) => {
+    // Para asegurar la información más reciente, leer directamente de Firestore.
+    // La caché 'numeros' ya no se carga completamente al inicio.
+    try {
+        const numbersSnapshot = await db.collection('raffle_numbers').get();
+        const currentNumerosFirestore = numbersSnapshot.docs.map(doc => doc.data());
+        // Opcional: actualizar la caché 'numeros' aquí si se va a usar en otras partes del backend
+        // numeros = currentNumerosFirestore;
+        console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde Firestore.');
+        res.json(currentNumerosFirestore);
+    } catch (error) {
+        console.error('Error al obtener números desde Firestore:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener números.', error: error.message });
+    }
 });
 
 // Actualizar estado de los números (usado internamente o por admin)
@@ -495,7 +508,9 @@ app.post('/api/numeros', async (req, res) => {
             batch.set(numRef, num, { merge: true }); // Merge para no sobrescribir si hay campos adicionales
         });
         await batch.commit();
-        numeros = updatedNumbers; // Actualizar la caché en memoria
+        // Si se actualizan, la caché 'numeros' en memoria se actualiza.
+        // Esto es útil si otras operaciones inmediatas en el mismo servidor necesitan el estado actualizado.
+        numeros = updatedNumbers;
         console.log('DEBUG_BACKEND: Números actualizados en Firestore y en caché.');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
@@ -538,18 +553,19 @@ app.post('/api/comprar', async (req, res) => {
         return res.status(400).json({ message: 'Faltan datos requeridos para la compra (números, valor, método de pago, comprador, teléfono, hora del sorteo).' });
     }
 
-    // Leer la configuración y los números más recientes directamente de Firestore para la operación de compra
-    // Esto es CRÍTICO para asegurar la consistencia y evitar que se vendan números ya comprados.
+    // Leer la configuración más reciente directamente de Firestore para la operación de compra
     const currentConfig = await readFirestoreDoc('app_config', 'main_config');
     if (!currentConfig) {
         return res.status(500).json({ message: 'Error: Configuración de la aplicación no disponible.' });
     }
     configuracion = currentConfig; // Actualizar la caché global `configuracion`
 
-    const numbersSnapshot = await db.collection('raffle_numbers').get();
-    const currentNumerosFirestore = numbersSnapshot.docs.map(doc => doc.data());
-    numeros = currentNumerosFirestore; // Actualizar la caché global `numeros`
-
+    // --- OPTIMIZACIÓN CLAVE AQUÍ: Leer solo los números seleccionados ---
+    // Esto es CRÍTICO para asegurar la consistencia y evitar que se vendan números ya comprados.
+    const selectedNumbersSnapshot = await db.collection('raffle_numbers')
+                                            .where('numero', 'in', numerosSeleccionados)
+                                            .get();
+    const currentSelectedNumbersFirestore = selectedNumbersSnapshot.docs.map(doc => doc.data());
 
     // Verificar si la página está bloqueada
     if (configuracion.pagina_bloqueada) {
@@ -558,9 +574,9 @@ app.post('/api/comprar', async (req, res) => {
     }
 
     try {
-        // Verificar si los números ya están comprados (usando `numeros` que ahora está actualizado de Firestore)
+        // Verificar si los números ya están comprados (usando solo los números seleccionados de Firestore)
         const conflictos = numerosSeleccionados.filter(n =>
-            numeros.find(numObj => numObj.numero === n && numObj.comprado)
+            currentSelectedNumbersFirestore.find(numObj => numObj.numero === n && numObj.comprado)
         );
 
         if (conflictos.length > 0) {
@@ -576,15 +592,19 @@ app.post('/api/comprar', async (req, res) => {
                 comprado: true,
                 originalDrawNumber: configuracion.numero_sorteo_correlativo
             });
-            // Actualizar también la caché en memoria para consistencia inmediata
-            const numObj = numeros.find(n => n.numero === numSel);
-            if (numObj) {
-                numObj.comprado = true;
-                numObj.originalDrawNumber = configuracion.numero_sorteo_correlativo;
+            // Actualizar también la caché en memoria 'numeros' si se usa en otras partes del backend
+            // Aunque no se carga al inicio, se puede mantener consistente con las escrituras.
+            const numObjInCache = numeros.find(n => n.numero === numSel);
+            if (numObjInCache) {
+                numObjInCache.comprado = true;
+                numObjInCache.originalDrawNumber = configuracion.numero_sorteo_correlativo;
+            } else {
+                // Si el número no estaba en la caché (porque no se cargó al inicio), añadirlo.
+                numeros.push({ numero: numSel, comprado: true, originalDrawNumber: configuracion.numero_sorteo_correlativo });
             }
         });
         await numbersBatch.commit();
-        console.log('DEBUG_BACKEND: Números actualizados en Firestore y en caché.');
+        console.log('DEBUG_BACKEND: Números actualizados en Firestore y en caché (solo los comprados).');
 
 
         const now = moment().tz("America/Caracas");
@@ -1049,25 +1069,24 @@ app.post('/api/corte-ventas', async (req, res) => {
 
         if (shouldResetNumbers) {
             const currentDrawCorrelativo = parseInt(configuracion.numero_sorteo_correlativo);
-            const numbersSnapshot = await db.collection('raffle_numbers').get();
+            // Leer los números de Firestore para liberar solo los que cumplen la condición
+            const numbersToLiberateSnapshot = await db.collection('raffle_numbers')
+                                                      .where('comprado', '==', true)
+                                                      .where('originalDrawNumber', '<', currentDrawCorrelativo - 1) // Liberar si originalDrawNumber es al menos 2 sorteos atrás
+                                                      .get();
             const batch = db.batch();
             let changedCount = 0;
 
-            numbersSnapshot.docs.forEach(doc => {
-                const numData = doc.data();
-                if (numData.comprado && numData.originalDrawNumber !== null) {
-                    if (currentDrawCorrelativo >= (numData.originalDrawNumber + 2)) { // Si ya pasaron 2 sorteos desde la compra
-                        const numRef = db.collection('raffle_numbers').doc(doc.id);
-                        batch.update(numRef, { comprado: false, originalDrawNumber: null });
-                        changedCount++;
-                        console.log(`Número ${numData.numero} liberado en Firestore. Comprado originalmente para sorteo ${numData.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
-                    }
-                }
+            numbersToLiberateSnapshot.docs.forEach(doc => {
+                const numRef = db.collection('raffle_numbers').doc(doc.id);
+                batch.update(numRef, { comprado: false, originalDrawNumber: null });
+                changedCount++;
+                console.log(`Número ${doc.id} liberado en Firestore. Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
             });
 
             if (changedCount > 0) {
                 await batch.commit();
-                numeros = await readFirestoreCollection('raffle_numbers'); // Actualizar caché
+                // No es necesario recargar la caché 'numeros' global aquí, ya que se lee por demanda.
                 console.log(`Se liberaron ${changedCount} números antiguos en Firestore.`);
             } else {
                 console.log('No hay números antiguos para liberar en Firestore en este momento.');
@@ -1208,7 +1227,7 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
                     batch.update(numRef, { comprado: false, originalDrawNumber: null });
                 });
                 await batch.commit();
-                numeros = await readFirestoreCollection('raffle_numbers'); // Actualizar caché
+                // No es necesario recargar la caché 'numeros' global aquí, ya que se lee por demanda.
                 console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles en Firestore.`);
             }
         }
@@ -1585,27 +1604,23 @@ async function liberateOldReservedNumbers(currentDrawCorrelative) {
     console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
     
     // Leer los números más recientes de Firestore para asegurar la precisión
-    const numbersSnapshot = await db.collection('raffle_numbers').get();
+    const numbersToLiberateSnapshot = await db.collection('raffle_numbers')
+                                              .where('comprado', '==', true)
+                                              .where('originalDrawNumber', '<', currentDrawCorrelative - 1) // Liberar si originalDrawNumber es al menos 2 sorteos atrás
+                                              .get();
     const batch = db.batch();
     let changedCount = 0;
 
-    numbersSnapshot.docs.forEach(doc => {
-        const numData = doc.data();
-        if (numData.comprado && numData.originalDrawNumber !== null) {
-            // Si el correlativo actual es 2 o más que el correlativo original de compra
-            // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
-            if (currentDrawCorrelativo >= (numData.originalDrawNumber + 2)) {
-                const numRef = db.collection('raffle_numbers').doc(doc.id); // El ID del documento es el número
-                batch.update(numRef, { comprado: false, originalDrawNumber: null });
-                changedCount++;
-                console.log(`Número ${numData.numero} liberado en Firestore. Comprado originalmente para sorteo ${numData.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
-            }
-        }
+    numbersToLiberateSnapshot.docs.forEach(doc => {
+        const numRef = db.collection('raffle_numbers').doc(doc.id); // El ID del documento es el número
+        batch.update(numRef, { comprado: false, originalDrawNumber: null });
+        changedCount++;
+        console.log(`Número ${doc.id} liberado en Firestore. Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
     });
 
     if (changedCount > 0) {
         await batch.commit();
-        numeros = await readFirestoreCollection('raffle_numbers'); // Actualizar caché global `numeros`
+        // No es necesario recargar la caché 'numeros' global aquí, ya que se lee por demanda.
         console.log(`[liberateOldReservedNumbers] Se liberaron ${changedCount} números antiguos en Firestore.`);
     } else {
         console.log('[liberateOldReservedNumbers] No hay números antiguos para liberar en Firestore en este momento.');
