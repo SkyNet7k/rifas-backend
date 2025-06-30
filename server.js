@@ -29,16 +29,17 @@ app.use(fileUpload());
 const CARACAS_TIMEZONE = 'America/Caracas';
 const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
 
-// Rutas a tus archivos JSON (ahora solo para directorios y archivos no críticos/temporales)
-// Los datos principales se manejarán en Firestore
+// Rutas a tus archivos locales (solo para directorios y archivos no críticos/temporales)
 const UPLOADS_DIR = path.join(__dirname, 'uploads'); // Para comprobantes
 const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
 
 // --- Variables globales en memoria (serán la caché de Firestore) ---
+// Estas variables se cargarán UNA VEZ al inicio del servidor y se actualizarán
+// solo cuando se realicen escrituras a Firestore.
 let configuracion = {};
 let numeros = [];
 let horariosZulia = { zulia: [], chance: [] };
-let ventas = []; // Esto será un caché de las ventas de Firestore para operaciones específicas
+let ventas = []; // Esta caché se usará para operaciones que necesiten todas las ventas (ej. reportes)
 let resultadosSorteo = [];
 let premios = {};
 let ganadoresSorteos = [];
@@ -168,7 +169,7 @@ async function ensureDataAndComprobantesDirs() {
     }
 }
 
-// Carga inicial de datos desde Firestore
+// Carga inicial de datos desde Firestore (SE EJECUTA SOLO UNA VEZ AL INICIO DEL SERVIDOR)
 async function loadInitialData() {
     console.log('Iniciando carga inicial de datos desde Firestore...');
     try {
@@ -236,11 +237,13 @@ async function loadInitialData() {
             horariosZulia = horariosDoc;
         }
 
-        // Cargar ventas (solo para caché, las operaciones principales usan directas)
+        // Cargar ventas (para caché si se necesita la lista completa en alguna operación)
+        // Nota: Para operaciones de lectura de ventas en el frontend, se recomienda hacer query directo
         ventas = await readFirestoreCollection('sales');
-        // Cargar comprobantes (no se usa como colección separada, voucherURL está en ventas)
+        
         // Cargar resultados de sorteo
         resultadosSorteo = await readFirestoreCollection('draw_results');
+        
         // Cargar premios
         let premiosDoc = await readFirestoreDoc('prizes', 'daily_prizes');
         if (!premiosDoc) {
@@ -250,6 +253,7 @@ async function loadInitialData() {
         } else {
             premios = premiosDoc;
         }
+        
         // Cargar ganadores
         ganadoresSorteos = await readFirestoreCollection('winners');
 
@@ -345,7 +349,9 @@ async function sendWhatsappNotification(messageText) {
 
 // Función auxiliar para enviar notificación de resumen de ventas (WhatsApp y Email)
 async function sendSalesSummaryNotifications() {
-    await loadInitialData(); // Asegura que la configuración y ventas estén al día desde Firestore
+    // No llamar a loadInitialData aquí para evitar lecturas excesivas.
+    // Asumimos que `configuracion` ya está cargada y actualizada por el cron job o un endpoint.
+    console.log('[sendSalesSummaryNotifications] Iniciando notificación de resumen de ventas.');
     const now = moment().tz(CARACAS_TIMEZONE);
 
     // Obtener ventas directamente de Firestore para la fecha del sorteo actual
@@ -378,8 +384,8 @@ async function sendSalesSummaryNotifications() {
             const emailSubject = `Reporte de Ventas Periódico - ${now.format('YYYY-MM-DD HH:mm')}`;
             const emailHtmlContent = `
                 <p>Se ha generado un reporte de ventas periódico para el sorteo del día <strong>${configuracion.fecha_sorteo}</strong>.</p>
-                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + venta.valueUSD, 0).toFixed(2)}</p>
-                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + venta.valueBs, 0).toFixed(2)}</p>
+                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0).toFixed(2)}</p>
+                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + (venta.valueBs || 0), 0).toFixed(2)}</p>
                 <p><b>Porcentaje de Tickets Vendidos:</b> ${soldPercentage.toFixed(2)}%</p>
                 <p>Adjunto encontrarás el detalle completo en formato Excel.</p>
                 <p>Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
@@ -420,7 +426,7 @@ app.use(cors({
 
 // Obtener configuración
 app.get('/api/configuracion', async (req, res) => {
-    await loadInitialData(); // Asegura que la configuración esté actualizada desde Firestore
+    // Usa la caché en memoria, que se carga al inicio y se actualiza en escrituras
     const configToSend = { ...configuracion };
     delete configToSend.mail_config; // No enviar credenciales sensibles
     res.json(configToSend);
@@ -430,7 +436,7 @@ app.get('/api/configuracion', async (req, res) => {
 app.put('/api/configuracion', async (req, res) => {
     const newConfig = req.body;
     try {
-        // Cargar la última configuración de Firestore antes de actualizar
+        // Leer la configuración más reciente de Firestore para asegurar consistencia
         let currentConfig = await readFirestoreDoc('app_config', 'main_config');
         if (!currentConfig) {
             return res.status(500).json({ message: 'Error: Configuración no encontrada en la base de datos.' });
@@ -472,8 +478,11 @@ app.put('/api/configuracion', async (req, res) => {
 
 // Obtener estado de los números
 app.get('/api/numeros', async (req, res) => {
-    console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros.');
-    numeros = await readFirestoreCollection('raffle_numbers'); // Recargar números para la última versión
+    // Usa la caché en memoria. Si se necesita la última versión, se puede recargar.
+    // Para una app de rifas, la caché es probablemente suficiente para el frontend.
+    // Si el panel de admin necesita la última al instante, descomentar la línea de abajo:
+    // numeros = await readFirestoreCollection('raffle_numbers');
+    console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde caché.');
     res.json(numeros);
 });
 
@@ -483,12 +492,12 @@ app.post('/api/numeros', async (req, res) => {
     try {
         const batch = db.batch();
         updatedNumbers.forEach(num => {
-            const numRef = db.collection('raffle_numbers').doc(num.numero);
+            const numRef = db.collection('raffle_numbers').doc(num.numero); // Usar el número como ID del documento
             batch.set(numRef, num, { merge: true }); // Merge para no sobrescribir si hay campos adicionales
         });
         await batch.commit();
         numeros = updatedNumbers; // Actualizar la caché en memoria
-        console.log('DEBUG_BACKEND: Números actualizados en Firestore.');
+        console.log('DEBUG_BACKEND: Números actualizados en Firestore y en caché.');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
         console.error('Error al actualizar números en Firestore:', error);
@@ -499,7 +508,9 @@ app.post('/api/numeros', async (req, res) => {
 // Ruta para obtener ventas (ahora desde Firestore)
 app.get('/api/ventas', async (req, res) => {
     try {
+        // Para el panel de administración, siempre leer la última versión de ventas
         const currentVentas = await readFirestoreCollection('sales');
+        ventas = currentVentas; // Actualizar la caché global
         console.log('Enviando ventas al frontend desde Firestore:', currentVentas.length, 'ventas.');
         res.status(200).json(currentVentas);
     } catch (error) {
@@ -528,8 +539,20 @@ app.post('/api/comprar', async (req, res) => {
         return res.status(400).json({ message: 'Faltan datos requeridos para la compra (números, valor, método de pago, comprador, teléfono, hora del sorteo).' });
     }
 
-    // Recargar configuración y números para la última versión desde Firestore
-    await loadInitialData(); // Esto actualizará `configuracion` y `numeros` en memoria
+    // Leer la configuración y los números más recientes directamente de Firestore para la operación de compra
+    const currentConfig = await readFirestoreDoc('app_config', 'main_config');
+    if (!currentConfig) {
+        return res.status(500).json({ message: 'Error: Configuración de la aplicación no disponible.' });
+    }
+    // Actualizar la caché global `configuracion` con la última versión de Firestore
+    configuracion = currentConfig;
+
+    // Leer los números más recientes directamente de Firestore
+    const numbersSnapshot = await db.collection('raffle_numbers').get();
+    const currentNumerosFirestore = numbersSnapshot.docs.map(doc => doc.data());
+    // Actualizar la caché global `numeros` con la última versión de Firestore
+    numeros = currentNumerosFirestore;
+
 
     // Verificar si la página está bloqueada
     if (configuracion.pagina_bloqueada) {
@@ -538,7 +561,7 @@ app.post('/api/comprar', async (req, res) => {
     }
 
     try {
-        // Verificar si los números ya están comprados (usando la caché 'numeros' actualizada)
+        // Verificar si los números ya están comprados (usando `numeros` que ahora está actualizado de Firestore)
         const conflictos = numerosSeleccionados.filter(n =>
             numeros.find(numObj => numObj.numero === n && numObj.comprado)
         );
@@ -551,7 +574,7 @@ app.post('/api/comprar', async (req, res) => {
         // Preparar batch para actualizar números en Firestore
         const numbersBatch = db.batch();
         numerosSeleccionados.forEach(numSel => {
-            const numRef = db.collection('raffle_numbers').doc(numSel);
+            const numRef = db.collection('raffle_numbers').doc(numSel); // Usar el número como ID del documento
             numbersBatch.update(numRef, {
                 comprado: true,
                 originalDrawNumber: configuracion.numero_sorteo_correlativo
@@ -572,7 +595,7 @@ app.post('/api/comprar', async (req, res) => {
         const numeroTicket = configuracion.ultimo_numero_ticket.toString().padStart(5, '0');
 
         const nuevaVenta = {
-            id: Date.now(), // Usar un timestamp como ID inicial, Firestore generará su propio ID de documento
+            id: Date.now(), // Usar un timestamp como ID inicial para el frontend, Firestore generará su propio ID de documento
             purchaseDate: now.toISOString(),
             drawDate: configuracion.fecha_sorteo,
             drawTime: horaSorteo,
@@ -590,11 +613,9 @@ app.post('/api/comprar', async (req, res) => {
         };
 
         // Guardar la nueva venta en Firestore
-        const docId = await addFirestoreDoc('sales', nuevaVenta);
-        if (!docId) {
-            throw new Error('Fallo al guardar la venta en Firestore.');
-        }
-        nuevaVenta.firestoreId = docId; // Añadir el ID de Firestore al objeto en memoria
+        const docRef = await db.collection('sales').add(nuevaVenta);
+        nuevaVenta.firestoreId = docRef.id; // Añadir el ID de Firestore al objeto en memoria
+        console.log('DEBUG_BACKEND: Venta guardada en Firestore con ID:', docRef.id);
 
         // Actualizar la configuración en Firestore (para ultimo_numero_ticket)
         await writeFirestoreDoc('app_config', 'main_config', {
@@ -611,7 +632,10 @@ app.post('/api/comprar', async (req, res) => {
 
         // Lógica para Notificación de Ventas por Umbral (Resumen)
         try {
-            await loadInitialData(); // Recargar la configuración para el contador más reciente
+            // Recargar la configuración para el contador más reciente (siempre desde Firestore para esta lógica)
+            const latestConfig = await readFirestoreDoc('app_config', 'main_config');
+            configuracion = latestConfig; // Actualizar caché global
+
             const salesSnapshot = await db.collection('sales').where('drawDate', '==', configuracion.fecha_sorteo).get();
             const currentTotalSales = salesSnapshot.docs
                 .map(doc => doc.data())
@@ -647,7 +671,7 @@ app.post('/api/comprar', async (req, res) => {
 
 // Subir comprobante de pago
 app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
-    const ventaId = parseInt(req.params.ventaId); // Este es el ID timestamp de la venta, no el firestoreId
+    const ventaId = parseInt(req.params.ventaId); // Este es el ID timestamp de la venta, usado para buscar
     if (!req.files || Object.keys(req.files).length === 0) {
         return res.status(400).json({ message: 'No se subió ningún archivo.' });
     }
@@ -679,9 +703,6 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         // Actualiza la URL del voucher en la venta en Firestore
         await writeFirestoreDoc('sales', firestoreVentaId, { voucherURL: `/uploads/${fileName}` });
         console.log(`Voucher URL actualizado en Firestore para venta ${firestoreVentaId}.`);
-
-        // No es necesario mantener un archivo de comprobantes.json separado si la URL está en la venta.
-        // `comprobantes` global variable and `COMPROBANTES_FILE` are now effectively deprecated for primary use.
 
         // Envío de correo electrónico con el comprobante adjunto
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
@@ -724,7 +745,7 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 // Endpoint para obtener horarios de Zulia (y Chance)
 app.get('/api/horarios-zulia', async (req, res) => {
-    horariosZulia = await readFirestoreDoc('lottery_times', 'zulia_chance'); // Recargar horarios para la última versión
+    // Usa la caché en memoria.
     res.json(horariosZulia);
 });
 
@@ -776,7 +797,8 @@ app.get('/api/resultados-zulia', async (req, res) => {
 
 // Endpoint para obtener los últimos resultados del sorteo
 app.get('/api/resultados-sorteo', async (req, res) => {
-    resultadosSorteo = await readFirestoreCollection('draw_results'); // Recargar resultados
+    // Usa la caché en memoria. Si se necesita la última versión, se puede recargar.
+    // resultadosSorteo = await readFirestoreCollection('draw_results');
     res.json(resultadosSorteo);
 });
 
@@ -840,7 +862,7 @@ app.post('/api/resultados-sorteo', async (req, res) => {
  */
 async function generateGenericSalesExcelReport(salesData, config, reportTitle, fileNamePrefix) {
     console.log(`[DEBUG_EXCEL] Iniciando generateGenericSalesExcelReport para: ${reportTitle}`);
-    console.log(`[DEBUG_EXCEL] salesData recibida (${salesData.length} items):`, JSON.stringify(salesData, null, 2));
+    console.log(`[DEBUG_EXCEL] salesData recibida (${salesData.length} items):`, JSON.stringify(salesData.slice(0, 5), null, 2), `... (total: ${salesData.length} items)`); // Limitar log
 
     const now = moment().tz(CARACAS_TIMEZONE);
     const todayFormatted = now.format('YYYY-MM-DD');
@@ -869,7 +891,8 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     worksheet.addRow({});
 
     const ventasHeaders = [
-        { header: 'ID Interno Venta', key: 'id', width: 20 },
+        { header: 'ID Interno Venta', key: 'id', width: 20 }, // Este es el ID timestamp
+        { header: 'ID Firestore', key: 'firestoreId', width: 25 }, // Nuevo: ID de Firestore
         { header: 'Fecha/Hora Compra', key: 'purchaseDate', width: 25 },
         { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
         { header: 'Hora Sorteo', key: 'drawTime', width: 15 },
@@ -892,9 +915,10 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     worksheet.addRow(ventasHeaders.map(h => h.header));
 
     salesData.forEach((venta, index) => {
-        console.log(`[DEBUG_EXCEL] Procesando venta #${index}:`, JSON.stringify(venta, null, 2));
+        // console.log(`[DEBUG_EXCEL] Procesando venta #${index}:`, JSON.stringify(venta, null, 2)); // Descomentar para depurar cada venta
         worksheet.addRow({
             id: venta.id,
+            firestoreId: venta.firestoreId || '', // Asegurar que firestoreId se muestre
             purchaseDate: venta.purchaseDate ? moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '',
             drawDate: venta.drawDate || '',
             drawTime: venta.drawTime || 'N/A',
@@ -930,17 +954,19 @@ app.post('/api/corte-ventas', async (req, res) => {
         const now = moment().tz(CARACAS_TIMEZONE);
         const todayFormatted = now.format('YYYY-MM-DD');
 
-        // Recargar ventas y configuración para asegurar los datos más recientes desde Firestore
-        await loadInitialData();
-        console.log('[DEBUG_CORTE_VENTAS] Datos iniciales recargados desde Firestore.');
-        console.log('[DEBUG_CORTE_VENTAS] Configuración actual:', JSON.stringify(configuracion, null, 2));
+        // Recargar configuración para asegurar los datos más recientes desde Firestore
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible.');
+        }
+        console.log('[DEBUG_CORTE_VENTAS] Configuración actual (desde Firestore):', JSON.stringify(configuracion, null, 2));
 
         // Obtener ventas directamente de Firestore para la fecha del sorteo actual
         const salesSnapshot = await db.collection('sales')
                                       .where('drawDate', '==', configuracion.fecha_sorteo)
                                       .get();
         const ventasDelDia = salesSnapshot.docs
-            .map(doc => doc.data())
+            .map(doc => ({ firestoreId: doc.id, ...doc.data() })) // Incluir firestoreId para el reporte
             .filter(venta => venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente');
 
         console.log(`[DEBUG_CORTE_VENTAS] Ventas del día (${configuracion.fecha_sorteo}, Confirmadas/Pendientes) desde Firestore: ${ventasDelDia.length} items.`);
@@ -1020,35 +1046,30 @@ app.post('/api/corte-ventas', async (req, res) => {
 
         if (shouldResetNumbers) {
             const currentDrawCorrelativo = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelativo = currentDrawCorrelativo + 1;
-
             const numbersSnapshot = await db.collection('raffle_numbers').get();
-            const numbersToUpdate = [];
+            const batch = db.batch();
+            let changedCount = 0;
+
             numbersSnapshot.docs.forEach(doc => {
-                const num = doc.data();
-                if (num.comprado && num.originalDrawNumber !== null) {
-                    const numOriginalDrawNumber = parseInt(num.originalDrawNumber);
-                    if (currentDrawCorrelativo >= (numOriginalDrawNumber + 2)) { // Si ya pasaron 2 sorteos desde la compra
-                        numbersToUpdate.push({ docId: doc.id, data: { comprado: false, originalDrawNumber: null } });
+                const numData = doc.data();
+                if (numData.comprado && numData.originalDrawNumber !== null) {
+                    if (currentDrawCorrelativo >= (numData.originalDrawNumber + 2)) { // Si ya pasaron 2 sorteos desde la compra
+                        const numRef = db.collection('raffle_numbers').doc(doc.id);
+                        batch.update(numRef, { comprado: false, originalDrawNumber: null });
+                        changedCount++;
+                        console.log(`Número ${numData.numero} liberado en Firestore. Comprado originalmente para sorteo ${numData.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
                     }
                 }
             });
 
-            if (numbersToUpdate.length > 0) {
-                const batch = db.batch();
-                numbersToUpdate.forEach(item => {
-                    const numRef = db.collection('raffle_numbers').doc(item.docId);
-                    batch.update(numRef, item.data);
-                });
+            if (changedCount > 0) {
                 await batch.commit();
                 numeros = await readFirestoreCollection('raffle_numbers'); // Actualizar caché
-                console.log(`Se liberaron ${numbersToUpdate.length} números antiguos en Firestore.`);
+                console.log(`Se liberaron ${changedCount} números antiguos en Firestore.`);
             } else {
                 console.log('No hay números antiguos para liberar en Firestore en este momento.');
             }
         }
-
-        // No es necesario escribir `ventas` localmente aquí, ya se manejan en Firestore.
 
         res.status(200).json({ message: message });
 
@@ -1071,8 +1092,10 @@ app.get('/api/premios', async (req, res) => {
     const fechaFormateada = moment.tz(fecha, CARACAS_TIMEZONE).format('YYYY-MM-DD');
 
     try {
+        // Leer directamente de Firestore para asegurar los últimos premios
         const premiosDoc = await readFirestoreDoc('prizes', 'daily_prizes');
         const premiosDelDia = premiosDoc && premiosDoc[fechaFormateada] ? premiosDoc[fechaFormateada] : {};
+        premios = premiosDoc || {}; // Actualizar caché global
 
         const premiosParaFrontend = {
             fechaSorteo: fechaFormateada,
@@ -1185,7 +1208,7 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
             if (numerosAnulados && numerosAnulados.length > 0) {
                 const batch = db.batch();
                 numerosAnulados.forEach(numAnulado => {
-                    const numRef = db.collection('raffle_numbers').doc(numAnulado);
+                    const numRef = db.collection('raffle_numbers').doc(numAnulado); // Usar el número como ID del documento
                     batch.update(numRef, { comprado: false, originalDrawNumber: null });
                 });
                 await batch.commit();
@@ -1194,7 +1217,7 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
             }
         }
 
-        // Actualizar la caché de ventas en memoria
+        // Actualizar la caché de ventas en memoria (para el panel de administración)
         ventas = await readFirestoreCollection('sales');
 
         res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${validationStatus}" con éxito.`, venta: { id: ventaId, ...ventaData, validationStatus: validationStatus } });
@@ -1410,6 +1433,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     }
 
     try {
+        // Leer directamente de Firestore para asegurar los datos más recientes
         const allVentasSnapshot = await db.collection('sales').get();
         const allVentas = allVentasSnapshot.docs.map(doc => doc.data());
 
@@ -1455,7 +1479,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
 
                     if (currentCoincidentNumbersForHour.length > 0) {
                         let prizeConfigForHour;
-                        if (r.hora.includes('12:45 PM')) {
+                        if (r.hora.includes('12:45 PM')) { // Asumiendo que estos son los identificadores de hora en tus resultados
                             prizeConfigForHour = premiosDelDia.sorteo12PM;
                         } else if (r.hora.includes('04:45 PM')) {
                             prizeConfigForHour = premiosDelDia.sorteo3PM;
@@ -1476,6 +1500,9 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                 });
 
                 if (coincidentNumbers.length > 0) {
+                    // Asegurarse de que `configuracion.tasa_dolar` esté actualizado
+                    const currentConfig = await readFirestoreDoc('app_config', 'main_config');
+                    configuracion = currentConfig; // Actualizar caché
                     totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar;
                     ticketsGanadoresParaEsteSorteo.push({
                         ticketNumber: venta.ticketNumber,
@@ -1560,8 +1587,9 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
 async function liberateOldReservedNumbers(currentDrawCorrelative) {
-    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
+    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
     
+    // Leer los números más recientes de Firestore
     const numbersSnapshot = await db.collection('raffle_numbers').get();
     const batch = db.batch();
     let changedCount = 0;
@@ -1569,8 +1597,10 @@ async function liberateOldReservedNumbers(currentDrawCorrelative) {
     numbersSnapshot.docs.forEach(doc => {
         const numData = doc.data();
         if (numData.comprado && numData.originalDrawNumber !== null) {
+            // Si el correlativo actual es 2 o más que el correlativo original de compra
+            // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
             if (currentDrawCorrelative >= (numData.originalDrawNumber + 2)) {
-                const numRef = db.collection('raffle_numbers').doc(doc.id);
+                const numRef = db.collection('raffle_numbers').doc(doc.id); // El ID del documento es el número
                 batch.update(numRef, { comprado: false, originalDrawNumber: null });
                 changedCount++;
                 console.log(`Número ${numData.numero} liberado en Firestore. Comprado originalmente para sorteo ${numData.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
@@ -1580,7 +1610,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative) {
 
     if (changedCount > 0) {
         await batch.commit();
-        numeros = await readFirestoreCollection('raffle_numbers'); // Actualizar caché
+        numeros = await readFirestoreCollection('raffle_numbers'); // Actualizar caché global `numeros`
         console.log(`[liberateOldReservedNumbers] Se liberaron ${changedCount} números antiguos en Firestore.`);
     } else {
         console.log('[liberateOldReservedNumbers] No hay números antiguos para liberar en Firestore en este momento.');
@@ -1613,11 +1643,16 @@ async function evaluateDrawStatusOnly(nowMoment) {
     console.log(`[evaluateDrawStatusOnly] Iniciando evaluación de estado de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        await loadInitialData(); // Asegura que la configuración esté actualizada desde Firestore
+        // Asegura que la configuración esté actualizada desde Firestore
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible para evaluación.');
+        }
         let currentConfig = configuracion; // Usar la caché actualizada
 
         const currentDrawDateStr = currentConfig.fecha_sorteo;
 
+        // Obtener ventas directamente de Firestore para la fecha del sorteo actual
         const salesSnapshot = await db.collection('sales')
                                       .where('drawDate', '==', currentDrawDateStr)
                                       .get();
@@ -1717,7 +1752,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
         }
 
         await batch.commit(); // Ejecutar todas las actualizaciones de ventas en un solo batch
-        ventas = await readFirestoreCollection('sales'); // Actualizar la caché de ventas
+        ventas = await readFirestoreCollection('sales'); // Actualizar la caché de ventas (para operaciones que la necesiten)
         console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado en Firestore.');
 
         await sendWhatsappNotification(whatsappMessageContent);
@@ -1752,7 +1787,11 @@ async function cerrarSorteoManualmente(nowMoment) {
     console.log(`[cerrarSorteoManualmente] Iniciando cierre manual de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        await loadInitialData(); // Asegura que `configuracion` esté actualizada desde Firestore
+        // Asegura que `configuracion` esté actualizada desde Firestore
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible para cierre manual.');
+        }
         let currentConfig = configuracion; // Usar la caché actualizada
         
         const currentDrawDateStr = currentConfig.fecha_sorteo;
@@ -1813,7 +1852,11 @@ async function cerrarSorteoManualmente(nowMoment) {
 app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
     console.log('API: Recibida solicitud para cierre manual de sorteo.');
     try {
-        await loadInitialData(); // Asegura que `configuracion` esté actualizada desde Firestore
+        // Asegura que `configuracion` esté actualizada desde Firestore
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible para cierre manual.');
+        }
         const currentDrawDateStr = configuracion.fecha_sorteo;
 
         const simulatedMoment = moment().tz(CARACAS_TIMEZONE);
@@ -1844,7 +1887,11 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
 app.post('/api/suspender-sorteo', async (req, res) => {
     console.log('API: Recibida solicitud para suspender sorteo (evaluación de ventas).');
     try {
-        await loadInitialData(); // Carga los últimos datos desde Firestore
+        // Carga los últimos datos de configuración desde Firestore
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible para suspensión.');
+        }
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const result = await evaluateDrawStatusOnly(now); // Llama a la nueva función de solo evaluación
@@ -1871,7 +1918,11 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     }
 
     try {
-        await loadInitialData(); // Asegura que la configuración y números estén actualizados
+        // Asegura que la configuración esté actualizada
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible para establecer fecha manual.');
+        }
         let currentConfig = configuracion; // Usar la caché
         
         const oldDrawDate = currentConfig.fecha_sorteo;
@@ -1944,7 +1995,11 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 app.post('/api/developer-sales-notification', async (req, res) => {
     console.log('API: Recibida solicitud para notificación de ventas para desarrolladores.');
     try {
-        await loadInitialData(); // Asegura que la configuración esté al día desde Firestore
+        // Asegura que la configuración esté al día desde Firestore
+        configuracion = await readFirestoreDoc('app_config', 'main_config');
+        if (!configuracion) {
+            throw new Error('Configuración de la aplicación no disponible para notificación de desarrolladores.');
+        }
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const currentDrawDateStr = configuracion.fecha_sorteo;
@@ -2009,6 +2064,8 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
         console.log('Números de rifa reiniciados en Firestore.');
 
         // Reiniciar configuración principal en Firestore
+        // Primero, leer la configuración actual para mantener mail_config, whatsapp_numbers, etc.
+        const currentConfig = await readFirestoreDoc('app_config', 'main_config');
         await writeFirestoreDoc('app_config', 'main_config', {
             "precio_ticket": 0.50,
             "tasa_dolar": 36.50,
@@ -2018,11 +2075,11 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
             "pagina_bloqueada": false,
             "block_reason_message": "",
             // Mantener la configuración de correo, WhatsApp y email de reportes
-            "mail_config": configuracion.mail_config,
-            "admin_whatsapp_numbers": configuracion.admin_whatsapp_numbers,
+            "mail_config": currentConfig.mail_config,
+            "admin_whatsapp_numbers": currentConfig.admin_whatsapp_numbers,
             "last_sales_notification_count": 0,
-            "sales_notification_threshold": configuracion.sales_notification_threshold,
-            "admin_email_for_reports": configuracion.admin_email_for_reports,
+            "sales_notification_threshold": currentConfig.sales_notification_threshold,
+            "admin_email_for_reports": currentConfig.admin_email_for_reports,
             "ultima_fecha_resultados_zulia": null
         });
         console.log('Configuración principal reiniciada en Firestore.');
@@ -2039,7 +2096,8 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
         console.log('Premios reiniciados en Firestore.');
 
 
-        await loadInitialData(); // Recargar todas las cachés en memoria desde Firestore
+        // Recargar todas las cachés en memoria desde Firestore después de la limpieza
+        await loadInitialData();
 
         res.status(200).json({ success: true, message: 'Todos los datos en Firestore (ventas, números, resultados, ganadores, premios) han sido limpiados y reiniciados.' });
     } catch (error) {
@@ -2067,7 +2125,7 @@ cron.schedule('*/55 * * * *', async () => {
 // Inicialización del servidor
 ensureDataAndComprobantesDirs().then(() => {
     loadInitialData().then(() => { // Asegura que los datos se carguen desde Firestore antes de configurar el mailer y escuchar
-        configureMailer();
+        configureMailer(); // Configura el mailer con la configuración cargada
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
