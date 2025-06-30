@@ -13,7 +13,6 @@ const moment = require('moment-timezone');
 const archiver = require('archiver');
 const admin = require('firebase-admin'); // <-- CAMBIO INTEGRADO: Agregado para Firebase Admin SDK
 const { v4: uuidv4 } = require('uuid'); // Para generar IDs únicos
-const { generateComprobantePDF } = require('./pdfGenerator'); // Asumiendo que tienes este archivo
 const crypto = require('crypto');
 const { log } = require('console');
 
