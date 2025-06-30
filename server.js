@@ -160,11 +160,11 @@ let ganadoresSorteos = []; // NUEVO: Variable global para almacenar los ganadore
 let db; // <-- CAMBIO INTEGRADO: Declara la variable para la instancia de Firestore
 
 // --- CONSTANTES PARA LA LÓGICA DE CIERRE MANUAL DEL SORTEO ---
+// Se eliminó la declaración duplicada de CARACAS_TIMEZONE
 const SALES_THRESHOLD_PERCENTAGE = 80; // Porcentaje mínimo de ventas para no suspender (80%)
 const DRAW_SUSPENSION_HOUR = 12; // Hora límite para la verificación (12 PM)
 const DRAW_SUSPENSION_MINUTE = 15; // Minuto límite para la verificación (15 minutos, es decir, 12:15 PM)
 const TOTAL_RAFFLE_NUMBERS = 1000; // Número total de boletos disponibles en la rifa (000-999)
-const CARACAS_TIMEZONE = "America/Caracas"; // Zona horaria para operaciones de fecha/hora
 
 
 // Carga inicial de datos
@@ -1363,7 +1363,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` + // Corregido: 🎉🥳🎉 para que no se muestre doble ?
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` + // Corregido: 🎉🥳🎉 para que no se muestre doble ?
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1540,7 +1540,7 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
 async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros) {
-    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
+    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
     let changed = false;
     currentNumeros.forEach(numObj => {
         // Un número está comprado y tiene un correlativo de sorteo original
@@ -1895,7 +1895,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         );
 
         // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
-        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelativo}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
+        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelative}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
         await sendWhatsappNotification(whatsappMessage);
 
         // Enviar notificación por correo electrónico para la reprogramación con adjunto Excel
