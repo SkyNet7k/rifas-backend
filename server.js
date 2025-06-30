@@ -35,11 +35,11 @@ const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
 
 // --- Variables globales en memoria (serán la caché de Firestore) ---
 // Estas variables se cargarán UNA VEZ al inicio del servidor y se actualizarán
-// solo cuando se realicen escrituras a Firestore.
+// solo cuando se realicen escrituras a Firestore o lecturas críticas.
 let configuracion = {};
-let numeros = [];
+let numeros = []; // Caché de los 1000 números
 let horariosZulia = { zulia: [], chance: [] };
-let ventas = []; // Esta caché se usará para operaciones que necesiten todas las ventas (ej. reportes)
+let ventas = []; // Esta caché se usará para operaciones que necesiten todas las ventas (ej. exportación)
 let resultadosSorteo = [];
 let premios = {};
 let ganadoresSorteos = [];
@@ -238,7 +238,6 @@ async function loadInitialData() {
         }
 
         // Cargar ventas (para caché si se necesita la lista completa en alguna operación)
-        // Nota: Para operaciones de lectura de ventas en el frontend, se recomienda hacer query directo
         ventas = await readFirestoreCollection('sales');
         
         // Cargar resultados de sorteo
@@ -349,8 +348,14 @@ async function sendWhatsappNotification(messageText) {
 
 // Función auxiliar para enviar notificación de resumen de ventas (WhatsApp y Email)
 async function sendSalesSummaryNotifications() {
-    // No llamar a loadInitialData aquí para evitar lecturas excesivas.
-    // Asumimos que `configuracion` ya está cargada y actualizada por el cron job o un endpoint.
+    // Para esta función de CRON, necesitamos la configuración y ventas más recientes.
+    // Recargar configuración para asegurar que `last_sales_notification_count` y `sales_notification_threshold` estén al día.
+    configuracion = await readFirestoreDoc('app_config', 'main_config');
+    if (!configuracion) {
+        console.error('No se pudo cargar la configuración para sendSalesSummaryNotifications.');
+        return;
+    }
+
     console.log('[sendSalesSummaryNotifications] Iniciando notificación de resumen de ventas.');
     const now = moment().tz(CARACAS_TIMEZONE);
 
@@ -425,8 +430,9 @@ app.use(cors({
 }));
 
 // Obtener configuración
-app.get('/api/configuracion', async (req, res) => {
-    // Usa la caché en memoria, que se carga al inicio y se actualiza en escrituras
+app.get('/api/configuracion', (req, res) => {
+    // Usa la caché en memoria. Se asume que `configuracion` está actualizada por `loadInitialData`
+    // y por cualquier endpoint que la modifique.
     const configToSend = { ...configuracion };
     delete configToSend.mail_config; // No enviar credenciales sensibles
     res.json(configToSend);
@@ -477,11 +483,8 @@ app.put('/api/configuracion', async (req, res) => {
 
 
 // Obtener estado de los números
-app.get('/api/numeros', async (req, res) => {
-    // Usa la caché en memoria. Si se necesita la última versión, se puede recargar.
-    // Para una app de rifas, la caché es probablemente suficiente para el frontend.
-    // Si el panel de admin necesita la última al instante, descomentar la línea de abajo:
-    // numeros = await readFirestoreCollection('raffle_numbers');
+app.get('/api/numeros', (req, res) => {
+    // Usa la caché en memoria. `numeros` se carga al inicio y se actualiza en escrituras.
     console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde caché.');
     res.json(numeros);
 });
@@ -540,18 +543,16 @@ app.post('/api/comprar', async (req, res) => {
     }
 
     // Leer la configuración y los números más recientes directamente de Firestore para la operación de compra
+    // Esto es CRÍTICO para asegurar la consistencia y evitar que se vendan números ya comprados.
     const currentConfig = await readFirestoreDoc('app_config', 'main_config');
     if (!currentConfig) {
         return res.status(500).json({ message: 'Error: Configuración de la aplicación no disponible.' });
     }
-    // Actualizar la caché global `configuracion` con la última versión de Firestore
-    configuracion = currentConfig;
+    configuracion = currentConfig; // Actualizar la caché global `configuracion`
 
-    // Leer los números más recientes directamente de Firestore
     const numbersSnapshot = await db.collection('raffle_numbers').get();
     const currentNumerosFirestore = numbersSnapshot.docs.map(doc => doc.data());
-    // Actualizar la caché global `numeros` con la última versión de Firestore
-    numeros = currentNumerosFirestore;
+    numeros = currentNumerosFirestore; // Actualizar la caché global `numeros`
 
 
     // Verificar si la página está bloqueada
@@ -744,7 +745,7 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 
 // Endpoint para obtener horarios de Zulia (y Chance)
-app.get('/api/horarios-zulia', async (req, res) => {
+app.get('/api/horarios-zulia', (req, res) => {
     // Usa la caché en memoria.
     res.json(horariosZulia);
 });
@@ -796,9 +797,8 @@ app.get('/api/resultados-zulia', async (req, res) => {
 
 
 // Endpoint para obtener los últimos resultados del sorteo
-app.get('/api/resultados-sorteo', async (req, res) => {
-    // Usa la caché en memoria. Si se necesita la última versión, se puede recargar.
-    // resultadosSorteo = await readFirestoreCollection('draw_results');
+app.get('/api/resultados-sorteo', (req, res) => {
+    // Usa la caché en memoria.
     res.json(resultadosSorteo);
 });
 
@@ -1082,7 +1082,7 @@ app.post('/api/corte-ventas', async (req, res) => {
 
 // --- RUTAS PARA PREMIOS ---
 
-app.get('/api/premios', async (req, res) => {
+app.get('/api/premios', (req, res) => {
     const { fecha } = req.query;
 
     if (!fecha || !moment(fecha, 'YYYY-MM-DD', true).isValid()) {
@@ -1091,25 +1091,17 @@ app.get('/api/premios', async (req, res) => {
 
     const fechaFormateada = moment.tz(fecha, CARACAS_TIMEZONE).format('YYYY-MM-DD');
 
-    try {
-        // Leer directamente de Firestore para asegurar los últimos premios
-        const premiosDoc = await readFirestoreDoc('prizes', 'daily_prizes');
-        const premiosDelDia = premiosDoc && premiosDoc[fechaFormateada] ? premiosDoc[fechaFormateada] : {};
-        premios = premiosDoc || {}; // Actualizar caché global
+    // Usa la caché en memoria para premios
+    const premiosDelDia = premios[fechaFormateada] || {};
 
-        const premiosParaFrontend = {
-            fechaSorteo: fechaFormateada,
-            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
-            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
-            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' }
-        };
+    const premiosParaFrontend = {
+        fechaSorteo: fechaFormateada,
+        sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
+        sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
+        sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' }
+    };
 
-        res.status(200).json(premiosParaFrontend);
-
-    } catch (error) {
-        console.error('Error al obtener premios desde Firestore:', error);
-        res.status(500).json({ message: 'Error interno del servidor al obtener premios.', error: error.message });
-    }
+    res.status(200).json(premiosParaFrontend);
 });
 
 app.post('/api/premios', async (req, res) => {
@@ -1148,6 +1140,7 @@ app.post('/api/premios', async (req, res) => {
 
         await writeFirestoreDoc('prizes', 'daily_prizes', allPremios);
         premios = allPremios; // Actualizar caché
+        console.log('Premios guardados/actualizados en Firestore y caché.');
 
         res.status(200).json({ message: 'Premios guardados/actualizados con éxito.', premiosGuardados: allPremios[fechaFormateada] });
 
@@ -1433,7 +1426,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     }
 
     try {
-        // Leer directamente de Firestore para asegurar los datos más recientes
+        // Leer directamente de Firestore para asegurar los datos más recientes para este proceso crítico
         const allVentasSnapshot = await db.collection('sales').get();
         const allVentas = allVentasSnapshot.docs.map(doc => doc.data());
 
@@ -1557,31 +1550,24 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
 
 
 // GET /api/tickets/ganadores
-app.get('/api/tickets/ganadores', async (req, res) => {
+app.get('/api/tickets/ganadores', (req, res) => {
     const { fecha, numeroSorteo, tipoLoteria } = req.query;
 
     if (!fecha || !numeroSorteo || !tipoLoteria) {
         return res.status(400).json({ message: 'Fecha, número de sorteo y tipo de lotería son requeridos.' });
     }
 
-    try {
-        const winnersSnapshot = await db.collection('winners')
-                                        .where('drawDate', '==', fecha)
-                                        .where('drawNumber', '==', parseInt(numeroSorteo))
-                                        .where('lotteryType', '==', tipoLoteria)
-                                        .limit(1)
-                                        .get();
+    // Usa la caché en memoria para los ganadores
+    const foundEntry = ganadoresSorteos.find(entry =>
+        entry.drawDate === fecha &&
+        entry.drawNumber.toString() === numeroSorteo.toString() &&
+        entry.lotteryType.toLowerCase() === tipoLoteria.toLowerCase()
+    );
 
-        if (!winnersSnapshot.empty) {
-            const foundEntry = winnersSnapshot.docs[0].data();
-            res.status(200).json({ ganadores: foundEntry.winners });
-        } else {
-            res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
-        }
-
-    } catch (error) {
-        console.error('Error al consultar tickets ganadores desde Firestore:', error);
-        res.status(500).json({ message: 'Error interno del servidor al consultar tickets ganadores.', error: error.message });
+    if (foundEntry) {
+        res.status(200).json({ ganadores: foundEntry.winners });
+    } else {
+        res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
     }
 });
 
@@ -1589,7 +1575,7 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 async function liberateOldReservedNumbers(currentDrawCorrelative) {
     console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
     
-    // Leer los números más recientes de Firestore
+    // Leer los números más recientes de Firestore para asegurar la precisión
     const numbersSnapshot = await db.collection('raffle_numbers').get();
     const batch = db.batch();
     let changedCount = 0;
@@ -1599,7 +1585,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative) {
         if (numData.comprado && numData.originalDrawNumber !== null) {
             // Si el correlativo actual es 2 o más que el correlativo original de compra
             // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
-            if (currentDrawCorrelative >= (numData.originalDrawNumber + 2)) {
+            if (currentDrawCorrelativo >= (numData.originalDrawNumber + 2)) {
                 const numRef = db.collection('raffle_numbers').doc(doc.id); // El ID del documento es el número
                 batch.update(numRef, { comprado: false, originalDrawNumber: null });
                 changedCount++;
@@ -1643,7 +1629,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
     console.log(`[evaluateDrawStatusOnly] Iniciando evaluación de estado de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        // Asegura que la configuración esté actualizada desde Firestore
+        // Asegura que la configuración esté actualizada desde Firestore para esta lógica crítica
         configuracion = await readFirestoreDoc('app_config', 'main_config');
         if (!configuracion) {
             throw new Error('Configuración de la aplicación no disponible para evaluación.');
@@ -1787,7 +1773,7 @@ async function cerrarSorteoManualmente(nowMoment) {
     console.log(`[cerrarSorteoManualmente] Iniciando cierre manual de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        // Asegura que `configuracion` esté actualizada desde Firestore
+        // Asegura que `configuracion` esté actualizada desde Firestore para esta lógica crítica
         configuracion = await readFirestoreDoc('app_config', 'main_config');
         if (!configuracion) {
             throw new Error('Configuración de la aplicación no disponible para cierre manual.');
@@ -1852,7 +1838,7 @@ async function cerrarSorteoManualmente(nowMoment) {
 app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
     console.log('API: Recibida solicitud para cierre manual de sorteo.');
     try {
-        // Asegura que `configuracion` esté actualizada desde Firestore
+        // Asegura que `configuracion` esté actualizada desde Firestore para esta lógica crítica
         configuracion = await readFirestoreDoc('app_config', 'main_config');
         if (!configuracion) {
             throw new Error('Configuración de la aplicación no disponible para cierre manual.');
@@ -1860,7 +1846,7 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
         const currentDrawDateStr = configuracion.fecha_sorteo;
 
         const simulatedMoment = moment().tz(CARACAS_TIMEZONE);
-        const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
+        const currentDrawDateMoment = moment.tz(currentDrawDateStr, 'YYYY-MM-DD', CARACAS_TIMEZONE);
 
         if (simulatedMoment.isSame(currentDrawDateMoment, 'day')) {
              simulatedMoment.set({ hour: DRAW_SUSPENSION_HOUR, minute: DRAW_SUSPENSION_MINUTE + 5, second: 0 });
@@ -1887,7 +1873,7 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
 app.post('/api/suspender-sorteo', async (req, res) => {
     console.log('API: Recibida solicitud para suspender sorteo (evaluación de ventas).');
     try {
-        // Carga los últimos datos de configuración desde Firestore
+        // Carga los últimos datos de configuración desde Firestore para esta lógica crítica
         configuracion = await readFirestoreDoc('app_config', 'main_config');
         if (!configuracion) {
             throw new Error('Configuración de la aplicación no disponible para suspensión.');
@@ -1918,7 +1904,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     }
 
     try {
-        // Asegura que la configuración esté actualizada
+        // Asegura que la configuración esté actualizada para esta lógica crítica
         configuracion = await readFirestoreDoc('app_config', 'main_config');
         if (!configuracion) {
             throw new Error('Configuración de la aplicación no disponible para establecer fecha manual.');
@@ -1995,7 +1981,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 app.post('/api/developer-sales-notification', async (req, res) => {
     console.log('API: Recibida solicitud para notificación de ventas para desarrolladores.');
     try {
-        // Asegura que la configuración esté al día desde Firestore
+        // Asegura que la configuración esté al día desde Firestore para esta lógica crítica
         configuracion = await readFirestoreDoc('app_config', 'main_config');
         if (!configuracion) {
             throw new Error('Configuración de la aplicación no disponible para notificación de desarrolladores.');
