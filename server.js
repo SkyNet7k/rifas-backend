@@ -2053,3 +2053,4 @@ ensureDataAndComprobantesDirs().then(() => {
     console.error('Failed to initialize data and start server:', err);
     process.exit(1); // Sale del proceso si la carga inicial de datos falla
 });
+
