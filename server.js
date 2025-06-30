@@ -4,7 +4,7 @@ const express = require('express');
 const fileUpload = require('express-fileupload');
 const fs = require('fs').promises;
 const path = require('path');
-const cors = require('cors');
+const cors = require('cors'); // Asegúrate de que este import está aquí
 const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 const dotenv = require('dotenv');
@@ -21,11 +21,15 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Middleware para parsear JSON y archivos
+app.use(express.json());
+app.use(fileUpload());
+
 // Constantes y configuraciones
 const CARACAS_TIMEZONE = 'America/Caracas';
 const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
 
-// Rutas a tus archivos JSON
+// Rutas a tus archivos JSON (TODOS SE MANTIENEN)
 const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
 const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
 const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json'); // Usado para Zulia y Chance en el frontend
@@ -46,7 +50,6 @@ const DATABASE_FILES = [
     PREMIOS_FILE,
     GANADORES_FILE // Incluir el nuevo archivo de ganadores
 ];
-
 
 // Directorios para guardar comprobantes y reportes
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -163,7 +166,7 @@ let db; // <-- CAMBIO INTEGRADO: Declara la variable para la instancia de Firest
 const SALES_THRESHOLD_PERCENTAGE = 80; // Porcentaje mínimo de ventas para no suspender (80%)
 const DRAW_SUSPENSION_HOUR = 12; // Hora límite para la verificación (12 PM)
 const DRAW_SUSPENSION_MINUTE = 15; // Minuto límite para la verificación (15 minutos, es decir, 12:15 PM)
-const TOTAL_RAFFLE_NUMBERS = 1000; // Número total de boletos disponibles en la rifa (000-999)
+const TOTAL_RAFFLE_NUMBERS = 1000;
 
 
 // Carga inicial de datos
@@ -390,6 +393,20 @@ async function guardarVentaEnFirestore(ventaData) {
 // === ENDPOINTS DE LA API =======================
 // ===============================================
 
+// NUEVA RUTA: Ruta raíz para verificar que el servidor está activo
+app.get('/', (req, res) => {
+    res.status(200).json({ message: 'Servidor de la API de Loterías activo. Accede a las rutas /api/ para interactuar.' });
+});
+
+// Configuración de CORS explícita y exclusiva
+// Este middleware DEBE ir ANTES de cualquier ruta.
+app.use(cors({
+    origin: 'https://paneladmin01.netlify.app', // Tu dominio de Netlify
+    methods: ['GET', 'POST', 'PUT', 'DELETE'], // Métodos HTTP que tu frontend usará
+    allowedHeaders: ['Content-Type', 'Authorization'], // Cabeceras que tu frontend enviará
+    credentials: true // Si tu frontend envía cookies o tokens de autorización
+}));
+
 // Obtener configuración
 app.get('/api/configuracion', async (req, res) => {
     // Asegurarse de no enviar credenciales sensibles
@@ -556,9 +573,11 @@ app.post('/api/comprar', async (req, res) => {
         };
 
         // --- CAMBIO INTEGRADO: Guardar en Firestore ---
+        // Se mantiene la llamada a guardarVentaEnFirestore, pero recuerda que usa una colección de respaldo
         const firestoreSaveResult = await guardarVentaEnFirestore(nuevaVenta);
         if (!firestoreSaveResult.success) {
-            throw new Error(firestoreSaveResult.message);
+            console.warn('Fallo al guardar en Firestore (respaldo). Continuando con JSON local.');
+            // No lanzar un error fatal aquí si no quieres que falle toda la compra por el respaldo
         }
         // --- FIN CAMBIO INTEGRADO ---
         
@@ -991,7 +1010,7 @@ app.post('/api/corte-ventas', async (req, res) => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
                     const numOriginalDrawNumber = parseInt(num.originalDrawNumber);
                     // Si el número está reservado para el sorteo actual o el siguiente, NO lo reseteamos.
-                    if (numOriginalDrawNumber === currentDrawCorrelative || numOriginalDrawNumber === nextDrawCorrelative) {
+                    if (numOriginalDrawNumber === currentDrawCorrelative || numOriginalDrawNumber === nextDrawCorrelativo) {
                         return num; // Mantener este número con su estado actual (comprado: true, originalDrawNumber)
                     }
                 }
@@ -1539,7 +1558,7 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
 async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros) {
-    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
+    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
     let changed = false;
     currentNumeros.forEach(numObj => {
         // Un número está comprado y tiene un correlativo de sorteo original
@@ -1617,9 +1636,12 @@ async function evaluateDrawStatusOnly(nowMoment) {
             updatedVentas = currentTickets.map(venta => {
                 // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como anuladas
                 if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
-                    venta.validationStatus = 'Anulado por bajo porcentaje'; // Nuevo estado
-                    venta.voidedReason = 'Ventas insuficientes para el sorteo';
-                    venta.voidedAt = nowMoment.toISOString();
+                    return {
+                        ...venta,
+                        validationStatus: 'Anulado por bajo porcentaje', // Nuevo estado
+                        voidedReason: 'Ventas insuficientes para el sorteo',
+                        voidedAt: nowMoment.toISOString()
+                    };
                 }
                 return venta;
             });
@@ -1739,7 +1761,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         let currentNumeros = await readJsonFile(NUMEROS_FILE); // Cargar números para actualizar su estado
         
         const currentDrawDateStr = currentConfig.fecha_sorteo;
-        const currentDrawCorrelative = currentConfig.numero_sorteo_correlativo;
+        const currentDrawCorrelativo = currentConfig.numero_sorteo_correlativo;
 
         // Step 1: Evaluate sales status (anular/cerrar sales)
         // This call to evaluateDrawStatusOnly will handle sending the WhatsApp and Email with Excel for the closure/suspension.
@@ -1978,21 +2000,56 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
     try {
         // Limpia los datos en memoria y en archivos
         ventas = [];
-        premios = [];
-        horariosZulia = [];
-        historialSorteos = [];
+        premios = {}; // Se cambia de [] a {} para que coincida con el formato de tu archivo
+        horariosZulia = { zulia: ["12:00 PM", "04:00 PM", "07:00 PM"], chance: ["01:00 PM", "05:00 PM", "08:00 PM"] }; // Reiniciar como objeto
+        // historialSorteos = []; // Esta variable no está declarada globalmente en el archivo provisto
         numeros = Array.from({ length: 1000 }, (_, i) => ({
             numero: String(i).padStart(3, '0'),
             comprado: false,
-            originalDrawNumber: 0
+            originalDrawNumber: null // Se cambia a null para que coincida con la inicialización
         }));
+        ganadoresSorteos = [];
+        resultadosSorteo = [];
+        comprobantes = [];
+
+
         await writeJsonFile(VENTAS_FILE, ventas); // Limpia el archivo local de ventas
         await writeJsonFile(NUMEROS_FILE, numeros);
         await writeJsonFile(PREMIOS_FILE, premios);
         await writeJsonFile(HORARIOS_ZULIA_FILE, horariosZulia);
         await writeJsonFile(GANADORES_FILE, ganadoresSorteos); // Limpia el archivo local de ganadores
+        await writeJsonFile(RESULTADOS_SORTEO_FILE, resultadosSorteo);
+        await writeJsonFile(COMPROBANTES_FILE, comprobantes);
+
+
+        // Reinicia la configuración en el JSON
+        let currentConfig = await readJsonFile(CONFIG_FILE);
+        await writeJsonFile(CONFIG_FILE, {
+            "precio_ticket": 0.50,
+            "tasa_dolar": 36.50, // Valor numérico por defecto
+            "fecha_sorteo": moment().tz("America/Caracas").add(1, 'days').format('YYYY-MM-DD'),
+            "numero_sorteo_correlativo": 1,
+            "ultimo_numero_ticket": 0,
+            "pagina_bloqueada": false,
+            "block_reason_message": "",
+            "mail_config": { // Mantener la configuración de correo
+                "host": "smtp.gmail.com",
+                "port": 465,
+                "secure": true,
+                "user": process.env.EMAIL_USER || "tu_correo@gmail.com",
+                "pass": process.env.EMAIL_PASS || "tu_contraseña_o_app_password",
+                "senderName": "Sistema de Rifas"
+            },
+            "admin_whatsapp_numbers": ["584126083355", "584143630488", "584124723776"], // Mantener números de WhatsApp
+            "last_sales_notification_count": 0,
+            "sales_notification_threshold": 20,
+            "admin_email_for_reports": ["tu_correo@gmail.com"], // Mantener correos de admin
+            "ultima_fecha_resultados_zulia": null
+        });
+        configuracion = await readJsonFile(CONFIG_FILE); // Recarga la configuración actualizada
 
         // <-- CAMBIO INTEGRADO: Limpia la colección de ventas de Firestore
+        // Aunque no se usa para la lógica principal, se mantiene la limpieza por si es un respaldo
         if (db) {
             const ventasRef = db.collection('ventas_sorteo');
             const snapshot = await ventasRef.get();
@@ -2001,13 +2058,13 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
                 batch.delete(doc.ref);
             });
             await batch.commit();
-            console.log('DEBUG_BACKEND: Colección de ventas de Firestore limpiada.');
+            console.log('DEBUG_BACKEND: Colección de ventas de Firestore limpiada (respaldo).');
         } else {
-            console.warn('Firestore no está inicializado, no se pudo limpiar la colección de ventas.');
+            console.warn('Firestore no está inicializado, no se pudo limpiar la colección de ventas (respaldo).');
         }
         // --- FIN CAMBIO INTEGRADO ---
 
-        res.status(200).json({ success: true, message: 'Todos los datos de ventas, números y premios han sido limpiados.' });
+        res.status(200).json({ success: true, message: 'Todos los datos de ventas (JSON y respaldo Firestore), números y premios han sido limpiados.' });
     } catch (error) {
         console.error('Error al limpiar los datos:', error);
         res.status(500).json({ success: false, message: 'Error interno del servidor al limpiar los datos.' });
@@ -2052,4 +2109,3 @@ ensureDataAndComprobantesDirs().then(() => {
     console.error('Failed to initialize data and start server:', err);
     process.exit(1); // Sale del proceso si la carga inicial de datos falla
 });
-
