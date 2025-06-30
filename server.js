@@ -33,16 +33,15 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onren
 const UPLOADS_DIR = path.join(__dirname, 'uploads'); // Para comprobantes
 const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
 
-// --- Variables globales en memoria (serán la caché de Firestore) ---
+// --- Variables globales en memoria (caché de Firestore para datos pequeños y frecuentes) ---
 // Estas variables se cargarán UNA VEZ al inicio del servidor y se actualizarán
 // solo cuando se realicen escrituras a Firestore o lecturas críticas.
 let configuracion = {};
-let numeros = []; // Caché de los 1000 números
+let numeros = []; // Caché de los 1000 números de la rifa (estado comprado/no comprado)
 let horariosZulia = { zulia: [], chance: [] };
-let ventas = []; // Esta caché se usará para operaciones que necesiten todas las ventas (ej. exportación)
-let resultadosSorteo = [];
-let premios = {};
-let ganadoresSorteos = [];
+// NOTA: 'ventas', 'resultadosSorteo' y 'ganadoresSorteos' NO se cargan al inicio
+// porque pueden ser colecciones muy grandes y agotar la cuota de Firestore.
+// Se leerán directamente de Firestore cuando se necesiten.
 
 let db; // Instancia de Firestore
 
@@ -113,6 +112,10 @@ async function writeFirestoreDoc(collectionName, docId, data) {
 
 /**
  * Lee todos los documentos de una colección en Firestore.
+ * NOTA: Esta función debe usarse con precaución para colecciones grandes,
+ * ya que puede agotar la cuota de Firestore. Se usa principalmente para
+ * colecciones pequeñas o cuando se necesita la lista completa para una
+ * operación específica (ej. exportación de datos).
  * @param {string} collectionName - Nombre de la colección.
  * @returns {Promise<Array>} Un array de objetos de documentos.
  */
@@ -173,7 +176,7 @@ async function ensureDataAndComprobantesDirs() {
 async function loadInitialData() {
     console.log('Iniciando carga inicial de datos desde Firestore...');
     try {
-        // Cargar configuración
+        // Cargar configuración (documento único y pequeño)
         let configDoc = await readFirestoreDoc('app_config', 'main_config');
         if (!configDoc) {
             console.warn('Documento de configuración no encontrado en Firestore. Creando uno por defecto.');
@@ -204,7 +207,7 @@ async function loadInitialData() {
             configuracion = configDoc;
         }
 
-        // Cargar números
+        // Cargar números (colección de 1000 documentos, pero se carga una vez)
         let numerosSnapshot = await db.collection('raffle_numbers').get();
         if (numerosSnapshot.empty) {
             console.warn('Colección de números de rifa vacía. Inicializando con 1000 números por defecto.');
@@ -224,7 +227,7 @@ async function loadInitialData() {
             numeros = numerosSnapshot.docs.map(doc => doc.data());
         }
 
-        // Cargar horarios
+        // Cargar horarios (documento único y pequeño)
         let horariosDoc = await readFirestoreDoc('lottery_times', 'zulia_chance');
         if (!horariosDoc) {
             console.warn('Documento de horarios no encontrado en Firestore. Creando uno por defecto.');
@@ -237,13 +240,7 @@ async function loadInitialData() {
             horariosZulia = horariosDoc;
         }
 
-        // Cargar ventas (para caché si se necesita la lista completa en alguna operación)
-        ventas = await readFirestoreCollection('sales');
-        
-        // Cargar resultados de sorteo
-        resultadosSorteo = await readFirestoreCollection('draw_results');
-        
-        // Cargar premios
+        // Cargar premios (documento único y pequeño)
         let premiosDoc = await readFirestoreDoc('prizes', 'daily_prizes');
         if (!premiosDoc) {
             console.warn('Documento de premios no encontrado en Firestore. Inicializando vacío.');
@@ -253,11 +250,10 @@ async function loadInitialData() {
             premios = premiosDoc;
         }
         
-        // Cargar ganadores
-        ganadoresSorteos = await readFirestoreCollection('winners');
-
-
-        console.log('Datos iniciales cargados desde Firestore y en caché.');
+        // NOTA IMPORTANTE: Las colecciones 'sales', 'draw_results' y 'winners'
+        // NO se cargan aquí al inicio, ya que pueden ser muy grandes y agotar la cuota.
+        // Se leerán directamente de Firestore en los endpoints que las requieran.
+        console.log('Datos iniciales (configuración, números, horarios, premios) cargados desde Firestore y en caché.');
     } catch (error) {
         console.error('Error al cargar datos iniciales desde Firestore:', error);
         // Si hay un error crítico al cargar, es mejor salir o tener un fallback seguro
@@ -508,12 +504,12 @@ app.post('/api/numeros', async (req, res) => {
     }
 });
 
-// Ruta para obtener ventas (ahora desde Firestore)
+// Ruta para obtener ventas (ahora siempre desde Firestore)
 app.get('/api/ventas', async (req, res) => {
     try {
-        // Para el panel de administración, siempre leer la última versión de ventas
+        // Para el panel de administración, siempre leer la última versión de ventas directamente de Firestore
         const currentVentas = await readFirestoreCollection('sales');
-        ventas = currentVentas; // Actualizar la caché global
+        // No se actualiza una variable global 'ventas' aquí, ya que no se usa como caché persistente.
         console.log('Enviando ventas al frontend desde Firestore:', currentVentas.length, 'ventas.');
         res.status(200).json(currentVentas);
     } catch (error) {
@@ -796,10 +792,17 @@ app.get('/api/resultados-zulia', async (req, res) => {
 });
 
 
-// Endpoint para obtener los últimos resultados del sorteo
-app.get('/api/resultados-sorteo', (req, res) => {
-    // Usa la caché en memoria.
-    res.json(resultadosSorteo);
+// Endpoint para obtener los últimos resultados del sorteo (ahora siempre desde Firestore)
+app.get('/api/resultados-sorteo', async (req, res) => {
+    try {
+        // Leer directamente de Firestore, ya no se usa la caché global 'resultadosSorteo' para GETs
+        const currentResultados = await readFirestoreCollection('draw_results');
+        console.log('Enviando resultados de sorteo al frontend desde Firestore:', currentResultados.length, 'resultados.');
+        res.status(200).json(currentResultados);
+    } catch (error) {
+        console.error('Error al obtener resultados de sorteo desde Firestore:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener resultados de sorteo.', error: error.message });
+    }
 });
 
 // Endpoint para guardar/actualizar los resultados del sorteo
@@ -837,15 +840,15 @@ app.post('/api/resultados-sorteo', async (req, res) => {
             });
         }
 
-        // Actualizar la caché en memoria
-        resultadosSorteo = await readFirestoreCollection('draw_results');
+        // No es necesario actualizar la caché global 'resultadosSorteo' aquí,
+        // ya que el GET ahora lee directamente de Firestore.
 
         if (fecha === currentDay && tipoLoteria === 'zulia') {
             await writeFirestoreDoc('app_config', 'main_config', { ultima_fecha_resultados_zulia: fecha });
             configuracion.ultima_fecha_resultados_zulia = fecha; // Actualizar caché de config
         }
 
-        res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.', resultadosGuardados: resultadosSorteo });
+        res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.' });
     } catch (error) {
         console.error('Error al guardar/actualizar resultados de sorteo en Firestore:', error);
         res.status(500).json({ message: 'Error interno del servidor al guardar/actualizar resultados de sorteo.', error: error.message });
@@ -1210,8 +1213,7 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
             }
         }
 
-        // Actualizar la caché de ventas en memoria (para el panel de administración)
-        ventas = await readFirestoreCollection('sales');
+        // No se actualiza la caché global 'ventas' aquí, ya que el GET ahora lee directamente de Firestore.
 
         res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${validationStatus}" con éxito.`, venta: { id: ventaId, ...ventaData, validationStatus: validationStatus } });
     } catch (error) {
@@ -1539,7 +1541,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} añadidos a Firestore.`);
         }
 
-        ganadoresSorteos = await readFirestoreCollection('winners'); // Actualizar caché
+        // No se actualiza la caché global 'ganadoresSorteos' aquí, ya que el GET ahora lee directamente de Firestore.
         res.status(200).json({ message: 'Ganadores procesados y guardados con éxito.', totalGanadores: ticketsGanadoresParaEsteSorteo.length });
 
     } catch (error) {
@@ -1549,25 +1551,32 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
 });
 
 
-// GET /api/tickets/ganadores
-app.get('/api/tickets/ganadores', (req, res) => {
+// GET /api/tickets/ganadores (ahora siempre desde Firestore)
+app.get('/api/tickets/ganadores', async (req, res) => {
     const { fecha, numeroSorteo, tipoLoteria } = req.query;
 
     if (!fecha || !numeroSorteo || !tipoLoteria) {
         return res.status(400).json({ message: 'Fecha, número de sorteo y tipo de lotería son requeridos.' });
     }
 
-    // Usa la caché en memoria para los ganadores
-    const foundEntry = ganadoresSorteos.find(entry =>
-        entry.drawDate === fecha &&
-        entry.drawNumber.toString() === numeroSorteo.toString() &&
-        entry.lotteryType.toLowerCase() === tipoLoteria.toLowerCase()
-    );
+    try {
+        // Leer directamente de Firestore, ya no se usa la caché global 'ganadoresSorteos' para GETs
+        const winnersSnapshot = await db.collection('winners')
+                                        .where('drawDate', '==', fecha)
+                                        .where('drawNumber', '==', parseInt(numeroSorteo))
+                                        .where('lotteryType', '==', tipoLoteria)
+                                        .limit(1) // Solo necesitamos una entrada por sorteo
+                                        .get();
 
-    if (foundEntry) {
-        res.status(200).json({ ganadores: foundEntry.winners });
-    } else {
-        res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
+        if (!winnersSnapshot.empty) {
+            const foundEntry = winnersSnapshot.docs[0].data();
+            res.status(200).json({ ganadores: foundEntry.winners });
+        } else {
+            res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
+        }
+    } catch (error) {
+        console.error('Error al obtener ganadores desde Firestore:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener ganadores.', error: error.message });
     }
 });
 
@@ -1589,7 +1598,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelative) {
                 const numRef = db.collection('raffle_numbers').doc(doc.id); // El ID del documento es el número
                 batch.update(numRef, { comprado: false, originalDrawNumber: null });
                 changedCount++;
-                console.log(`Número ${numData.numero} liberado en Firestore. Comprado originalmente para sorteo ${numData.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
+                console.log(`Número ${numData.numero} liberado en Firestore. Comprado originalmente para sorteo ${numData.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
             }
         }
     });
@@ -1738,7 +1747,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
         }
 
         await batch.commit(); // Ejecutar todas las actualizaciones de ventas en un solo batch
-        ventas = await readFirestoreCollection('sales'); // Actualizar la caché de ventas (para operaciones que la necesiten)
+        // No se actualiza la caché global 'ventas' aquí, ya que el GET ahora lee directamente de Firestore.
         console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado en Firestore.');
 
         await sendWhatsappNotification(whatsappMessageContent);
@@ -2082,7 +2091,7 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
         console.log('Premios reiniciados en Firestore.');
 
 
-        // Recargar todas las cachés en memoria desde Firestore después de la limpieza
+        // Recargar solo las cachés que se cargan al inicio después de la limpieza
         await loadInitialData();
 
         res.status(200).json({ success: true, message: 'Todos los datos en Firestore (ventas, números, resultados, ganadores, premios) han sido limpiados y reiniciados.' });
