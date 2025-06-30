@@ -398,10 +398,10 @@ app.get('/', (req, res) => {
     res.status(200).json({ message: 'Servidor de la API de Loterías activo. Accede a las rutas /api/ para interactuar.' });
 });
 
-// Configuración de CORS explícita y exclusiva
+// Configuración de CORS explícita y exclusiva para múltiples orígenes
 // Este middleware DEBE ir ANTES de cualquier ruta.
 app.use(cors({
-    origin: 'https://paneladmin01.netlify.app', // Tu dominio de Netlify
+    origin: ['https://paneladmin01.netlify.app', 'https://tuoportunidadeshoy.netlify.app'], // ¡AHORA INCLUYE AMBOS ORÍGENES!
     methods: ['GET', 'POST', 'PUT', 'DELETE'], // Métodos HTTP que tu frontend usará
     allowedHeaders: ['Content-Type', 'Authorization'], // Cabeceras que tu frontend enviará
     credentials: true // Si tu frontend envía cookies o tokens de autorización
@@ -1003,14 +1003,14 @@ app.post('/api/corte-ventas', async (req, res) => {
         if (shouldResetNumbers) {
             // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
             // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
-            const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
-            const nextDrawCorrelative = currentDrawCorrelative + 1;
+            const currentDrawCorrelativo = parseInt(configuracion.numero_sorteo_correlativo);
+            const nextDrawCorrelativo = currentDrawCorrelativo + 1;
 
             const updatedNumeros = numeros.map(num => {
                 if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
                     const numOriginalDrawNumber = parseInt(num.originalDrawNumber);
                     // Si el número está reservado para el sorteo actual o el siguiente, NO lo reseteamos.
-                    if (numOriginalDrawNumber === currentDrawCorrelative || numOriginalDrawNumber === nextDrawCorrelativo) {
+                    if (numOriginalDrawNumber === currentDrawCorrelativo || numOriginalDrawNumber === nextDrawCorrelativo) {
                         return num; // Mantener este número con su estado actual (comprado: true, originalDrawNumber)
                     }
                 }
@@ -1558,7 +1558,7 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
 async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros) {
-    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelative})...`);
+    console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
     let changed = false;
     currentNumeros.forEach(numObj => {
         // Un número está comprado y tiene un correlativo de sorteo original
@@ -1771,7 +1771,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         }
 
         // Step 2: Liberate numbers based on the *current* draw correlative
-        await liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros);
+        await liberateOldReservedNumbers(currentDrawCorrelativo, currentNumeros);
 
 
         // Step 3: Advance the configuration to the next day
@@ -1890,7 +1890,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         
         // Guardamos la fecha y el correlativo anteriores para el mensaje de correo/WhatsApp
         const oldDrawDate = currentConfig.fecha_sorteo;
-        const oldDrawCorrelative = currentConfig.numero_sorteo_correlativo; 
+        const oldDrawCorrelativo = currentConfig.numero_sorteo_correlativo; 
 
         // 1. Avanzar la configuración a la fecha manualmente establecida
         await advanceDrawConfiguration(currentConfig, newDrawDate);
@@ -1910,13 +1910,13 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         // Generar Excel para el reporte de reprogramación
         const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
             salesForOldDraw,
-            { fecha_sorteo: oldDrawDate, numero_sorteo_correlativo: oldDrawCorrelative }, // Pass old config for report context
+            { fecha_sorteo: oldDrawDate, numero_sorteo_correlativo: oldDrawCorrelativo }, // Pass old config for report context
             `Reporte de Reprogramación del Sorteo ${oldDrawDate}`,
             'Reporte_Reprogramacion'
         );
 
         // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
-        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelative}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
+        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelativo}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
         await sendWhatsappNotification(whatsappMessage);
 
         // Enviar notificación por correo electrónico para la reprogramación con adjunto Excel
@@ -1925,7 +1925,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
             const emailHtmlContent = `
                 <p>Estimados administradores,</p>
                 <p>Se les informa que el sorteo ha sido <strong>reprogramado manualmente</strong>.</p>
-                <p><b>Fecha Anterior:</b> ${oldDrawDate} (Sorteo Nro. ${oldDrawCorrelative})</p>
+                <p><b>Fecha Anterior:</b> ${oldDrawDate} (Sorteo Nro. ${oldDrawCorrelativo})</p>
                 <p><b>Nueva Fecha:</b> ${newDrawDate} (Sorteo Nro. ${currentConfig.numero_sorteo_correlativo})</p>
                 <p>Adjunto encontrarás el reporte de ventas del sorteo anterior (${oldDrawDate}) al momento de la reprogramación.</p>
                 <p>La página de compra ha sido desbloqueada automáticamente.</p>
