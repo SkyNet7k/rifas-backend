@@ -780,8 +780,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
                     path: filePath,
                     contentType: comprobanteFile.mimetype
                 }
-            }
-            ];
+            ]; // <-- Corregido: Eliminada la llave '}' extra aquí
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, subject, htmlContent, attachments);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo con el comprobante.');
@@ -1474,7 +1473,7 @@ app.post('/api/notify-winner', async (req, res) => {
             `*Hora del Sorteo:* ${drawTime}\n` +
             `*Números Coincidentes:* ${formattedCoincidentNumbers}\n\n` +
             `*¡Has ganado!* 💰\n` +
-            `*Premio Potencial:* $${parseFloat(totalPotentialPrizeUSD).toFixed(2)} USD (Bs ${parseFloat(totalPotentialPrizeBs).toFixed(2)})\n\n` +
+            `*Premio Potencial:* $${parseFloat(totalPotentialPrizeUSD).toFixed(2)} USD (Bs ${parseFloat(totalPotentialPotentialPrizeBs).toFixed(2)})\n\n` +
             `Por favor, contáctanos para coordinar la entrega de tu premio.`
         );
 
