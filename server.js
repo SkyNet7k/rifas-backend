@@ -68,7 +68,9 @@ try {
     if (!primaryServiceAccountBase64) {
         throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set.');
     }
-    primaryServiceAccount = JSON.parse(Buffer.from(primaryServiceAccountBase64, 'base64').toString('utf8'));
+    // Reemplazar saltos de línea por escapados para asegurar un JSON válido antes de decodificar
+    const cleanedPrimaryServiceAccountBase64 = primaryServiceAccountBase64.replace(/\\n/g, '\n');
+    primaryServiceAccount = JSON.parse(Buffer.from(cleanedPrimaryServiceAccountBase64, 'base64').toString('utf8'));
 
     // Inicializa la aplicación Firebase
     const primaryApp = admin.initializeApp({
@@ -88,7 +90,9 @@ try {
 try {
     const secondaryServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_SECONDARY;
     if (secondaryServiceAccountBase64) {
-        secondaryServiceAccount = JSON.parse(Buffer.from(secondaryServiceAccountBase64, 'base64').toString('utf8'));
+        // Reemplazar saltos de línea por escapados para asegurar un JSON válido antes de decodificar
+        const cleanedSecondaryServiceAccountBase64 = secondaryServiceAccountBase64.replace(/\\n/g, '\n');
+        secondaryServiceAccount = JSON.parse(Buffer.from(cleanedSecondaryServiceAccountBase64, 'base64').toString('utf8'));
         
         // Inicializa la aplicación Firebase secundaria
         const secondaryApp = admin.initializeApp({
@@ -128,11 +132,13 @@ async function readFirestoreDoc(dbInstance, collectionName, docId) {
         if (doc.exists) {
             return doc.data();
         } else {
-            console.log(`Documento ${docId} no encontrado en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}.`);
+            // Se usa ?.name para evitar errores si dbInstance.app es undefined
+            console.log(`Documento ${docId} no encontrado en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
             return null;
         }
     } catch (error) {
-        console.error(`Error leyendo documento ${docId} en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.error(`Error leyendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
         throw error; // Re-lanzar el error para que sea manejado por el llamador
     }
 }
@@ -155,9 +161,11 @@ async function writeFirestoreDoc(dbInstance, collectionName, docId, data, merge 
     try {
         const docRef = dbInstance.collection(collectionName).doc(docId);
         await docRef.set(data, { merge });
-        console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}.`);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
     } catch (error) {
-        console.error(`Error escribiendo documento ${docId} en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.error(`Error escribiendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
         throw error;
     }
 }
@@ -176,10 +184,12 @@ async function addFirestoreDoc(dbInstance, collectionName, data) {
     }
     try {
         const docRef = await dbInstance.collection(collectionName).add(data);
-        console.log(`Documento añadido a colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''} con ID: ${docRef.id}.`);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.log(`Documento añadido a colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'} con ID: ${docRef.id}.`);
         return docRef.id;
     } catch (error) {
-        console.error(`Error añadiendo documento a colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.error(`Error añadiendo documento a colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
         throw error;
     }
 }
@@ -198,10 +208,12 @@ async function deleteFirestoreDoc(dbInstance, collectionName, docId) {
     }
     try {
         await dbInstance.collection(collectionName).doc(docId).delete();
-        console.log(`Documento ${docId} eliminado de colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}.`);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.log(`Documento ${docId} eliminado de colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
         return true;
     } catch (error) {
-        console.error(`Error eliminando documento ${docId} de colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.error(`Error eliminando documento ${docId} de colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
         throw error;
     }
 }
@@ -221,7 +233,8 @@ async function readFirestoreCollection(dbInstance, collectionName) {
         const snapshot = await dbInstance.collection(collectionName).get();
         return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } catch (error) {
-        console.error(`Error leyendo colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
+        // Se usa ?.name para evitar errores si dbInstance.app es undefined
+        console.error(`Error leyendo colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
         return [];
     }
 }
@@ -260,7 +273,7 @@ async function loadInitialData() {
         const userHorariosContent = readFileSync(USER_HORARIOS_PATH, 'utf8');
         const parsedHorarios = JSON.parse(userHorariosContent);
         if (Array.isArray(parsedHorarios)) {
-            horariosZulia = { zulia: parsedHorarios, chance: [] };
+            horariosZulia = { zulia: [], chance: [] };
         } else {
             horariosZulia = parsedHorarios;
         }
@@ -1241,7 +1254,7 @@ async function generateDatabaseBackupZipBuffer(dbInstance) {
                 const excelBuffer = await workbook.xlsx.writeBuffer();
                 archive.append(excelBuffer, { name: `${collectionName}_firestore_backup.xlsx` });
             } else {
-                console.log(`Colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''} está vacía, no se generó Excel para el backup.`);
+                console.log(`Colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'} está vacía, no se generó Excel para el backup.`);
             }
         }
         
@@ -1719,7 +1732,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! �🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
