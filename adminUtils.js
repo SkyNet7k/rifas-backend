@@ -1,11 +1,13 @@
+// adminUtils.js
+const admin = require('firebase-admin');
 const moment = require('moment-timezone');
 
 /**
- * Lee un documento específico de una colección en Firestore.
- * @param {Object} db - La instancia de Firestore.
- * @param {string} collectionName - Nombre de la colección.
- * @param {string} docId - ID del documento.
- * @returns {Promise<Object|null>} El objeto del documento o null si no existe.
+ * Lee un documento específico de Firestore.
+ * @param {object} db - La instancia de Firestore.
+ * @param {string} collectionName - El nombre de la colección.
+ * @param {string} docId - El ID del documento.
+ * @returns {Promise<object|null>} El objeto del documento si existe, o null.
  */
 async function readFirestoreDoc(db, collectionName, docId) {
     try {
@@ -13,113 +15,92 @@ async function readFirestoreDoc(db, collectionName, docId) {
         const doc = await docRef.get();
         if (doc.exists) {
             return doc.data();
+        } else {
+            console.log(`Documento ${docId} no encontrado en colección ${collectionName}.`);
+            return null;
         }
-        return null;
     } catch (error) {
         console.error(`Error leyendo documento ${docId} en colección ${collectionName}:`, error);
-        return null;
+        throw error; // Re-lanzar el error para que sea manejado por el llamador
     }
 }
 
 /**
- * Escribe o actualiza un documento específico en una colección de Firestore.
- * @param {Object} db - La instancia de Firestore.
- * @param {string} collectionName - Nombre de la colección.
- * @param {string} docId - ID del documento.
- * @param {Object} data - Los datos a guardar.
- * @returns {Promise<boolean>} True si la operación fue exitosa.
- */
-async function writeFirestoreDoc(db, collectionName, docId, data) {
-    try {
-        await db.collection(collectionName).doc(docId).set(data, { merge: true });
-        return true;
-    } catch (error) {
-        console.error(`Error escribiendo documento ${docId} en colección ${collectionName}:`, error);
-        return false;
-    }
-}
-
-/**
- * Define la función asíncrona para manejar la lógica de limpiar datos en Firestore.
- * @param {Object} db - La instancia de Firestore.
- * @param {Object} configuracion - La configuración actual de la aplicación (se usará para valores por defecto si no hay en Firestore).
- * @param {string} CARACAS_TIMEZONE - La zona horaria de Caracas.
- * @param {Function} loadInitialData - Función para recargar los datos iniciales en el servidor principal.
- * @param {Object} res - Objeto de respuesta de Express para enviar la respuesta HTTP.
+ * Escribe (establece o actualiza) un documento en Firestore.
+ * Si el documento no existe, lo crea. Si existe, lo sobrescribe o fusiona.
+ * @param {object} db - La instancia de Firestore.
+ * @param {string} collectionName - El nombre de la colección.
+ * @param {string} docId - El ID del documento.
+ * @param {object} data - Los datos a escribir.
+ * @param {boolean} merge - Si es true, fusiona los datos con los existentes. Por defecto es false (sobrescribe).
  * @returns {Promise<void>}
  */
-async function handleLimpiarDatos(db, configuracion, CARACAS_TIMEZONE, loadInitialData, res) {
-    console.log('API: Recibida solicitud para limpiar todos los datos en Firestore.');
+async function writeFirestoreDoc(db, collectionName, docId, data, merge = true) {
     try {
-        const collectionsToClear = ['sales', 'raffle_numbers', 'draw_results', 'winners']; // No limpiar app_config ni lottery_times completamente, solo resetearlos
+        const docRef = db.collection(collectionName).doc(docId);
+        await docRef.set(data, { merge: merge });
+        console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName}.`);
+    } catch (error) {
+        console.error(`Error escribiendo documento ${docId} en colección ${collectionName}:`, error);
+        throw error; // Re-lanzar el error
+    }
+}
 
+/**
+ * Limpia todos los datos de las colecciones especificadas en Firestore
+ * y reinicia la configuración a valores por defecto.
+ * @param {object} db - La instancia de Firestore.
+ * @param {object} configuracionGlobal - La variable de configuración global en memoria.
+ * @param {string} CARACAS_TIMEZONE - La zona horaria de Caracas.
+ * @param {function} loadInitialDataFn - Función para recargar los datos iniciales.
+ * @param {object} res - Objeto de respuesta de Express.
+ */
+async function handleLimpiarDatos(db, configuracionGlobal, CARACAS_TIMEZONE, loadInitialDataFn, res) {
+    console.log('Iniciando limpieza de datos...');
+    const collectionsToClear = ['app_config', 'raffle_numbers', 'sales', 'lottery_times', 'draw_results', 'prizes', 'winners'];
+    const batch = db.batch();
+
+    try {
         for (const collectionName of collectionsToClear) {
+            console.log(`Eliminando documentos de la colección: ${collectionName}`);
             const snapshot = await db.collection(collectionName).get();
-            const batch = db.batch();
             snapshot.docs.forEach(doc => {
                 batch.delete(doc.ref);
             });
-            await batch.commit();
-            console.log(`Colección '${collectionName}' de Firestore limpiada.`);
         }
+        await batch.commit();
+        console.log('Todas las colecciones limpiadas exitosamente.');
 
-        // Reiniciar números a su estado inicial en Firestore
-        const batchNumbers = db.batch();
-        for (let i = 0; i < 1000; i++) {
-            const numStr = i.toString().padStart(3, '0');
-            const numRef = db.collection('raffle_numbers').doc(numStr);
-            batchNumbers.set(numRef, { numero: numStr, comprado: false, originalDrawNumber: null });
-        }
-        await batchNumbers.commit();
-        console.log('Números de rifa reiniciados en Firestore.');
+        // Reiniciar la configuración a un estado por defecto en Firestore
+        const defaultAppConfig = {
+            tasa_dolar: 36.50,
+            pagina_bloqueada: false,
+            fecha_sorteo: moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
+            numero_sorteo_correlativo: 1,
+            ultimo_numero_ticket: 0,
+            ultima_fecha_resultados_zulia: null,
+            admin_whatsapp_numbers: configuracionGlobal.admin_whatsapp_numbers || [], // Mantener números de WhatsApp
+            mail_config: configuracionGlobal.mail_config || {}, // Mantener configuración de correo
+            admin_email_for_reports: configuracionGlobal.admin_email_for_reports || [], // Mantener correos de reporte
+            raffleNumbersInitialized: false, // Resetear para que se reinicialicen los números de rifa
+            last_sales_notification_count: 0,
+            sales_notification_threshold: 20,
+            block_reason_message: ""
+        };
+        await writeFirestoreDoc(db, 'app_config', 'main_config', defaultAppConfig, false); // Sobrescribir completamente
 
-        // Reiniciar configuración principal en Firestore
-        // Primero, leer la configuración actual para mantener mail_config, whatsapp_numbers, etc.
-        let currentConfigFromFirestore = await readFirestoreDoc(db, 'app_config', 'main_config');
-        // Usar la configuración de Firestore si está disponible, de lo contrario, la que está en memoria (cargada de los JSON del usuario)
-        const configToPersist = currentConfigFromFirestore || configuracion;
+        // Reiniciar horarios y premios a valores por defecto (vacíos o iniciales)
+        await writeFirestoreDoc(db, 'lottery_times', 'zulia_chance', { zulia: [], chance: [] }, false);
+        await writeFirestoreDoc(db, 'prizes', 'daily_prizes', {}, false);
 
-        await writeFirestoreDoc(db, 'app_config', 'main_config', {
-            "precio_ticket": 0.50,
-            "tasa_dolar": 36.50,
-            "fecha_sorteo": moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
-            "numero_sorteo_correlativo": 1,
-            "ultimo_numero_ticket": 0,
-            "pagina_bloqueada": false,
-            "block_reason_message": "",
-            // Mantener la configuración de correo, WhatsApp y email de reportes
-            "mail_config": configToPersist.mail_config,
-            "admin_whatsapp_numbers": configToPersist.admin_whatsapp_numbers,
-            "last_sales_notification_count": 0,
-            "sales_notification_threshold": configToPersist.sales_notification_threshold,
-            "admin_email_for_reports": configToPersist.admin_email_for_reports,
-            "ultima_fecha_resultados_zulia": null,
-            "raffleNumbersInitialized": true // Ya se inicializaron, así que se marca como true
-        });
-        console.log('Configuración principal reiniciada en Firestore.');
+        // Recargar todos los datos iniciales, lo que también reinicializará 'raffle_numbers'
+        await loadInitialDataFn(); // Llama a la función de carga inicial del server.js
 
-        // Reiniciar horarios (siempre deben existir)
-        await writeFirestoreDoc(db, 'lottery_times', 'zulia_chance', {
-            zulia: ["12:00 PM", "04:00 PM", "07:00 PM"],
-            chance: ["01:00 PM", "05:00 PM", "08:00 PM"]
-        });
-        console.log('Horarios reiniciados en Firestore.');
+        res.status(200).json({ message: 'Todos los datos de la base de datos han sido limpiados y la configuración reiniciada a valores por defecto. Los números de la rifa han sido reinicializados.' });
 
-        // Reiniciar premios (vacío)
-        await writeFirestoreDoc(db, 'prizes', 'daily_prizes', {});
-        console.log('Premios reiniciados en Firestore.');
-
-
-        // Recargar solo las cachés que se cargan al inicio después de la limpieza
-        // Es crucial que `loadInitialData` actualice la variable `configuracion` global en `server.js`
-        // Para esto, `loadInitialData` debería ser una función que recarga las variables globales.
-        // Asumiendo que `loadInitialData` en `server.js` maneja esto, la llamamos.
-        await loadInitialData();
-
-        res.status(200).json({ success: true, message: 'Todos los datos en Firestore (ventas, números, resultados, ganadores, premios) han sido limpiados y reiniciados.' });
     } catch (error) {
-        console.error('Error al limpiar los datos en Firestore:', error);
-        res.status(500).json({ success: false, message: 'Error interno del servidor al limpiar los datos.' });
+        console.error('Error durante la limpieza de datos en Firestore:', error);
+        res.status(500).json({ message: 'Error interno del servidor al limpiar los datos.', error: error.message });
     }
 }
 
