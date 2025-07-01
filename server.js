@@ -13,6 +13,8 @@ const ExcelJS = require('exceljs');
 const moment = require('moment-timezone');
 const archiver = require('archiver');
 const admin = require('firebase-admin');
+// Importar Firestore explícitamente
+const { getFirestore } = require('firebase-admin/firestore'); // <--- CAMBIO CLAVE AQUÍ
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { log } = require('console');
@@ -68,11 +70,14 @@ try {
     }
     primaryServiceAccount = JSON.parse(Buffer.from(primaryServiceAccountBase64, 'base64').toString('utf8'));
 
-    admin.initializeApp({
+    // Inicializa la aplicación Firebase
+    const primaryApp = admin.initializeApp({
         credential: admin.credential.cert(primaryServiceAccount),
         databaseURL: `https://${primaryServiceAccount.project_id}.firebaseio.com`
     }, 'primary'); // Nombre de la aplicación Firebase para la principal
-    primaryDb = admin.firestore('primary');
+    
+    // Obtén la instancia de Firestore desde la aplicación inicializada
+    primaryDb = getFirestore(primaryApp); // <--- CAMBIO CLAVE AQUÍ
     console.log('Firebase Admin SDK (Primary) inicializado exitosamente.');
 
 } catch (error) {
@@ -84,11 +89,15 @@ try {
     const secondaryServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_SECONDARY;
     if (secondaryServiceAccountBase64) {
         secondaryServiceAccount = JSON.parse(Buffer.from(secondaryServiceAccountBase64, 'base64').toString('utf8'));
-        admin.initializeApp({
+        
+        // Inicializa la aplicación Firebase secundaria
+        const secondaryApp = admin.initializeApp({
             credential: admin.credential.cert(secondaryServiceAccount),
             databaseURL: `https://${secondaryServiceAccount.project_id}.firebaseio.com`
         }, 'secondary'); // Nombre de la aplicación Firebase para la secundaria
-        secondaryDb = admin.firestore('secondary');
+        
+        // Obtén la instancia de Firestore desde la aplicación secundaria inicializada
+        secondaryDb = getFirestore(secondaryApp); // <--- CAMBIO CLAVE AQUÍ
         console.log('Firebase Admin SDK (Secondary) inicializado exitosamente.');
     } else {
         console.warn('FIREBASE_SERVICE_ACCOUNT_KEY_SECONDARY environment variable is not set. Secondary database will not be initialized.');
@@ -632,7 +641,7 @@ app.post('/api/numeros', async (req, res) => {
                 console.error('Error al actualizar números en Firestore (Secondary):', secondaryError);
             }
         }
-        console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché.');
+        console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché (solo los comprados).');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
         console.error('Error al actualizar números en Firestore (Primary):', error);
@@ -2192,7 +2201,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         const nextDayDate = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
         await advanceDrawConfiguration(currentConfig, nextDayDate);
 
-        const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${configuracion.numero_sortivo_correlativo}* para la fecha *${configuracion.fecha_sorteo}*.`;
+        const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${configuracion.numero_sorteo_correlativo}* para la fecha *${configuracion.fecha_sorteo}*.`;
         await sendWhatsappNotification(whatsappMessage);
 
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
