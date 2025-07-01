@@ -780,6 +780,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
                     path: filePath,
                     contentType: comprobanteFile.mimetype
                 }
+            }
             ];
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, subject, htmlContent, attachments);
             if (!emailSent) {
@@ -1691,7 +1692,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
 async function advanceDrawConfiguration(currentConfig, targetDate) {
     const updatedConfig = {
         fecha_sorteo: targetDate,
-        numero_sorteo_correlativo: (currentConfig.numero_sorteo_correlativo || 0) + 1,
+        numero_sorteo_correlativo: (currentConfig.numero_sorto_correlativo || 0) + 1,
         ultimo_numero_ticket: 0,
         pagina_bloqueada: false,
         last_sales_notification_count: 0,
@@ -2196,18 +2197,32 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
 
 // Tareas programadas (Cron Jobs)
 // Se ejecutarán después de que el servidor se inicie y los datos se carguen
-cron.schedule('15 12 * * *', async () => {
+
+/**
+ * Función asíncrona para la tarea programada de verificación diaria de ventas
+ * y posible anulación/cierre de sorteo, y avance al siguiente sorteo.
+ */
+async function dailyDrawCheckCronJob() {
     console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
     const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
     console.log(`CRON JOB Resultado: ${cronResult.message}`);
-}, {
-    timezone: CARACAS_TIMEZONE
+}
+
+cron.schedule('15 12 * * *', dailyDrawCheckCronJob, {
+    timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
 });
 
-cron.schedule('*/55 * * * *', async () => {
+/**
+ * Función asíncrona para la tarea programada de Notificación de ventas por WhatsApp y Email.
+ * Se ejecuta periódicamente para enviar resúmenes de ventas a los administradores.
+ */
+async function salesSummaryCronJob() {
     console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp y Email.');
     await sendSalesSummaryNotifications();
-});
+}
+
+cron.schedule('*/55 * * * *', salesSummaryCronJob); // Cambiado a cada 55 minutos
+
 
 // Inicialización del servidor
 // Envuelve la lógica de inicialización en una IIFE asíncrona para permitir el uso de 'await'
