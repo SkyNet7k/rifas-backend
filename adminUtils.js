@@ -2,7 +2,7 @@
 const admin = require('firebase-admin');
 const moment = require('moment-timezone');
 
-/**
+
  * Lee un documento específico de Firestore.
  * @param {object} db - La instancia de Firestore.
  * @param {string} collectionName - El nombre de la colección.
@@ -25,7 +25,6 @@ async function readFirestoreDoc(db, collectionName, docId) {
     }
 }
 
-/**
  * Escribe (establece o actualiza) un documento en Firestore.
  * Si el documento no existe, lo crea. Si existe, lo sobrescribe o fusiona.
  * @param {object} db - La instancia de Firestore.
@@ -46,7 +45,6 @@ async function writeFirestoreDoc(db, collectionName, docId, data, merge = true) 
     }
 }
 
-/**
  * Limpia todos los datos de las colecciones especificadas en Firestore
  * y reinicia la configuración a valores por defecto.
  * @param {object} db - La instancia de Firestore.
