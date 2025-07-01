@@ -1575,7 +1575,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                                                 .where('drawDate', '==', fecha)
                                                 .where('drawNumber', '==', parseInt(numeroSorteo))
                                                 .where('lotteryType', '==', tipoLoteria)
-                                                .limit(1)
+                                                .limit(1) // Solo necesitamos una entrada por sorteo
                                                 .get();
 
         if (!existingWinnersSnapshot.empty) {
