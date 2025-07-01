@@ -780,7 +780,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
                     path: filePath,
                     contentType: comprobanteFile.mimetype
                 }
-            ]; // <-- Corregido: Eliminada la llave '}' extra aquí
+            ];
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, subject, htmlContent, attachments);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo con el comprobante.');
@@ -1473,7 +1473,7 @@ app.post('/api/notify-winner', async (req, res) => {
             `*Hora del Sorteo:* ${drawTime}\n` +
             `*Números Coincidentes:* ${formattedCoincidentNumbers}\n\n` +
             `*¡Has ganado!* 💰\n` +
-            `*Premio Potencial:* $${parseFloat(totalPotentialPrizeUSD).toFixed(2)} USD (Bs ${parseFloat(totalPotentialPotentialPrizeBs).toFixed(2)})\n\n` +
+            `*Premio Potencial:* $${parseFloat(totalPotentialPrizeUSD).toFixed(2)} USD (Bs ${parseFloat(totalPotentialPrizeBs).toFixed(2)})\n\n` +
             `Por favor, contáctanos para coordinar la entrega de tu premio.`
         );
 
@@ -1681,7 +1681,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
     if (changedCount > 0) {
         await batch.commit();
         // No es necesario recargar la caché 'numeros' global aquí, ya que se lee por demanda.
-        console.log(`[liberateOldReservedNumbers] Se liberaron ${changedCount} números antiguos en Firestore.`);
+        console.log(`Se liberaron ${changedCount} números antiguos en Firestore.`);
     } else {
         console.log('No hay números antiguos para liberar en Firestore en este momento.');
     }
@@ -1691,7 +1691,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
 async function advanceDrawConfiguration(currentConfig, targetDate) {
     const updatedConfig = {
         fecha_sorteo: targetDate,
-        numero_sorteo_correlativo: (currentConfig.numero_sorto_correlativo || 0) + 1,
+        numero_sorteo_correlativo: (currentConfig.numero_sorteo_correlativo || 0) + 1, // Corregido el typo aquí
         ultimo_numero_ticket: 0,
         pagina_bloqueada: false,
         last_sales_notification_count: 0,
@@ -2120,8 +2120,8 @@ app.post('/api/developer-sales-notification', async (req, res) => {
 });
 
 
-// Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
-app.post('/api/admin/limpiar-datos', async (req, res) => {
+// Define la función asíncrona para manejar la lógica de limpiar datos
+async function handleLimpiarDatos(req, res) {
     console.log('API: Recibida solicitud para limpiar todos los datos en Firestore.');
     try {
         const collectionsToClear = ['sales', 'raffle_numbers', 'draw_results', 'winners']; // No limpiar app_config ni lottery_times completamente, solo resetearlos
@@ -2191,7 +2191,10 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
         console.error('Error al limpiar los datos en Firestore:', error);
         res.status(500).json({ success: false, message: 'Error interno del servidor al limpiar los datos.' });
     }
-});
+}
+
+// Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
+app.post('/api/admin/limpiar-datos', handleLimpiarDatos);
 
 
 // Tareas programadas (Cron Jobs)
