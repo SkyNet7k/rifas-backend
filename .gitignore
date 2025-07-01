@@ -3,6 +3,9 @@ configuracion.json
 ventas.json 
 horarios_zulia.json 
 resultados_zulia.json 
-tu-oportunidad-es-hoy-firebase-adminsdk-fbsvc-781e9f9dc1.json
+*.json
+*.txt
+Llave Base64.txt
+tuoportunidadeshoy-5ec06-firebase-adminsdk-fbsvc-0bb1210c21.json
 uploads/ 
 
