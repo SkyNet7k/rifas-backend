@@ -976,6 +976,79 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     return { excelFilePath, excelFileName };
 }
 
+/**
+ * Genera un buffer ZIP que contiene archivos Excel para cada colección de Firestore especificada.
+ * @returns {Promise<Buffer>} Un buffer que representa el archivo ZIP.
+ */
+async function generateDatabaseBackupZipBuffer() {
+    const archive = archiver('zip', {
+        zlib: { level: 9 } // Nivel de compresión
+    });
+
+    // Crear un stream de escritura para el archivo ZIP en memoria
+    const output = new (require('stream').PassThrough)();
+    archive.pipe(output);
+
+    try {
+        const collectionsToExport = ['app_config', 'raffle_numbers', 'sales', 'lottery_times', 'draw_results', 'prizes', 'winners'];
+
+        for (const collectionName of collectionsToExport) {
+            const snapshot = await db.collection(collectionName).get();
+            const data = snapshot.docs.map(doc => ({ firestoreId: doc.id, ...doc.data() }));
+
+            if (data.length > 0) {
+                const workbook = new ExcelJS.Workbook();
+                const worksheet = workbook.addWorksheet(collectionName);
+
+                // Determinar columnas dinámicamente para incluir todos los campos
+                const allKeys = new Set();
+                data.forEach(row => {
+                    Object.keys(row).forEach(key => allKeys.add(key));
+                });
+                const columns = Array.from(allKeys).map(key => ({ header: key, key: key, width: 25 }));
+                worksheet.columns = columns;
+
+                worksheet.addRow(columns.map(col => col.header)); // Añadir encabezados
+                data.forEach(row => {
+                    const rowData = {};
+                    columns.forEach(col => {
+                        // Manejar arrays (ej. 'numbers') para que se muestren como strings separados por coma
+                        if (Array.isArray(row[col.key])) {
+                            rowData[col.key] = row[col.key].join(', ');
+                        } else if (typeof row[col.key] === 'object' && row[col.key] !== null) {
+                            // Convertir objetos anidados a JSON string
+                            rowData[col.key] = JSON.stringify(row[col.key]);
+                        } else {
+                            rowData[col.key] = row[col.key];
+                        }
+                    });
+                    worksheet.addRow(rowData);
+                });
+
+                const excelBuffer = await workbook.xlsx.writeBuffer();
+                archive.append(excelBuffer, { name: `${collectionName}_firestore_backup.xlsx` });
+            } else {
+                console.log(`Colección ${collectionName} está vacía, no se generó Excel para el backup.`);
+            }
+        }
+        
+        archive.finalize(); // Finalizar el archivo ZIP
+
+        // Devolver una promesa que se resuelve cuando el archivo ZIP se ha finalizado completamente
+        return new Promise((resolve, reject) => {
+            const buffers = [];
+            output.on('data', chunk => buffers.push(chunk));
+            output.on('end', () => resolve(Buffer.concat(buffers)));
+            archive.on('error', err => reject(err));
+        });
+
+    } catch (error) {
+        console.error('Error al generar el buffer ZIP de la base de datos:', error);
+        throw error;
+    }
+}
+
+
 app.post('/api/corte-ventas', async (req, res) => {
     console.log('[DEBUG_CORTE_VENTAS] Iniciando corte de ventas...');
     try {
@@ -1262,61 +1335,14 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
 
 
 // Endpoint para exportar toda la base de datos en un archivo ZIP
+// Ahora utiliza la función auxiliar generateDatabaseBackupZipBuffer
 app.get('/api/export-database', async (req, res) => {
-    const archive = archiver('zip', {
-        zlib: { level: 9 }
-    });
-
     const archiveName = `rifas_db_backup_${moment().format('YYYYMMDD_HHmmss')}.zip`;
-
     res.attachment(archiveName);
-    archive.pipe(res);
 
     try {
-        // Exportar datos de Firestore a Excel y añadir al ZIP
-        const collectionsToExport = ['app_config', 'raffle_numbers', 'sales', 'lottery_times', 'draw_results', 'prizes', 'winners'];
-
-        for (const collectionName of collectionsToExport) {
-            const snapshot = await db.collection(collectionName).get();
-            const data = snapshot.docs.map(doc => ({ firestoreId: doc.id, ...doc.data() }));
-
-            if (data.length > 0) {
-                const workbook = new ExcelJS.Workbook();
-                const worksheet = workbook.addWorksheet(collectionName);
-
-                // Determinar columnas dinámicamente
-                const allKeys = new Set();
-                data.forEach(row => {
-                    Object.keys(row).forEach(key => allKeys.add(key));
-                });
-                const columns = Array.from(allKeys).map(key => ({ header: key, key: key, width: 25 }));
-                worksheet.columns = columns;
-
-                worksheet.addRow(columns.map(col => col.header)); // Añadir encabezados
-                data.forEach(row => {
-                    const rowData = {};
-                    columns.forEach(col => {
-                        // Manejar arrays (ej. 'numbers') para que se muestren como strings separados por coma
-                        if (Array.isArray(row[col.key])) {
-                            rowData[col.key] = row[col.key].join(', ');
-                        } else if (typeof row[col.key] === 'object' && row[col.key] !== null) {
-                            // Convertir objetos anidados a JSON string
-                            rowData[col.key] = JSON.stringify(row[col.key]);
-                        } else {
-                            rowData[col.key] = row[col.key];
-                        }
-                    });
-                    worksheet.addRow(rowData);
-                });
-
-                const excelBuffer = await workbook.xlsx.writeBuffer();
-                archive.append(excelBuffer, { name: `${collectionName}_firestore_backup.xlsx` });
-            } else {
-                console.log(`Colección ${collectionName} está vacía, no se generó Excel.`);
-            }
-        }
-        
-        archive.finalize();
+        const zipBuffer = await generateDatabaseBackupZipBuffer();
+        res.status(200).send(zipBuffer);
         console.log('Base de datos exportada y enviada como ZIP.');
     } catch (error) {
         console.error('Error al exportar la base de datos:', error);
@@ -1495,7 +1521,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             return res.status(200).json({ message: 'No se encontraron configuraciones de premios para esta fecha para procesar ganadores.' });
         }
 
-        allVentas.forEach(venta => {
+        for (const venta of allVentas) {
             if (venta.drawDate === fecha && venta.drawNumber.toString() === numeroSorteo.toString()) {
                 let coincidentNumbers = [];
                 let totalPotentialPrizeUSD = 0;
@@ -1559,7 +1585,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                     });
                 }
             }
-        });
+        }
 
         const now = moment().tz(CARACAS_TIMEZONE).toISOString();
         const newWinnersEntry = {
@@ -2048,7 +2074,7 @@ app.post('/api/developer-sales-notification', async (req, res) => {
             console.warn('Configuración de la aplicación no disponible en Firestore para notificación de desarrolladores. Usando la configuración en memoria.');
             currentConfig = { ...configuracion }; // Usar la configuración en memoria como base
         }
-        configuracion = currentConfig; // Asegurar que la caché global esté actualizada
+        configuracion = currentConfig;
         
         const now = moment().tz(CARACAS_TIMEZONE);
 
@@ -2121,6 +2147,53 @@ async function salesSummaryCronJob() {
 }
 
 cron.schedule('*/55 * * * *', salesSummaryCronJob); // Cambiado a cada 55 minutos
+
+/**
+ * NUEVA FUNCIÓN CRON JOB: Respaldo automático de la base de datos y envío por correo.
+ * Se ejecuta cada 55 minutos para generar un backup y enviarlo.
+ */
+async function dailyDatabaseBackupCronJob() {
+    console.log('CRON JOB: Iniciando respaldo automático de la base de datos y envío por correo.');
+    try {
+        const now = moment().tz(CARACAS_TIMEZONE);
+        const backupFileName = `rifas_db_backup_${now.format('YYYYMMDD_HHmmss')}.zip`;
+        const zipBuffer = await generateDatabaseBackupZipBuffer(); // Usar la nueva función auxiliar
+
+        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
+            const emailSubject = `Respaldo Automático de Base de Datos - ${now.format('YYYY-MM-DD HH:mm')}`;
+            const emailHtmlContent = `
+                <p>Estimados administradores,</p>
+                <p>Se ha generado el respaldo automático de la base de datos de Rifas.</p>
+                <p>Fecha y Hora del Respaldo: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
+                <p>Adjunto encontrarás el archivo ZIP con los datos de Firestore exportados a Excel.</p>
+                <p>Por favor, guarden este archivo en un lugar seguro.</p>
+                <p>Atentamente,<br>El equipo de Rifas</p>
+            `;
+            const attachments = [
+                {
+                    filename: backupFileName,
+                    content: zipBuffer, // Adjuntar el buffer directamente
+                    contentType: 'application/zip'
+                }
+            ];
+            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
+            if (emailSent) {
+                console.log('Respaldo de base de datos enviado por correo exitosamente.');
+            } else {
+                console.error('Fallo al enviar el correo de respaldo de base de datos.');
+            }
+        } else {
+            console.warn('No hay correos de administrador configurados para enviar el respaldo de la base de datos.');
+        }
+    } catch (error) {
+        console.error('Error durante el cron job de respaldo automático de la base de datos:', error);
+    }
+}
+
+// Programar el cron job para el respaldo cada 55 minutos
+cron.schedule('*/55 * * * *', dailyDatabaseBackupCronJob, {
+    timezone: CARACAS_TIMEZONE
+});
 
 
 // Inicialización del servidor
