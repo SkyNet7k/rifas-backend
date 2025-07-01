@@ -1248,7 +1248,7 @@ app.post('/api/premios', async (req, res) => {
                 tripleA: sorteo5PM.tripleA || '',
                 tripleB: sorteo5PM.tripleB || '',
                 valorTripleA: sorteo5PM.valorTripleA || '',
-                valorTripleB: sorteos5PM.valorTripleB || ''
+                valorTripleB: sorteo5PM.valorTripleB || '' // CORREGIDO: antes decía 'sorteos5PM.valorTripleB'
             } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
         };
 
@@ -1260,6 +1260,7 @@ app.post('/api/premios', async (req, res) => {
 
     } catch (error) {
         console.error('Error al guardar premios en Firestore:', error);
+        console.error('Detalle del error:', error.stack); // Añadido para depuración
         res.status(500).json({ message: 'Error interno del servidor al guardar premios.', error: error.message });
     }
 });
@@ -2200,9 +2201,13 @@ cron.schedule('*/55 * * * *', dailyDatabaseBackupCronJob, {
 // Envuelve la lógica de inicialización en una IIFE asíncrona para permitir el uso de 'await'
 (async () => {
     try {
+        console.log('DEBUG: Iniciando IIFE de inicialización del servidor.'); // Nuevo log
         await ensureDataAndComprobantesDirs();
+        console.log('DEBUG: Directorios asegurados.'); // Nuevo log
         await loadInitialData(); // Asegura que los datos se carguen desde Firestore o local antes de configurar el mailer y escuchar
+        console.log('DEBUG: Datos iniciales cargados.'); // Nuevo log
         configureMailer(); // Configura el mailer con la configuración cargada
+        console.log('DEBUG: Mailer configurado.'); // Nuevo log
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
