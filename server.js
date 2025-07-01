@@ -128,11 +128,11 @@ async function readFirestoreDoc(dbInstance, collectionName, docId) {
         if (doc.exists) {
             return doc.data();
         } else {
-            // console.log(`Documento ${docId} no encontrado en colección ${collectionName} de ${dbInstance.app.name}.`);
+            console.log(`Documento ${docId} no encontrado en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}.`);
             return null;
         }
     } catch (error) {
-        console.error(`Error leyendo documento ${docId} en colección ${collectionName} de ${dbInstance.app.name}:`, error);
+        console.error(`Error leyendo documento ${docId} en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
         throw error; // Re-lanzar el error para que sea manejado por el llamador
     }
 }
@@ -155,9 +155,9 @@ async function writeFirestoreDoc(dbInstance, collectionName, docId, data, merge 
     try {
         const docRef = dbInstance.collection(collectionName).doc(docId);
         await docRef.set(data, { merge });
-        // console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName} de ${dbInstance.app.name}.`);
+        console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}.`);
     } catch (error) {
-        console.error(`Error escribiendo documento ${docId} en colección ${collectionName} de ${dbInstance.app.name}:`, error);
+        console.error(`Error escribiendo documento ${docId} en colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
         throw error;
     }
 }
@@ -176,10 +176,10 @@ async function addFirestoreDoc(dbInstance, collectionName, data) {
     }
     try {
         const docRef = await dbInstance.collection(collectionName).add(data);
-        // console.log(`Documento añadido a colección ${collectionName} de ${dbInstance.app.name} con ID: ${docRef.id}.`);
+        console.log(`Documento añadido a colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''} con ID: ${docRef.id}.`);
         return docRef.id;
     } catch (error) {
-        console.error(`Error añadiendo documento a colección ${collectionName} de ${dbInstance.app.name}:`, error);
+        console.error(`Error añadiendo documento a colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
         throw error;
     }
 }
@@ -198,10 +198,10 @@ async function deleteFirestoreDoc(dbInstance, collectionName, docId) {
     }
     try {
         await dbInstance.collection(collectionName).doc(docId).delete();
-        // console.log(`Documento ${docId} eliminado de colección ${collectionName} de ${dbInstance.app.name}.`);
+        console.log(`Documento ${docId} eliminado de colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}.`);
         return true;
     } catch (error) {
-        console.error(`Error eliminando documento ${docId} de colección ${collectionName} de ${dbInstance.app.name}:`, error);
+        console.error(`Error eliminando documento ${docId} de colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
         throw error;
     }
 }
@@ -221,7 +221,7 @@ async function readFirestoreCollection(dbInstance, collectionName) {
         const snapshot = await dbInstance.collection(collectionName).get();
         return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } catch (error) {
-        console.error(`Error leyendo colección ${collectionName} de ${dbInstance.app.name}:`, error);
+        console.error(`Error leyendo colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''}:`, error);
         return [];
     }
 }
@@ -1241,7 +1241,7 @@ async function generateDatabaseBackupZipBuffer(dbInstance) {
                 const excelBuffer = await workbook.xlsx.writeBuffer();
                 archive.append(excelBuffer, { name: `${collectionName}_firestore_backup.xlsx` });
             } else {
-                console.log(`Colección ${collectionName} de ${dbInstance.app.name} está vacía, no se generó Excel para el backup.`);
+                console.log(`Colección ${collectionName}${dbInstance.app ? ` de ${dbInstance.app.name}` : ''} está vacía, no se generó Excel para el backup.`);
             }
         }
         
