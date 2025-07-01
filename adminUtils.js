@@ -2,7 +2,7 @@
 const admin = require('firebase-admin');
 const moment = require('moment-timezone');
 
-
+/**
  * Lee un documento específico de Firestore.
  * @param {object} db - La instancia de Firestore.
  * @param {string} collectionName - El nombre de la colección.
@@ -25,60 +25,62 @@ async function readFirestoreDoc(db, collectionName, docId) {
     }
 }
 
+/**
  * Escribe (establece o actualiza) un documento en Firestore.
  * Si el documento no existe, lo crea. Si existe, lo sobrescribe o fusiona.
  * @param {object} db - La instancia de Firestore.
  * @param {string} collectionName - El nombre de la colección.
  * @param {string} docId - El ID del documento.
  * @param {object} data - Los datos a escribir.
- * @param {boolean} merge - Si es true, fusiona los datos con los existentes. Por defecto es false (sobrescribe).
- * @returns {Promise<void>}
+ * @param {boolean} merge - Si es true, fusiona los datos con el documento existente. Si es false, sobrescribe.
+ * @returns {Promise<boolean>} True si la operación fue exitosa.
  */
 async function writeFirestoreDoc(db, collectionName, docId, data, merge = true) {
     try {
         const docRef = db.collection(collectionName).doc(docId);
-        await docRef.set(data, { merge: merge });
-        console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName}.`);
+        await docRef.set(data, { merge });
+        return true;
     } catch (error) {
         console.error(`Error escribiendo documento ${docId} en colección ${collectionName}:`, error);
-        throw error; // Re-lanzar el error
+        throw error;
     }
 }
 
- * Limpia todos los datos de las colecciones especificadas en Firestore
- * y reinicia la configuración a valores por defecto.
+/**
+ * Función para limpiar todos los datos de la base de datos de Firestore
+ * y reiniciar la configuración de la aplicación.
  * @param {object} db - La instancia de Firestore.
- * @param {object} configuracionGlobal - La variable de configuración global en memoria.
+ * @param {object} configuracionGlobal - La configuración global actual del servidor.
  * @param {string} CARACAS_TIMEZONE - La zona horaria de Caracas.
- * @param {function} loadInitialDataFn - Función para recargar los datos iniciales.
+ * @param {function} loadInitialDataFn - Función para recargar los datos iniciales del servidor.
  * @param {object} res - Objeto de respuesta de Express.
  */
 async function handleLimpiarDatos(db, configuracionGlobal, CARACAS_TIMEZONE, loadInitialDataFn, res) {
-    console.log('Iniciando limpieza de datos...');
-    const collectionsToClear = ['app_config', 'raffle_numbers', 'sales', 'lottery_times', 'draw_results', 'prizes', 'winners'];
-    const batch = db.batch();
-
+    console.log('Iniciando proceso de limpieza de datos en Firestore...');
     try {
+        // Colecciones a limpiar (ajusta según tus necesidades)
+        const collectionsToClear = ['raffle_numbers', 'sales', 'lottery_times', 'draw_results', 'prizes', 'winners'];
+
         for (const collectionName of collectionsToClear) {
-            console.log(`Eliminando documentos de la colección: ${collectionName}`);
+            console.log(`Limpiando colección: ${collectionName}`);
             const snapshot = await db.collection(collectionName).get();
-            snapshot.docs.forEach(doc => {
+            const batch = db.batch();
+            snapshot.docs.forEach((doc) => {
                 batch.delete(doc.ref);
             });
+            await batch.commit();
+            console.log(`Colección ${collectionName} limpiada.`);
         }
-        await batch.commit();
-        console.log('Todas las colecciones limpiadas exitosamente.');
 
-        // Reiniciar la configuración a un estado por defecto en Firestore
+        // Reiniciar la configuración principal de la aplicación
         const defaultAppConfig = {
-            tasa_dolar: 36.50,
             pagina_bloqueada: false,
+            block_reason_message: "",
             fecha_sorteo: moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
             numero_sorteo_correlativo: 1,
             ultimo_numero_ticket: 0,
-            ultima_fecha_resultados_zulia: null,
-            admin_whatsapp_numbers: configuracionGlobal.admin_whatsapp_numbers || [], // Mantener números de WhatsApp
-            mail_config: configuracionGlobal.mail_config || {}, // Mantener configuración de correo
+            tasa_dolar: 36.50, // Valor por defecto
+            // Mantener la configuración de correo
             admin_email_for_reports: configuracionGlobal.admin_email_for_reports || [], // Mantener correos de reporte
             raffleNumbersInitialized: false, // Resetear para que se reinicialicen los números de rifa
             last_sales_notification_count: 0,
@@ -103,7 +105,7 @@ async function handleLimpiarDatos(db, configuracionGlobal, CARACAS_TIMEZONE, loa
 }
 
 module.exports = {
-    handleLimpiarDatos,
     readFirestoreDoc,
-    writeFirestoreDoc
+    writeFirestoreDoc,
+    handleLimpiarDatos
 };
