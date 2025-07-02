@@ -85,6 +85,9 @@ try {
 
     primaryServiceAccount = JSON.parse(finalServiceAccountString);
 
+    // NEW LOG: Log the project ID being used
+    console.log(`DEBUG_FIREBASE_INIT: Intentando inicializar Firebase Admin SDK para project_id: ${primaryServiceAccount.project_id}`);
+
     // Inicializa la aplicación Firebase
     const primaryApp = admin.initializeApp({
         credential: admin.credential.cert(primaryServiceAccount),
@@ -243,6 +246,25 @@ async function ensureDataAndComprobantesDirs() {
 // Carga inicial de datos (con respaldo local y sincronización con Firestore)
 async function loadInitialData() {
     console.log('Iniciando carga inicial de datos...');
+
+    // NEW: Early Firestore connectivity test (now a write operation)
+    if (!primaryDb) {
+        console.error('CRITICAL_ERROR: primaryDb no está inicializado antes de loadInitialData. Revisar la inicialización de Firebase Admin SDK.');
+        process.exit(1); // Exit if DB is not ready
+    }
+    try {
+        // Attempt a very basic write to confirm connectivity and permissions
+        // This attempts to write a dummy document. If it fails, it indicates a core issue.
+        await primaryDb.collection('connectivity_test_collection').doc('test_doc').set({ timestamp: new Date().toISOString() });
+        console.log('DEBUG_FIRESTORE_CONNECTIVITY: Conexión básica a Firestore exitosa (la base de datos es accesible y se pudo escribir).');
+        // Clean up the test document
+        await primaryDb.collection('connectivity_test_collection').doc('test_doc').delete();
+        console.log('DEBUG_FIRESTORE_CONNECTIVITY: Documento de prueba de conectividad eliminado.');
+    } catch (error) {
+        console.error(`CRITICAL_ERROR: Fallo en la prueba de conectividad inicial a Firestore. Esto puede indicar un problema con la clave de servicio, permisos o ID del proyecto. Error: ${error.message}`);
+        console.error('CRITICAL_ERROR: Stack trace de la prueba de conectividad:', error.stack);
+        process.exit(1); // Exit if basic connectivity fails
+    }
 
     // 1. Cargar configuración desde los archivos JSON del usuario (respaldo local)
     try {
@@ -1559,7 +1581,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
