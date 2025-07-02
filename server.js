@@ -2,32 +2,6 @@
 
 // IMPORTANTE: Asegúrate de que las funciones `readFirestoreDoc` y `writeFirestoreDoc`
 // en tu archivo `./adminUtils.js` sean funciones `async` y devuelvan Promesas.
-// Por ejemplo, en adminUtils.js:
-// async function readFirestoreDoc(db, collectionName, docId) {
-//     try {
-//         const docRef = db.collection(collectionName).doc(docId);
-//         const docSnap = await docRef.get();
-//         if (docSnap.exists) {
-//             return docSnap.data();
-//         } else {
-//             return null;
-//         }
-//     } catch (error) {
-//         console.error(`Error al leer documento ${docId} de ${collectionName}:`, error);
-//         throw error; // Propagar el error para que el llamador lo maneje
-//     }
-// }
-// async function writeFirestoreDoc(db, collectionName, docId, data) {
-//     try {
-//         const docRef = db.collection(collectionName).doc(docId);
-//         await docRef.set(data, { merge: true });
-//         return true;
-//     } catch (error) {
-//         console.error(`Error al escribir documento ${docId} en ${collectionName}:`, error);
-//         throw error;
-//     }
-// }
-
 
 const express = require('express');
 const fileUpload = require('express-fileupload');
@@ -43,13 +17,13 @@ const moment = require('moment-timezone');
 const archiver = require('archiver');
 const admin = require('firebase-admin');
 // Importar Firestore explícitamente
-const { getFirestore } = require('firebase-admin/firestore'); // <--- CAMBIO CLAVE AQUÍ
+const { getFirestore } = require('firebase-admin/firestore');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const { log } = require('console');
 
 // Importar funciones de utilidad de administración
-// Asegúrate de que handleLimpiarDatos también acepte primaryDb y secondaryDb si los usa
+// handleLimpiarDatos ahora solo acepta primaryDb
 const { handleLimpiarDatos } = require('./adminUtils');
 
 
@@ -83,7 +57,6 @@ let horariosZulia = { zulia: [], chance: [] };
 let premios = {}; // Caché para los premios
 
 let primaryDb; // Instancia de Firestore para la base de datos principal
-let secondaryDb; // Instancia de Firestore para la base de datos de respaldo
 
 const SALES_THRESHOLD_PERCENTAGE = 80;
 const DRAW_SUSPENSION_HOUR = 12;
@@ -92,7 +65,6 @@ const TOTAL_RAFFLE_NUMBERS = 1000;
 
 // Firebase Admin SDK Initialization
 let primaryServiceAccount;
-let secondaryServiceAccount;
 
 try {
     const primaryServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
@@ -110,7 +82,7 @@ try {
     }, 'primary'); // Nombre de la aplicación Firebase para la principal
     
     // Obtén la instancia de Firestore desde la aplicación inicializada
-    primaryDb = getFirestore(primaryApp); // <--- CAMBIO CLAVE AQUÍ
+    primaryDb = getFirestore(primaryApp);
     console.log('Firebase Admin SDK (Primary) inicializado exitosamente.');
 
 } catch (error) {
@@ -118,36 +90,12 @@ try {
     process.exit(1); // Salir si no se puede inicializar la DB principal
 }
 
-try {
-    const secondaryServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_SECONDARY;
-    if (secondaryServiceAccountBase64) {
-        // Reemplazar saltos de línea por saltos de línea reales antes de decodificar
-        const cleanedSecondaryServiceAccountBase64 = secondaryServiceAccountBase64.replace(/\\n/g, '\n');
-        secondaryServiceAccount = JSON.parse(Buffer.from(cleanedSecondaryServiceAccountBase64, 'base64').toString('utf8'));
-        
-        // Inicializa la aplicación Firebase secundaria
-        const secondaryApp = admin.initializeApp({
-            credential: admin.credential.cert(secondaryServiceAccount),
-            databaseURL: `https://${secondaryServiceAccount.project_id}.firebaseio.com`
-        }, 'secondary'); // Nombre de la aplicación Firebase para la secundaria
-        
-        // Obtén la instancia de Firestore desde la aplicación secundaria inicializada
-        secondaryDb = getFirestore(secondaryApp); // <--- CAMBIO CLAVE AQUÍ
-        console.log('Firebase Admin SDK (Secondary) inicializado exitosamente.');
-    } else {
-        console.warn('FIREBASE_SERVICE_ACCOUNT_KEY_SECONDARY environment variable is not set. Secondary database will not be initialized.');
-    }
-} catch (error) {
-    console.error('Error al inicializar Firebase Admin SDK (Secondary):', error);
-    secondaryDb = null; // Asegurarse de que secondaryDb sea null si falla la inicialización
-}
 
-
-// --- Funciones Auxiliares para Firestore (ahora aceptan la instancia de DB) ---
+// --- Funciones Auxiliares para Firestore (ahora solo aceptan la instancia de DB principal) ---
 
 /**
  * Lee un documento específico de Firestore.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb o secondaryDb).
+ * @param {object} dbInstance - La instancia de Firestore (primaryDb).
  * @param {string} collectionName - El nombre de la colección.
  * @param {string} docId - El ID del documento.
  * @returns {Promise<object|null>} El objeto del documento si existe, o null.
@@ -177,7 +125,7 @@ async function readFirestoreDoc(dbInstance, collectionName, docId) {
 /**
  * Escribe (establece o actualiza) un documento en Firestore.
  * Si el documento no existe, lo crea. Si existe, lo sobrescribe o fusiona.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb o secondaryDb).
+ * @param {object} dbInstance - La instancia de Firestore (primaryDb).
  * @param {string} collectionName - El nombre de la colección.
  * @param {string} docId - El ID del documento.
  * @param {object} data - Los datos a escribir.
@@ -203,7 +151,7 @@ async function writeFirestoreDoc(dbInstance, collectionName, docId, data, merge 
 
 /**
  * Añade un nuevo documento a una colección con un ID generado automáticamente.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb o secondaryDb).
+ * @param {object} dbInstance - La instancia de Firestore (primaryDb).
  * @param {string} collectionName - Nombre de la colección.
  * @param {Object} data - Los datos a añadir.
  * @returns {Promise<string|null>} El ID del nuevo documento o null en caso de error.
@@ -227,7 +175,7 @@ async function addFirestoreDoc(dbInstance, collectionName, data) {
 
 /**
  * Elimina un documento de una colección.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb o secondaryDb).
+ * @param {object} dbInstance - La instancia de Firestore (primaryDb).
  * @param {string} collectionName - Nombre de la colección.
  * @param {string} docId - ID del documento a eliminar.
  * @returns {Promise<boolean>} True si la operación fue exitosa.
@@ -251,7 +199,7 @@ async function deleteFirestoreDoc(dbInstance, collectionName, docId) {
 
 /**
  * Lee todos los documentos de una colección en Firestore.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb o secondaryDb).
+ * @param {object} dbInstance - La instancia de Firestore (primaryDb).
  * @param {string} collectionName - Nombre de la colección.
  * @returns {Promise<Array>} Un array de objetos de documentos.
  */
@@ -377,33 +325,6 @@ async function loadInitialData() {
 
     } catch (error) {
         console.error('Error al sincronizar datos con Firestore (Primary) durante la carga inicial. El servidor continuará operando con los datos cargados localmente:', error);
-    }
-
-    // 3. Sincronizar con Firestore (Secondary) - Solo para configuraciones críticas y pequeñas
-    if (secondaryDb) {
-        try {
-            // Sincronizar configuración principal con Secondary
-            await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', configuracion);
-            console.log('Configuración principal sincronizada con Firestore (Secondary).');
-
-            // Sincronizar horarios con Secondary
-            await writeFirestoreDoc(secondaryDb, 'lottery_times', 'zulia_chance', horariosZulia);
-            console.log('Horarios de lotería sincronizados con Firestore (Secondary).');
-
-            // Sincronizar premios con Secondary
-            await writeFirestoreDoc(secondaryDb, 'prizes', 'daily_prizes', premios);
-            console.log('Premios sincronizados con Firestore (Secondary).');
-
-            // NOTA: Para colecciones grandes como 'raffle_numbers' y 'sales',
-            // la sincronización completa en el inicio puede ser costosa y lenta.
-            // Nos basaremos en las escrituras duales para mantenerlas sincronizadas
-            // a partir de este punto. Una sincronización histórica completa
-            // se haría con un script de migración si es necesario.
-
-        } catch (error) {
-            console.error('Error al sincronizar datos con Firestore (Secondary) durante la carga inicial:', error);
-            console.warn('La base de datos secundaria podría no estar completamente sincronizada al inicio.');
-        }
     }
 }
 
@@ -628,16 +549,6 @@ app.put('/api/configuracion', async (req, res) => {
         await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', currentConfig);
         configuracion = currentConfig; // Actualizar la caché en memoria
 
-        // Intentar escribir en la base de datos secundaria (dual-write)
-        if (secondaryDb) {
-            try {
-                await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', currentConfig);
-                console.log('Configuración actualizada en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al actualizar configuración en Firestore (Secondary):', secondaryError);
-            }
-        }
-
         res.json({ message: 'Configuración actualizada con éxito', configuracion: configuracion });
     } catch (error) {
         console.error('Error al actualizar configuración en Firestore (Primary):', error);
@@ -671,20 +582,6 @@ app.post('/api/numeros', async (req, res) => {
         await primaryBatch.commit();
         numeros = updatedNumbers; // Actualizar caché en memoria
 
-        // Dual-write a la secundaria
-        if (secondaryDb) {
-            try {
-                const secondaryBatch = secondaryDb.batch();
-                updatedNumbers.forEach(num => {
-                    const numRef = secondaryDb.collection('raffle_numbers').doc(num.numero);
-                    secondaryBatch.set(numRef, num, { merge: true });
-                });
-                await secondaryBatch.commit();
-                console.log('Números actualizados en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al actualizar números en Firestore (Secondary):', secondaryError);
-            }
-        }
         console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché (solo los comprados).');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
@@ -770,25 +667,6 @@ app.post('/api/comprar', async (req, res) => {
         await primaryBatch.commit();
         console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché (solo los comprados).');
 
-        // Dual-write para números
-        if (secondaryDb) {
-            try {
-                const secondaryBatch = secondaryDb.batch();
-                numerosSeleccionados.forEach(numSel => {
-                    const numRef = secondaryDb.collection('raffle_numbers').doc(numSel);
-                    secondaryBatch.update(numRef, {
-                        comprado: true,
-                        originalDrawNumber: configuracion.numero_sorteo_correlativo
-                    });
-                });
-                await secondaryBatch.commit();
-                console.log('Números actualizados en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al actualizar números en Firestore (Secondary) durante la compra:', secondaryError);
-            }
-        }
-
-
         const now = moment().tz("America/Caracas");
         configuracion.ultimo_numero_ticket = (configuracion.ultimo_numero_ticket || 0) + 1;
         const numeroTicket = configuracion.ultimo_numero_ticket.toString().padStart(5, '0');
@@ -815,33 +693,10 @@ app.post('/api/comprar', async (req, res) => {
         nuevaVenta.firestoreId = docRef.id;
         console.log('DEBUG_BACKEND: Venta guardada en Firestore (Primary) con ID:', docRef.id);
 
-        // Dual-write para la nueva venta
-        if (secondaryDb) {
-            try {
-                // Usar el mismo ID de documento que Primary para la consistencia
-                await secondaryDb.collection('sales').doc(docRef.id).set(nuevaVenta);
-                console.log('Venta guardada en Firestore (Secondary) con el mismo ID de Primary.');
-            } catch (secondaryError) {
-                console.error('Error al guardar venta en Firestore (Secondary):', secondaryError);
-            }
-        }
-
         await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', {
             ultimo_numero_ticket: configuracion.ultimo_numero_ticket
         });
         console.log('DEBUG_BACKEND: Configuración (ultimo_numero_ticket) actualizada en Firestore (Primary).');
-
-        // Dual-write para la configuración
-        if (secondaryDb) {
-            try {
-                await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', {
-                    ultimo_numero_ticket: configuracion.ultimo_numero_ticket
-                }, true); // Merge true para solo actualizar ese campo
-                console.log('Configuración (ultimo_numero_ticket) actualizada en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al actualizar config (ultimo_numero_ticket) en Firestore (Secondary):', secondaryError);
-            }
-        }
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
         console.log('DEBUG_BACKEND: Respuesta de compra enviada al frontend.');
@@ -874,19 +729,10 @@ app.post('/api/comprar', async (req, res) => {
                 console.log(`[WhatsApp Notificación Resumen] Ventas actuales (${currentTotalSales}) han cruzado un nuevo múltiplo (${currentMultiple * notificationThreshold}) del umbral (${notificationThreshold}). Enviando notificación de resumen.`);
                 await sendSalesSummaryNotifications();
 
-                // Actualizar en ambas DBs
+                // Actualizar en la DB principal
                 await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', {
                     last_sales_notification_count: currentMultiple * notificationThreshold
                 });
-                if (secondaryDb) {
-                    try {
-                        await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', {
-                            last_sales_notification_count: currentMultiple * notificationThreshold
-                        }, true);
-                    } catch (secondaryError) {
-                        console.error('Error al actualizar last_sales_notification_count en Secondary:', secondaryError);
-                    }
-                }
                 console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${currentMultiple * notificationThreshold} en Firestore (Primary).`);
             } else {
                 console.log(`[WhatsApp Notificación Resumen Check] Ventas actuales (${currentTotalSales}) no han cruzado un nuevo múltiplo del umbral (${notificationThreshold}). Último contador notificado: ${prevNotifiedCount}. No se envió notificación de resumen.`);
@@ -935,16 +781,6 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         // Actualizar en la base de datos principal
         await writeFirestoreDoc(primaryDb, 'sales', firestoreVentaId, { voucherURL: `/uploads/${fileName}` });
         console.log(`Voucher URL actualizado en Firestore (Primary) para venta ${firestoreVentaId}.`);
-
-        // Dual-write para el comprobante
-        if (secondaryDb) {
-            try {
-                await writeFirestoreDoc(secondaryDb, 'sales', firestoreVentaId, { voucherURL: `/uploads/${fileName}` }, true);
-                console.log(`Voucher URL actualizado en Firestore (Secondary) para venta ${firestoreVentaId}.`);
-            } catch (secondaryError) {
-                console.error('Error al actualizar voucherURL en Firestore (Secondary):', secondaryError);
-            }
-        }
 
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
             const subject = `Nuevo Comprobante de Pago para Venta #${ventaData.ticketNumber}`;
@@ -1016,16 +852,6 @@ app.post('/api/horarios', async (req, res) => {
         // Escribir en la base de datos principal
         await writeFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance', currentHorarios);
         horariosZulia = currentHorarios; // Actualizar caché
-
-        // Dual-write a la secundaria
-        if (secondaryDb) {
-            try {
-                await writeFirestoreDoc(secondaryDb, 'lottery_times', 'zulia_chance', currentHorarios);
-                console.log(`Horarios de ${tipo} actualizados en Firestore (Secondary).`);
-            } catch (secondaryError) {
-                console.error(`Error al actualizar horarios de ${tipo} en Firestore (Secondary):`, secondaryError);
-            }
-        }
 
         res.json({ message: `Horarios de ${tipo} actualizados con éxito.`, horarios: horariosZulia[tipo] });
     } catch (error) {
@@ -1103,32 +929,9 @@ app.post('/api/resultados-sorteo', async (req, res) => {
             docId = await addFirestoreDoc(primaryDb, 'draw_results', dataToSave);
         }
 
-        // Dual-write para resultados
-        if (secondaryDb) {
-            try {
-                if (!existingResultsSnapshot.empty) {
-                    await writeFirestoreDoc(secondaryDb, 'draw_results', docId, dataToSave);
-                } else {
-                    // Si se añadió en primary, usar el mismo ID para añadir en secondary
-                    await secondaryDb.collection('draw_results').doc(docId).set(dataToSave);
-                }
-                console.log('Resultados de sorteo guardados/actualizados en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al guardar/actualizar resultados de sorteo en Firestore (Secondary):', secondaryError);
-            }
-        }
-
         if (fecha === currentDay && tipoLoteria === 'zulia') {
             await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', { ultima_fecha_resultados_zulia: fecha });
             configuracion.ultima_fecha_resultados_zulia = fecha; // Actualizar caché de config
-
-            if (secondaryDb) {
-                try {
-                    await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', { ultima_fecha_resultados_zulia: fecha }, true);
-                } catch (secondaryError) {
-                    console.error('Error al actualizar ultima_fecha_resultados_zulia en Secondary:', secondaryError);
-                }
-            }
         }
 
         res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.' });
@@ -1419,16 +1222,11 @@ app.post('/api/corte-ventas', async (req, res) => {
                                                       .where('originalDrawNumber', '<', currentDrawCorrelativo - 1)
                                                       .get();
             const primaryBatch = primaryDb.batch();
-            const secondaryBatch = secondaryDb ? secondaryDb.batch() : null;
             let changedCount = 0;
 
             numbersToLiberateSnapshot.docs.forEach(doc => {
                 const numRefPrimary = primaryDb.collection('raffle_numbers').doc(doc.id);
                 primaryBatch.update(numRefPrimary, { comprado: false, originalDrawNumber: null });
-                if (secondaryBatch) {
-                    const numRefSecondary = secondaryDb.collection('raffle_numbers').doc(doc.id);
-                    secondaryBatch.update(numRefSecondary, { comprado: false, originalDrawNumber: null });
-                }
                 changedCount++;
                 console.log(`Número ${doc.id} liberado en Firestore (Primary). Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
             });
@@ -1436,14 +1234,6 @@ app.post('/api/corte-ventas', async (req, res) => {
             if (changedCount > 0) {
                 await primaryBatch.commit();
                 console.log(`Se liberaron ${changedCount} números antiguos en Firestore (Primary).`);
-                if (secondaryBatch) {
-                    try {
-                        await secondaryBatch.commit();
-                        console.log(`Se liberaron ${changedCount} números antiguos en Firestore (Secondary).`);
-                    } catch (secondaryError) {
-                        console.error('Error al liberar números antiguos en Firestore (Secondary):', secondaryError);
-                    }
-                }
             } else {
                 console.log('No hay números antiguos para liberar en Firestore en este momento.');
             }
@@ -1531,16 +1321,6 @@ app.post('/api/premios', async (req, res) => {
         premios = allPremios; // Actualizar caché
         console.log('Premios guardados/actualizados en Firestore (Primary) y caché.');
 
-        // Dual-write a la secundaria
-        if (secondaryDb) {
-            try {
-                await writeFirestoreDoc(secondaryDb, 'prizes', 'daily_prizes', allPremios);
-                console.log('Premios guardados/actualizados en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al guardar premios en Firestore (Secondary):', secondaryError);
-            }
-        }
-
         res.status(200).json({ message: 'Premios guardados/actualizados con éxito.', premiosGuardados: allPremios[fechaFormateada] });
 
     } catch (error) {
@@ -1594,41 +1374,17 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
         // Actualizar en la base de datos principal
         await writeFirestoreDoc(primaryDb, 'sales', firestoreVentaId, { validationStatus: validationStatus });
 
-        // Dual-write para el estado de validación
-        if (secondaryDb) {
-            try {
-                await writeFirestoreDoc(secondaryDb, 'sales', firestoreVentaId, { validationStatus: validationStatus }, true);
-                console.log(`Estado de la venta ${ventaId} actualizado en Firestore (Secondary).`);
-            } catch (secondaryError) {
-                console.error(`Error al actualizar estado de venta en Firestore (Secondary):`, secondaryError);
-            }
-        }
-
-
         if (validationStatus === 'Falso' && oldValidationStatus !== 'Falso') {
             const numerosAnulados = ventaData.numbers;
             if (numerosAnulados && numerosAnulados.length > 0) {
                 const primaryBatch = primaryDb.batch();
-                const secondaryBatch = secondaryDb ? secondaryDb.batch() : null;
 
                 numerosAnulados.forEach(numAnulado => {
                     const numRefPrimary = primaryDb.collection('raffle_numbers').doc(numAnulado);
                     primaryBatch.update(numRefPrimary, { comprado: false, originalDrawNumber: null });
-                    if (secondaryBatch) {
-                        const numRefSecondary = secondaryDb.collection('raffle_numbers').doc(numAnulado);
-                        secondaryBatch.update(numRefSecondary, { comprado: false, originalDrawNumber: null });
-                    }
                 });
                 await primaryBatch.commit();
                 console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles en Firestore (Primary).`);
-                if (secondaryBatch) {
-                    try {
-                        await secondaryBatch.commit();
-                        console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles en Firestore (Secondary).`);
-                    } catch (secondaryError) {
-                        console.error('Error al liberar números en Firestore (Secondary) por anulación:', secondaryError);
-                    }
-                }
             }
         }
 
@@ -1917,20 +1673,6 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} añadidos a Firestore (Primary).`);
         }
 
-        // Dual-write para ganadores
-        if (secondaryDb) {
-            try {
-                if (!existingWinnersSnapshot.empty) {
-                    await writeFirestoreDoc(secondaryDb, 'winners', docId, newWinnersEntry);
-                } else {
-                    await secondaryDb.collection('winners').doc(docId).set(newWinnersEntry);
-                }
-                console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} actualizados/añadidos en Firestore (Secondary).`);
-            } catch (secondaryError) {
-                console.error('Error al procesar y guardar tickets ganadores en Firestore (Secondary):', secondaryError);
-            }
-        }
-
         res.status(200).json({ message: 'Ganadores procesados y guardados con éxito.', totalGanadores: ticketsGanadoresParaEsteSorteo.length });
 
     } catch (error) {
@@ -1977,16 +1719,11 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
                                               .where('originalDrawNumber', '<', currentDrawCorrelativo - 1)
                                               .get();
     const primaryBatch = primaryDb.batch();
-    const secondaryBatch = secondaryDb ? secondaryDb.batch() : null;
     let changedCount = 0;
 
     numbersToLiberateSnapshot.docs.forEach(doc => {
         const numRefPrimary = primaryDb.collection('raffle_numbers').doc(doc.id);
         primaryBatch.update(numRefPrimary, { comprado: false, originalDrawNumber: null });
-        if (secondaryBatch) {
-            const numRefSecondary = secondaryDb.collection('raffle_numbers').doc(doc.id);
-            secondaryBatch.update(numRefSecondary, { comprado: false, originalDrawNumber: null });
-        }
         changedCount++;
         console.log(`Número ${doc.id} liberado en Firestore (Primary). Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
     });
@@ -1994,14 +1731,6 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
     if (changedCount > 0) {
         await primaryBatch.commit();
         console.log(`Se liberaron ${changedCount} números antiguos en Firestore (Primary).`);
-        if (secondaryBatch) {
-            try {
-                await secondaryBatch.commit();
-                console.log(`Se liberaron ${changedCount} números antiguos en Firestore (Secondary).`);
-            } catch (secondaryError) {
-                console.error('Error al liberar números antiguos en Firestore (Secondary):', secondaryError);
-            }
-        }
     } else {
         console.log('No hay números antiguos para liberar en Firestore en este momento.');
     }
@@ -2020,14 +1749,6 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
     await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', updatedConfig);
     configuracion = { ...configuracion, ...updatedConfig };
 
-    if (secondaryDb) {
-        try {
-            await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', updatedConfig);
-            console.log(`Configuración avanzada en Firestore (Secondary) para el siguiente sorteo.`);
-        } catch (secondaryError) {
-            console.error('Error al avanzar configuración en Firestore (Secondary):', secondaryError);
-        }
-    }
     console.log(`Configuración avanzada en Firestore (Primary) para el siguiente sorteo: Fecha ${configuracion.fecha_sorteo}, Correlativo ${configuracion.numero_sorteo_correlativo}.`);
 }
 
@@ -2072,7 +1793,6 @@ async function evaluateDrawStatusOnly(nowMoment) {
         let excelReport = { excelFilePath: null, excelFileName: null };
 
         const primaryBatch = primaryDb.batch();
-        const secondaryBatch = secondaryDb ? secondaryDb.batch() : null;
 
         if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
             console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Marcando tickets como anulados en Firestore.`);
@@ -2084,14 +1804,6 @@ async function evaluateDrawStatusOnly(nowMoment) {
                     voidedReason: 'Ventas insuficientes para el sorteo',
                     voidedAt: nowMoment.toISOString()
                 });
-                if (secondaryBatch) {
-                    const ventaRefSecondary = secondaryDb.collection('sales').doc(venta.firestoreId);
-                    secondaryBatch.update(ventaRefSecondary, {
-                        validationStatus: 'Anulado por bajo porcentaje',
-                        voidedReason: 'Ventas insuficientes para el sorteo',
-                        voidedAt: nowMoment.toISOString()
-                    });
-                }
             });
             message = `Sorteo del ${currentDrawDateStr} marcado como anulado por ventas insuficientes.`;
             whatsappMessageContent = `*¡Alerta de Sorteo Suspendido!* 🚨\n\nEl sorteo del *${currentDrawDateStr}* ha sido *ANULADO* debido a un bajo porcentaje de ventas (${soldPercentage.toFixed(2)}%).\n\nTodos los tickets válidos para este sorteo serán revalidados automáticamente para el próximo sorteo.`;
@@ -2112,17 +1824,6 @@ async function evaluateDrawStatusOnly(nowMoment) {
             configuracion.pagina_bloqueada = true;
             configuracion.block_reason_message = "El sorteo ha sido ANULADO por bajo porcentaje de ventas. Tus tickets válidos han sido revalidados para el próximo sorteo. ¡Vuelve pronto!";
 
-            if (secondaryDb) {
-                try {
-                    await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', {
-                        pagina_bloqueada: true,
-                        block_reason_message: configuracion.block_reason_message
-                    }, true);
-                } catch (secondaryError) {
-                    console.error('Error al actualizar config (pagina_bloqueada/block_reason_message) en Secondary:', secondaryError);
-                }
-            }
-
             excelReport = await generateGenericSalesExcelReport(
                 soldTicketsForCurrentDraw,
                 currentConfig,
@@ -2140,14 +1841,6 @@ async function evaluateDrawStatusOnly(nowMoment) {
                     closedReason: 'Ventas suficientes para el sorteo',
                     closedAt: nowMoment.toISOString()
                 });
-                if (secondaryBatch) {
-                    const ventaRefSecondary = secondaryDb.collection('sales').doc(venta.firestoreId);
-                    secondaryBatch.update(ventaRefSecondary, {
-                        validationStatus: 'Cerrado por Suficiencia de Ventas',
-                        closedReason: 'Ventas suficientes para el sorteo',
-                        closedAt: nowMoment.toISOString()
-                    });
-                }
             });
             message = `Sorteo del ${currentDrawDateStr} marcado como cerrado por suficiencia de ventas.`;
             whatsappMessageContent = `*¡Sorteo Cerrado Exitosamente!* ✅\n\nEl sorteo del *${currentDrawDateStr}* ha sido *CERRADO* con éxito. Se alcanzó el porcentaje de ventas (${soldPercentage.toFixed(2)}%) requerido.`;
@@ -2167,17 +1860,6 @@ async function evaluateDrawStatusOnly(nowMoment) {
             configuracion.pagina_bloqueada = true;
             configuracion.block_reason_message = "El sorteo ha sido CERRADO exitosamente por haber alcanzado las ventas requeridas. No se aceptan más compras para este sorteo. ¡Gracias por participar!";
 
-            if (secondaryDb) {
-                try {
-                    await writeFirestoreDoc(secondaryDb, 'app_config', 'main_config', {
-                        pagina_bloqueada: true,
-                        block_reason_message: configuracion.block_reason_message
-                    }, true);
-                } catch (secondaryError) {
-                    console.error('Error al actualizar config (pagina_bloqueada/block_reason_message) en Secondary:', secondaryError);
-                }
-            }
-
             excelReport = await generateGenericSalesExcelReport(
                 soldTicketsForCurrentDraw,
                 currentConfig,
@@ -2188,14 +1870,6 @@ async function evaluateDrawStatusOnly(nowMoment) {
 
         await primaryBatch.commit();
         console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado en Firestore (Primary).');
-        if (secondaryBatch) {
-            try {
-                await secondaryBatch.commit();
-                console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado en Firestore (Secondary).');
-            } catch (secondaryError) {
-                console.error('Error al actualizar estado de ventas en Firestore (Secondary) con batch:', secondaryError);
-            }
-        }
 
         await sendWhatsappNotification(whatsappMessageContent);
 
@@ -2470,8 +2144,8 @@ app.post('/api/developer-sales-notification', async (req, res) => {
 // Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
 app.post('/api/admin/limpiar-datos', async (req, res) => {
     // Pasar las dependencias necesarias a la función importada
-    // Asegúrate de que handleLimpiarDatos en adminUtils.js pueda manejar primaryDb y secondaryDb
-    await handleLimpiarDatos(primaryDb, secondaryDb, configuracion, CARACAS_TIMEZONE, loadInitialData, res);
+    // handleLimpiarDatos ahora solo acepta primaryDb
+    await handleLimpiarDatos(primaryDb, configuracion, CARACAS_TIMEZONE, loadInitialData, res);
 });
 
 
