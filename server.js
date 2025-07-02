@@ -71,15 +71,25 @@ try {
     if (!primaryServiceAccountBase64) {
         throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set.');
     }
-    // Reemplazar saltos de línea por saltos de línea reales antes de decodificar
-    const cleanedPrimaryServiceAccountBase64 = primaryServiceAccountBase64.replace(/\\n/g, '\n');
-    primaryServiceAccount = JSON.parse(Buffer.from(cleanedPrimaryServiceAccountBase64, 'base64').toString('utf8'));
+    // MODIFICACIÓN: Reemplazar cualquier carácter de control no válido directamente
+    // antes de decodificar y parsear el JSON.
+    // Esto es más robusto para manejar casos donde los saltos de línea no están escapados como \\n
+    // o hay otros caracteres de control inesperados.
+    const cleanedPrimaryServiceAccountString = Buffer.from(primaryServiceAccountBase64, 'base64').toString('utf8');
+    // Eliminar caracteres de control no válidos en JSON (excepto los que son parte de JSON como \n, \t)
+    // Se usa una expresión regular para eliminar caracteres de control Unicode excepto los permitidos en JSON.
+    // Los caracteres de control permitidos en JSON son U+0008 (BS), U+000C (FF), U+000A (LF), U+000D (CR), U+0009 (HT).
+    // Otros caracteres de control (U+0000 a U+001F) deben ser escapados o eliminados.
+    // Aquí, eliminamos los que no son los 5 permitidos.
+    const finalServiceAccountString = cleanedPrimaryServiceAccountString.replace(/[\u0000-\u0007\u000B\u000E-\u001F]/g, '');
+
+    primaryServiceAccount = JSON.parse(finalServiceAccountString);
 
     // Inicializa la aplicación Firebase
     const primaryApp = admin.initializeApp({
         credential: admin.credential.cert(primaryServiceAccount),
         databaseURL: `https://${primaryServiceAccount.project_id}.firebaseio.com`
-    }, 'primary'); // Nombre de la aplicación Firebase para la principal
+    }, 'primary');
     
     // Obtén la instancia de Firestore desde la aplicación inicializada
     primaryDb = getFirestore(primaryApp);
