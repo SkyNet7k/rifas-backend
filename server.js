@@ -154,7 +154,8 @@ async function writeFirestoreDoc(dbInstance, collectionName, docId, data, merge 
         console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
     } catch (error) {
         // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error escribiendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
+        console.error(`ERROR_WRITE_FIRESTORE: Fallo al escribir documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
+        console.error(`ERROR_WRITE_FIRESTORE: Stack trace:`, error.stack); // Añadir stack trace
         throw error;
     }
 }
@@ -279,31 +280,54 @@ async function loadInitialData() {
 
     // 2. Intentar sincronizar con Firestore (Primary)
     try {
-        let configDoc = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
+        let configDoc = null;
+        try {
+            configDoc = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
+        } catch (readError) {
+            console.warn(`readFirestoreDoc failed for app_config/main_config, assuming not found or transient error: ${readError.message}`);
+            // No re-lanzar aquí, permitir que la lógica proceda a crear si es nulo
+        }
+
         if (configDoc) {
             configuracion = { ...configuracion, ...configDoc };
             console.log('Configuración principal actualizada desde Firestore (Primary).');
         } else {
             console.warn('Documento de configuración "main_config" no encontrado en Firestore (Primary). Creando uno en Primary con los valores cargados localmente.');
+            console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir app_config/main_config...'); // Nuevo log
             await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', configuracion);
+            console.log('DEBUG_FIRESTORE_WRITE: app_config/main_config escrito.'); // Nuevo log
         }
 
-        let horariosDoc = await readFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance');
+        let horariosDoc = null;
+        try {
+            horariosDoc = await readFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance');
+        } catch (readError) {
+            console.warn(`readFirestoreDoc failed for lottery_times/zulia_chance, assuming not found or transient error: ${readError.message}`);
+        }
         if (horariosDoc) {
             horariosZulia = horariosDoc;
             console.log('Horarios de lotería actualizados desde Firestore (Primary).');
         } else {
             console.warn('Documento de horarios "zulia_chance" no encontrado en Firestore (Primary). Creando uno en Primary con los valores cargados localmente.');
+            console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir lottery_times/zulia_chance...'); // Nuevo log
             await writeFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance', horariosZulia);
+            console.log('DEBUG_FIRESTORE_WRITE: lottery_times/zulia_chance escrito.'); // Nuevo log
         }
 
-        let premiosDoc = await readFirestoreDoc(primaryDb, 'prizes', 'daily_prizes');
+        let premiosDoc = null;
+        try {
+            premiosDoc = await readFirestoreDoc(primaryDb, 'prizes', 'daily_prizes');
+        } catch (readError) {
+            console.warn(`readFirestoreDoc failed for prizes/daily_prizes, assuming not found or transient error: ${readError.message}`);
+        }
         if (premiosDoc) {
             premios = premiosDoc;
             console.log('Premios actualizados desde Firestore (Primary).');
         } else {
             console.warn('Documento de premios "daily_prizes" no encontrado en Firestore (Primary). Creando uno en Primary con los valores cargados localmente.');
+            console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir prizes/daily_prizes...'); // Nuevo log
             await writeFirestoreDoc(primaryDb, 'prizes', 'daily_prizes', premios);
+            console.log('DEBUG_FIRESTORE_WRITE: prizes/daily_prizes escrito.'); // Nuevo log
         }
 
         // Inicializar colección de números de rifa si no ha sido inicializada (según el flag en la configuración)
@@ -318,11 +342,16 @@ async function loadInitialData() {
                     const numRef = primaryDb.collection('raffle_numbers').doc(numStr);
                     batch.set(numRef, { numero: numStr, comprado: false, originalDrawNumber: null });
                 }
+                console.log('DEBUG_FIRESTORE_WRITE: Intentando commitear batch de raffle_numbers...'); // Nuevo log
                 await batch.commit();
+                console.log('DEBUG_FIRESTORE_WRITE: Batch de raffle_numbers commiteado.'); // Nuevo log
+                
+                console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir app_config/main_config para raffleNumbersInitialized...'); // Nuevo log
                 await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', { raffleNumbersInitialized: true });
                 configuracion.raffleNumbersInitialized = true;
                 console.log('Colección de números de rifa inicializada y flag actualizado en Firestore (Primary).');
             } else {
+                console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir app_config/main_config para raffleNumbersInitialized (existente)...'); // Nuevo log
                 await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', { raffleNumbersInitialized: true });
                 configuracion.raffleNumbersInitialized = true;
                 console.log('Colección de números de rifa existente en Primary. Flag "raffleNumbersInitialized" actualizado a true en Firestore (Primary).');
@@ -335,6 +364,7 @@ async function loadInitialData() {
 
     } catch (error) {
         console.error('Error al sincronizar datos con Firestore (Primary) durante la carga inicial. El servidor continuará operando con los datos cargados localmente:', error.message); // Log más específico
+        console.error('Stack trace del error de sincronización:', error.stack); // Añadir stack trace
     }
 }
 
@@ -1529,7 +1559,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
