@@ -1,12 +1,8 @@
 // server.js
 
-// IMPORTANTE: Asegúrate de que las funciones `readFirestoreDoc` y `writeFirestoreDoc`
-// en tu archivo `./adminUtils.js` sean funciones `async` y devuelvan Promesas.
-
 const express = require('express');
 const fileUpload = require('express-fileupload');
-const fs = require('fs').promises; // Todavía necesario para directorios y archivos de reportes/comprobantes
-const { readFileSync } = require('fs'); // Para leer archivos de configuración locales de forma síncrona
+const fs = require('fs').promises;
 const path = require('path');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
@@ -15,384 +11,188 @@ const dotenv = require('dotenv');
 const ExcelJS = require('exceljs');
 const moment = require('moment-timezone');
 const archiver = require('archiver');
-const admin = require('firebase-admin');
-// Importar Firestore explícitamente
-const { getFirestore } = require('firebase-admin/firestore');
-const { v4: uuidv4 } = require('uuid');
+const admin = require('firebase-admin'); // <-- CAMBIO INTEGRADO: Agregado para Firebase Admin SDK
+const { v4: uuidv4 } = require('uuid'); // Para generar IDs únicos
 const crypto = require('crypto');
 const { log } = require('console');
-
-// Importar funciones de utilidad de administración
-// handleLimpiarDatos ahora solo acepta primaryDb
-const { handleLimpiarDatos } = require('./adminUtils');
-
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware para parsear JSON y archivos
-app.use(express.json());
-app.use(fileUpload());
-
 // Constantes y configuraciones
 const CARACAS_TIMEZONE = 'America/Caracas';
 const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
 
-// Rutas a tus directorios locales
-const UPLOADS_DIR = path.join(__dirname, 'uploads'); // Para comprobantes
-const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
+// Rutas a tus archivos JSON
+const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
+const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
+const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json'); // Usado para Zulia y Chance en el frontend
+const VENTAS_FILE = path.join(__dirname, 'ventas.json'); // Todavía se usa para la lógica de archivo
+const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json');
+const RESULTADOS_SORTEO_FILE = path.join(__dirname, 'resultados_sorteo.json'); // Archivo para guardar resultados del sorteo por hora/tipo
+const PREMIOS_FILE = path.join(__dirname, 'premios.json'); // Precios de los premios por hora
+const GANADORES_FILE = path.join(__dirname, 'ganadores.json'); // NUEVO: Archivo para guardar tickets ganadores procesados
 
-// Rutas a los archivos JSON del usuario (que deben existir en el directorio raíz)
-const USER_CONFIG_PATH = path.join(__dirname, 'configuracion.json');
-const USER_HORARIOS_PATH = path.join(__dirname, 'horarios_zulia.json');
-const USER_PREMIOS_PATH = path.join(__dirname, 'premios.json');
-
-
-// --- Variables globales en memoria (caché de Firestore para datos pequeños y frecuentes) ---
-let configuracion = {};
-let numeros = []; // Caché de los 1000 números de la rifa (estado comprado/no comprado)
-let horariosZulia = { zulia: [], chance: [] };
-let premios = {}; // Caché para los premios
-
-let primaryDb; // Instancia de Firestore para la base de datos principal
-
-const SALES_THRESHOLD_PERCENTAGE = 80;
-const DRAW_SUSPENSION_HOUR = 12;
-const DRAW_SUSPENSION_MINUTE = 15;
-const TOTAL_RAFFLE_NUMBERS = 1000;
-
-// Firebase Admin SDK Initialization
-let primaryServiceAccount;
-
-try {
-    const primaryServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
-    if (!primaryServiceAccountBase64) {
-        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set.');
-    }
-    // MODIFICACIÓN: Reemplazar cualquier carácter de control no válido directamente
-    // antes de decodificar y parsear el JSON.
-    // Esto es más robusto para manejar casos donde los saltos de línea no están escapados como \\n
-    // o hay otros caracteres de control inesperados.
-    const cleanedPrimaryServiceAccountString = Buffer.from(primaryServiceAccountBase64, 'base64').toString('utf8');
-    // Eliminar caracteres de control no válidos en JSON (excepto los que son parte de JSON como \n, \t)
-    // Se usa una expresión regular para eliminar caracteres de control Unicode excepto los permitidos en JSON.
-    // Los caracteres de control permitidos en JSON son U+0008 (BS), U+000C (FF), U+000A (LF), U+000D (CR), U+0009 (HT).
-    // Otros caracteres de control (U+0000 a U+001F) deben ser escapados o eliminados.
-    // Aquí, eliminamos los que no son los 5 permitidos.
-    const finalServiceAccountString = cleanedPrimaryServiceAccountString.replace(/[\u0000-\u0007\u000B\u000E-\u001F]/g, '');
-
-    primaryServiceAccount = JSON.parse(finalServiceAccountString);
-
-    // NEW LOG: Log the project ID being used
-    console.log(`DEBUG_FIREBASE_INIT: Intentando inicializar Firebase Admin SDK para project_id: ${primaryServiceAccount.project_id}`);
-
-    // Inicializa la aplicación Firebase
-    const primaryApp = admin.initializeApp({
-        credential: admin.credential.cert(primaryServiceAccount),
-        databaseURL: `https://${primaryServiceAccount.project_id}.firebaseio.com`
-    }, 'primary');
-    
-    // Obtén la instancia de Firestore desde la aplicación inicializada
-    primaryDb = getFirestore(primaryApp);
-    console.log('Firebase Admin SDK (Primary) inicializado exitosamente.');
-
-} catch (error) {
-    console.error('Error al inicializar Firebase Admin SDK (Primary):', error.message); // Log más específico
-    process.exit(1); // Salir si no se puede inicializar la DB principal
-}
+// Lista de todos los archivos de la base de datos para exportar
+const DATABASE_FILES = [
+    CONFIG_FILE,
+    NUMEROS_FILE,
+    HORARIOS_ZULIA_FILE,
+    VENTAS_FILE, // Todavía incluido para exportación de archivo local
+    COMPROBANTES_FILE,
+    RESULTADOS_SORTEO_FILE,
+    PREMIOS_FILE,
+    GANADORES_FILE // Incluir el nuevo archivo de ganadores
+];
 
 
-// --- Funciones Auxiliares para Firestore (ahora solo aceptan la instancia de DB principal) ---
+// Directorios para guardar comprobantes y reportes
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const REPORTS_DIR = path.join(__dirname, 'reports');
 
-/**
- * Lee un documento específico de Firestore.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb).
- * @param {string} collectionName - El nombre de la colección.
- * @param {string} docId - El ID del documento.
- * @returns {Promise<object|null>} El objeto del documento si existe, o null.
- */
-async function readFirestoreDoc(dbInstance, collectionName, docId) {
-    if (!dbInstance) {
-        console.warn(`readFirestoreDoc: dbInstance no está definida para leer ${collectionName}/${docId}.`);
-        return null;
-    }
-    try {
-        const docRef = dbInstance.collection(collectionName).doc(docId);
-        const doc = await docRef.get();
-        if (doc.exists) {
-            return doc.data();
-        } else {
-            // Se usa ?.name para evitar errores si dbInstance.app es undefined
-            console.log(`Documento ${docId} no encontrado en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
-            return null;
-        }
-    } catch (error) {
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error leyendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
-        throw error; // Re-lanzar el error para que sea manejado por el llamador
-    }
-}
-
-/**
- * Escribe (establece o actualiza) un documento en Firestore.
- * Si el documento no existe, lo crea. Si existe, lo sobrescribe o fusiona.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb).
- * @param {string} collectionName - El nombre de la colección.
- * @param {string} docId - El ID del documento.
- * @param {object} data - Los datos a escribir.
- * @param {boolean} merge - Si es true, fusiona los datos con los existentes. Si es false, sobrescribe.
- * @returns {Promise<void>}
- */
-async function writeFirestoreDoc(dbInstance, collectionName, docId, data, merge = true) {
-    if (!dbInstance) {
-        console.warn(`writeFirestoreDoc: dbInstance no está definida para escribir ${collectionName}/${docId}.`);
-        return;
-    }
-    try {
-        const docRef = dbInstance.collection(collectionName).doc(docId);
-        await docRef.set(data, { merge });
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
-    } catch (error) {
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`ERROR_WRITE_FIRESTORE: Fallo al escribir documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
-        console.error(`ERROR_WRITE_FIRESTORE: Stack trace:`, error.stack); // Añadir stack trace
-        throw error;
-    }
-}
-
-/**
- * Añade un nuevo documento a una colección con un ID generado automáticamente.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb).
- * @param {string} collectionName - Nombre de la colección.
- * @param {Object} data - Los datos a añadir.
- * @returns {Promise<string|null>} El ID del nuevo documento o null en caso de error.
- */
-async function addFirestoreDoc(dbInstance, collectionName, data) {
-    if (!dbInstance) {
-        console.warn(`addFirestoreDoc: dbInstance no está definida para añadir a ${collectionName}.`);
-        return null;
-    }
-    try {
-        const docRef = await dbInstance.collection(collectionName).add(data);
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.log(`Documento añadido a colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'} con ID: ${docRef.id}.`);
-        return docRef.id;
-    } catch (error) {
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error añadiendo documento a colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
-        throw error;
-    }
-}
-
-/**
- * Elimina un documento de una colección.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb).
- * @param {string} collectionName - Nombre de la colección.
- * @param {string} docId - ID del documento a eliminar.
- * @returns {Promise<boolean>} True si la operación fue exitosa.
- */
-async function deleteFirestoreDoc(dbInstance, collectionName, docId) {
-    if (!dbInstance) {
-        console.warn(`deleteFirestoreDoc: dbInstance no está definida para eliminar ${collectionName}/${docId}.`);
-        return false;
-    }
-    try {
-        await dbInstance.collection(collectionName).doc(docId).delete();
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.log(`Documento ${docId} eliminado de colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
-        return true;
-    } catch (error) {
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error eliminando documento ${docId} de colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
-        throw error;
-    }
-}
-
-/**
- * Lee todos los documentos de una colección en Firestore.
- * @param {object} dbInstance - La instancia de Firestore (primaryDb).
- * @param {string} collectionName - Nombre de la colección.
- * @returns {Promise<Array>} Un array de objetos de documentos.
- */
-async function readFirestoreCollection(dbInstance, collectionName) {
-    if (!dbInstance) {
-        console.warn(`readFirestoreCollection: dbInstance no está definida para leer ${collectionName}.`);
-        return [];
-    }
-    try {
-        const snapshot = await dbInstance.collection(collectionName).get();
-        return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    } catch (error) {
-        // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error leyendo colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
-        return [];
-    }
-}
-
-// Función para asegurar que los directorios existan (solo para archivos locales como comprobantes y reportes)
+// Función para asegurar que los directorios existan
 async function ensureDataAndComprobantesDirs() {
     try {
         await fs.mkdir(UPLOADS_DIR, { recursive: true });
         await fs.mkdir(REPORTS_DIR, { recursive: true });
-        console.log('Directorios locales asegurados.');
+        // Asegurarse de que los archivos JSON existen con contenido inicial
+        await Promise.all([
+            ensureJsonFile(CONFIG_FILE, {
+                "precio_ticket": 0.50,
+                "tasa_dolar": 36.50, // Valor numérico por defecto
+                "fecha_sorteo": moment().tz("America/Caracas").add(1, 'days').format('YYYY-MM-DD'),
+                "numero_sorteo_correlativo": 1,
+                "ultimo_numero_ticket": 0,
+                "pagina_bloqueada": false,
+                "block_reason_message": "", // NUEVO CAMPO: Razón por la que la página está bloqueada
+                "mail_config": {
+                    "host": "smtp.gmail.com",
+                    "port": 465,
+                    "secure": true, // Cambiado a true para 465
+                    "user": process.env.EMAIL_USER || "tu_correo@gmail.com", // Usar variable de entorno o placeholder
+                    "pass": process.env.EMAIL_PASS || "tu_contraseña_o_app_password",   // Usar variable de entorno o placeholder
+                    "senderName": "Sistema de Rifas"
+                },
+                // INICIO CAMBIO: Agregar números de WhatsApp y configuración de umbral aquí
+                "admin_whatsapp_numbers": ["584126083355", "584143630488", "584124723776"],
+                "last_sales_notification_count": 0, // Nuevo: Contador para la última notificación de ventas por umbral
+                "sales_notification_threshold": 20, // Nuevo: Umbral de ventas para enviar notificación (ej. cada 20 ventas)
+                // FIN CAMBIO
+                "admin_email_for_reports": ["tu_correo@gmail.com"], // Ahora es un array por defecto
+                "ultima_fecha_resultados_zulia": null
+            }),
+            ensureJsonFile(NUMEROS_FILE, Array.from({ length: 1000 }, (_, i) => ({
+                numero: i.toString().padStart(3, '0'),
+                comprado: false,
+                originalDrawNumber: null // Nuevo campo para el número de sorteo original de la compra
+            }))),
+            ensureJsonFile(HORARIOS_ZULIA_FILE, {
+                zulia: ["12:00 PM", "04:00 PM", "07:00 PM"],
+                chance: ["01:00 PM", "05:00 PM", "08:00 PM"] // Ejemplo de horarios de Chance
+            }),
+            ensureJsonFile(VENTAS_FILE, []),
+            ensureJsonFile(COMPROBANTES_FILE, []),
+            ensureJsonFile(RESULTADOS_SORTEO_FILE, []), // Inicializa como array vacío
+            ensureJsonFile(PREMIOS_FILE, {}), // Inicializa como objeto vacío para almacenar por fecha/hora
+            ensureJsonFile(GANADORES_FILE, []) // NUEVO: Inicializar ganadores.json como array vacío
+        ]);
+        console.log('Directorios y archivos JSON iniciales asegurados.');
     } catch (error) {
-        console.error('Error al asegurar directorios locales:', error);
+        console.error('Error al asegurar directorios o archivos JSON:', error);
     }
 }
 
-// Carga inicial de datos (con respaldo local y sincronización con Firestore)
-async function loadInitialData() {
-    console.log('Iniciando carga inicial de datos...');
-
-    // NEW: Early Firestore connectivity test (now a write operation)
-    if (!primaryDb) {
-        console.error('CRITICAL_ERROR: primaryDb no está inicializado antes de loadInitialData. Revisar la inicialización de Firebase Admin SDK.');
-        process.exit(1); // Exit if DB is not ready
-    }
+// Función auxiliar para asegurar que un archivo JSON existe con contenido inicial
+async function ensureJsonFile(filePath, defaultContent) {
     try {
-        // Attempt a very basic write to confirm connectivity and permissions
-        // This attempts to write a dummy document. If it fails, it indicates a core issue.
-        await primaryDb.collection('connectivity_test_collection').doc('test_doc').set({ timestamp: new Date().toISOString() });
-        console.log('DEBUG_FIRESTORE_CONNECTIVITY: Conexión básica a Firestore exitosa (la base de datos es accesible y se pudo escribir).');
-        // Clean up the test document
-        await primaryDb.collection('connectivity_test_collection').doc('test_doc').delete();
-        console.log('DEBUG_FIRESTORE_CONNECTIVITY: Documento de prueba de conectividad eliminado.');
+        await fs.access(filePath); // Intenta acceder al archivo
     } catch (error) {
-        console.error(`CRITICAL_ERROR: Fallo en la prueba de conectividad inicial a Firestore. Esto puede indicar un problema con la clave de servicio, permisos o ID del proyecto. Error: ${error.message}`);
-        console.error('CRITICAL_ERROR: Stack trace de la prueba de conectividad:', error.stack);
-        process.exit(1); // Exit if basic connectivity fails
+        if (error.code === 'ENOENT') {
+            // Si el archivo no existe, lo crea con el contenido por defecto
+            await fs.writeFile(filePath, JSON.stringify(defaultContent, null, 2), 'utf8');
+            console.log(`Creado archivo ${path.basename(filePath)} con contenido por defecto.`);
+        } else {
+            throw error; // Lanza otros errores
+        }
     }
+}
 
-    // 1. Cargar configuración desde los archivos JSON del usuario (respaldo local)
+
+// Función auxiliar para leer un archivo JSON
+async function readJsonFile(filePath) {
     try {
-        const userConfigContent = readFileSync(USER_CONFIG_PATH, 'utf8');
-        configuracion = JSON.parse(userConfigContent);
-        if (typeof configuracion.raffleNumbersInitialized === 'undefined') {
-            configuracion.raffleNumbersInitialized = false;
-        }
-        if (Array.isArray(configuracion.tasa_dolar) || typeof configuracion.tasa_dolar !== 'number') {
-            configuracion.tasa_dolar = 36.50;
-            console.warn('tasa_dolar en configuracion.json no es un número válido o es un array. Se ha establecido un valor por defecto.');
-        }
-        if (!configuracion.fecha_sorteo || !moment(configuracion.fecha_sorteo, 'YYYY-MM-DD', true).isValid()) {
-            configuracion.fecha_sorteo = moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD');
-            console.warn('fecha_sorteo en configuracion.json no es una fecha válida. Se ha establecido una fecha por defecto.');
-        }
-
-        const userHorariosContent = readFileSync(USER_HORARIOS_PATH, 'utf8');
-        const parsedHorarios = JSON.parse(userHorariosContent);
-        if (Array.isArray(parsedHorarios)) {
-            horariosZulia = { zulia: parsedHorarios, chance: [] };
-        } else {
-            horariosZulia = parsedHorarios;
-        }
-        if (!horariosZulia.zulia) horariosZulia.zulia = [];
-        if (!horariosZulia.chance) horariosZulia.chance = [];
-
-        premios = JSON.parse(readFileSync(USER_PREMIOS_PATH, 'utf8'));
-
-        console.log('Datos iniciales cargados desde los archivos JSON del usuario.');
-    } catch (err) {
-        console.error('Error CRÍTICO al cargar los archivos JSON del usuario. Asegúrate de que existan y sean válidos:', err);
-        process.exit(1);
-    }
-
-    // 2. Intentar sincronizar con Firestore (Primary)
-    try {
-        let configDoc = null;
-        try {
-            configDoc = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        } catch (readError) {
-            console.warn(`readFirestoreDoc failed for app_config/main_config, assuming not found or transient error: ${readError.message}`);
-            // No re-lanzar aquí, permitir que la lógica proceda a crear si es nulo
-        }
-
-        if (configDoc) {
-            configuracion = { ...configuracion, ...configDoc };
-            console.log('Configuración principal actualizada desde Firestore (Primary).');
-        } else {
-            console.warn('Documento de configuración "main_config" no encontrado en Firestore (Primary). Creando uno en Primary con los valores cargados localmente.');
-            console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir app_config/main_config...'); // Nuevo log
-            await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', configuracion);
-            console.log('DEBUG_FIRESTORE_WRITE: app_config/main_config escrito.'); // Nuevo log
-        }
-
-        let horariosDoc = null;
-        try {
-            horariosDoc = await readFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance');
-        } catch (readError) {
-            console.warn(`readFirestoreDoc failed for lottery_times/zulia_chance, assuming not found or transient error: ${readError.message}`);
-        }
-        if (horariosDoc) {
-            horariosZulia = horariosDoc;
-            console.log('Horarios de lotería actualizados desde Firestore (Primary).');
-        } else {
-            console.warn('Documento de horarios "zulia_chance" no encontrado en Firestore (Primary). Creando uno en Primary con los valores cargados localmente.');
-            console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir lottery_times/zulia_chance...'); // Nuevo log
-            await writeFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance', horariosZulia);
-            console.log('DEBUG_FIRESTORE_WRITE: lottery_times/zulia_chance escrito.'); // Nuevo log
-        }
-
-        let premiosDoc = null;
-        try {
-            premiosDoc = await readFirestoreDoc(primaryDb, 'prizes', 'daily_prizes');
-        } catch (readError) {
-            console.warn(`readFirestoreDoc failed for prizes/daily_prizes, assuming not found or transient error: ${readError.message}`);
-        }
-        if (premiosDoc) {
-            premios = premiosDoc;
-            console.log('Premios actualizados desde Firestore (Primary).');
-        } else {
-            console.warn('Documento de premios "daily_prizes" no encontrado en Firestore (Primary). Creando uno en Primary con los valores cargados localmente.');
-            console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir prizes/daily_prizes...'); // Nuevo log
-            await writeFirestoreDoc(primaryDb, 'prizes', 'daily_prizes', premios);
-            console.log('DEBUG_FIRESTORE_WRITE: prizes/daily_prizes escrito.'); // Nuevo log
-        }
-
-        // Inicializar colección de números de rifa si no ha sido inicializada (según el flag en la configuración)
-        if (!configuracion.raffleNumbersInitialized) {
-            console.warn('Flag "raffleNumbersInitialized" es false. Verificando e inicializando colección de números de rifa en Firestore (Primary).');
-            const numerosSnapshot = await primaryDb.collection('raffle_numbers').get();
-            if (numerosSnapshot.empty) {
-                console.warn('Colección de números de rifa vacía en Primary. Inicializando con 1000 números por defecto.');
-                const batch = primaryDb.batch();
-                for (let i = 0; i < 1000; i++) {
-                    const numStr = i.toString().padStart(3, '0');
-                    const numRef = primaryDb.collection('raffle_numbers').doc(numStr);
-                    batch.set(numRef, { numero: numStr, comprado: false, originalDrawNumber: null });
-                }
-                console.log('DEBUG_FIRESTORE_WRITE: Intentando commitear batch de raffle_numbers...'); // Nuevo log
-                await batch.commit();
-                console.log('DEBUG_FIRESTORE_WRITE: Batch de raffle_numbers commiteado.'); // Nuevo log
-                
-                console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir app_config/main_config para raffleNumbersInitialized...'); // Nuevo log
-                await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', { raffleNumbersInitialized: true });
-                configuracion.raffleNumbersInitialized = true;
-                console.log('Colección de números de rifa inicializada y flag actualizado en Firestore (Primary).');
-            } else {
-                console.log('DEBUG_FIRESTORE_WRITE: Intentando escribir app_config/main_config para raffleNumbersInitialized (existente)...'); // Nuevo log
-                await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', { raffleNumbersInitialized: true });
-                configuracion.raffleNumbersInitialized = true;
-                console.log('Colección de números de rifa existente en Primary. Flag "raffleNumbersInitialized" actualizado a true en Firestore (Primary).');
+        const data = await fs.readFile(filePath, 'utf8');
+        // Manejar el caso de archivo vacío (ej. "[]" o "{}")
+        if (data.trim() === '') {
+            if (filePath === VENTAS_FILE || filePath === RESULTADOS_SORTEO_FILE || filePath === COMPROBANTES_FILE || filePath === NUMEROS_FILE || filePath === GANADORES_FILE) {
+                return [];
             }
-        } else {
-            console.log('Colección de números de rifa ya inicializada (según flag en Primary). No se realiza inicialización masiva.');
+            return {};
         }
-
-        console.log('Sincronización con Firestore (Primary) completada. El servidor usará los datos más recientes de Primary.');
-
+        return JSON.parse(data);
     } catch (error) {
-        console.error('Error al sincronizar datos con Firestore (Primary) durante la carga inicial. El servidor continuará operando con los datos cargados localmente:', error.message); // Log más específico
-        console.error('Stack trace del error de sincronización:', error.stack); // Añadir stack trace
+        console.error(`Error leyendo ${path.basename(filePath)}:`, error);
+        // Si el archivo no existe o está vacío/corrupto, devuelve un objeto o array vacío
+        if (filePath === VENTAS_FILE || filePath === RESULTADOS_SORTEO_FILE || filePath === COMPROBANTES_FILE || filePath === NUMEROS_FILE || filePath === GANADORES_FILE) {
+            return [];
+        }
+        return {};
+    }
+}
+
+// Función auxiliar para escribir en un archivo JSON
+async function writeJsonFile(filePath, data) {
+    await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+let configuracion = {};
+let numeros = []; // Esta es la variable global que necesita actualizarse
+let horariosZulia = { horarios_zulia: [] }; // Objeto para horarios, no solo array
+let ventas = []; // <-- Sigue siendo para el archivo local ventas.json
+let comprobantes = [];
+let resultadosSorteo = [];
+let premios = {};
+let ganadoresSorteos = []; // NUEVO: Variable global para almacenar los ganadores de los sorteos procesados
+
+let db; // <-- CAMBIO INTEGRADO: Declara la variable para la instancia de Firestore
+
+// --- CONSTANTES PARA LA LÓGICA DE CIERRE MANUAL DEL SORTEO ---
+// Se eliminó la declaración duplicada de CARACAS_TIMEZONE
+const SALES_THRESHOLD_PERCENTAGE = 80; // Porcentaje mínimo de ventas para no suspender (80%)
+const DRAW_SUSPENSION_HOUR = 12; // Hora límite para la verificación (12 PM)
+const DRAW_SUSPENSION_MINUTE = 15; // Minuto límite para la verificación (15 minutos, es decir, 12:15 PM)
+const TOTAL_RAFFLE_NUMBERS = 1000; // Número total de boletos disponibles en la rifa (000-999)
+
+
+// Carga inicial de datos
+async function loadInitialData() {
+    try {
+        configuracion = await readJsonFile(CONFIG_FILE);
+        numeros = await readJsonFile(NUMEROS_FILE);
+        // MODIFICACIÓN: Asegurar que zulia y chance sean arrays, incluso si el archivo está vacío o malformado
+        const loadedHorariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE);
+        horariosZulia = {
+            zulia: Array.isArray(loadedHorariosZulia.zulia) ? loadedHorariosZulia.zulia : [],
+            chance: Array.isArray(loadedHorariosZulia.chance) ? loadedHorariosZulia.chance : []
+        };
+        ventas = await readJsonFile(VENTAS_FILE);
+        comprobantes = await readJsonFile(COMPROBANTES_FILE);
+        resultadosSorteo = await readJsonFile(RESULTADOS_SORTEO_FILE); // Leer el nuevo archivo
+        premios = await readJsonFile(PREMIOS_FILE);
+        ganadoresSorteos = await readJsonFile(GANADORES_FILE); // NUEVO: Cargar el archivo de ganadores
+
+        console.log('Datos iniciales cargados.');
+    } catch (error) {
+        console.error('Error al cargar datos iniciales:', error);
     }
 }
 
 // Configuración de Nodemailer
 let transporter;
 function configureMailer() {
+    // Usar variables de entorno si están disponibles, de lo contrario, usar configuracion.json
     const emailUser = process.env.EMAIL_USER || configuracion.mail_config.user;
     const emailPass = process.env.EMAIL_PASS || configuracion.mail_config.pass;
 
@@ -400,7 +200,7 @@ function configureMailer() {
         transporter = nodemailer.createTransport({
             host: configuracion.mail_config.host,
             port: configuracion.mail_config.port,
-            secure: configuracion.mail_config.secure,
+            secure: configuracion.mail_config.secure, // Usar el valor de secure de la configuración
             auth: {
                 user: emailUser,
                 pass: emailPass
@@ -409,10 +209,11 @@ function configureMailer() {
         console.log('Nodemailer configurado.');
     } else {
         console.warn('Configuración de correo incompleta. El envío de correos no funcionará.');
-        transporter = null;
+        transporter = null; // Asegura que transporter sea null si no se puede configurar
     }
 }
 
+// --- Funciones para enviar correos ---
 /**
  * Envía un correo electrónico utilizando el transporter configurado.
  * Ahora 'to' puede ser una cadena de texto (un solo correo) o un array de cadenas (múltiples correos).
@@ -428,23 +229,27 @@ async function sendEmail(to, subject, html, attachments = []) {
         return false;
     }
     try {
+        // Convierte el array de 'to' en una cadena separada por comas, si es un array.
+        // Nodemailer puede manejar tanto strings como arrays para el campo 'to'.
         const recipients = Array.isArray(to) ? to.join(',') : to;
         const mailOptions = {
             from: `${configuracion.mail_config.senderName || 'Sistema de Rifas'} <${configuracion.mail_config.user}>`,
             to: recipients,
             subject,
             html,
-            attachments
+            attachments // Pasa los adjuntos directamente
         };
         await transporter.sendMail(mailOptions);
         console.log('Correo enviado exitosamente.');
         return true;
     }  catch (error) {
-        console.error('Error al enviar correo:', error.message); // Log más específico
+        console.error('Error al enviar correo:', error);
         return false;
     }
 }
 
+
+// --- INICIO: Función para enviar notificaciones de ventas por WhatsApp (Resumen y Otros) ---
 /**
  * Envía una notificación de resumen de ventas o mensajes personalizados por WhatsApp a los números de administrador configurados.
  * Esto genera una URL de wa.me y la imprime en consola, ya que el envío directo de WhatsApp requiere integración con una API externa.
@@ -467,35 +272,25 @@ async function sendWhatsappNotification(messageText) {
         }
 
     } catch (error) {
-        console.error('Error al enviar notificación por WhatsApp:', error.message); // Log más específico
+        console.error('Error al enviar notificación por WhatsApp:', error);
     }
 }
 
 // Función auxiliar para enviar notificación de resumen de ventas (WhatsApp y Email)
 async function sendSalesSummaryNotifications() {
-    // Para esta función de CRON, necesitamos la configuración y ventas más recientes.
-    // Recargar configuración para asegurar que `last_sales_notification_count` y `sales_notification_threshold` estén al día.
-    let latestConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-    if (latestConfig) {
-        configuracion = latestConfig; // Actualizar caché global
-    } else {
-        console.error('No se pudo cargar la configuración de Firestore (Primary) para sendSalesSummaryNotifications. Usando valores en memoria.');
-        // Continuar con la configuración en memoria si Firestore no está disponible
-    }
-
-    console.log('[sendSalesSummaryNotifications] Iniciando notificación de resumen de ventas.');
+    await loadInitialData(); // Asegura que la configuración y ventas estén al día
     const now = moment().tz(CARACAS_TIMEZONE);
 
-    // Obtener ventas directamente de Firestore (Primary) para la fecha del sorteo actual
-    const salesSnapshot = await primaryDb.collection('sales').where('drawDate', '==', configuracion.fecha_sorteo).get();
-    const ventasParaFechaSorteo = salesSnapshot.docs
-        .map(doc => doc.data())
-        .filter(venta => venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente');
-
+    // Esta función seguirá leyendo de 'ventas' (el archivo local)
+    const ventasParaFechaSorteo = ventas.filter(venta =>
+        venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+    );
     const totalVentas = ventasParaFechaSorteo.length;
     const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
     const soldPercentage = (totalVentas / totalPossibleTickets) * 100;
 
+
+    // --- ENVIAR NOTIFICACIÓN POR WHATSAPP ---
     const whatsappMessageText = `*Actualización de Ventas Lotería:*\n\n` +
                                 `Fecha Sorteo: *${configuracion.fecha_sorteo}*\n` +
                                 `Sorteo Nro: *${configuracion.numero_sorteo_correlativo}*\n` +
@@ -504,10 +299,12 @@ async function sendSalesSummaryNotifications() {
                                 `Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}`;
     await sendWhatsappNotification(whatsappMessageText);
 
+
+    // --- ENVIAR NOTIFICACIÓN POR CORREO ELECTRÓNICO CON EXCEL ---
     try {
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
             const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
-                ventasParaFechaSorteo,
+                ventasParaFechaSorteo, // Pasa los datos de ventas detallados
                 configuracion,
                 'Reporte de Ventas Periódico',
                 'Reporte_Ventas_Periodico'
@@ -516,8 +313,8 @@ async function sendSalesSummaryNotifications() {
             const emailSubject = `Reporte de Ventas Periódico - ${now.format('YYYY-MM-DD HH:mm')}`;
             const emailHtmlContent = `
                 <p>Se ha generado un reporte de ventas periódico para el sorteo del día <strong>${configuracion.fecha_sorteo}</strong>.</p>
-                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0).toFixed(2)}</p>
-                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + (venta.valueBs || 0), 0).toFixed(2)}</p>
+                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + venta.valueUSD, 0).toFixed(2)}</p>
+                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + venta.valueBs, 0).toFixed(2)}</p>
                 <p><b>Porcentaje de Tickets Vendidos:</b> ${soldPercentage.toFixed(2)}%</p>
                 <p>Adjunto encontrarás el detalle completo en formato Excel.</p>
                 <p>Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
@@ -535,131 +332,142 @@ async function sendSalesSummaryNotifications() {
             }
         }
     } catch (emailError) {
-        console.error('Error al generar o enviar el reporte de ventas periódico por correo:', emailError.message); // Log más específico
+        console.error('Error al generar o enviar el reporte de ventas periódico por correo:', emailError);
     }
 }
+
+
+// --- FIN: Función para enviar notificaciones de ventas por WhatsApp (Resumen y Otros) ---
+
+
+// Firebase Admin SDK Initialization
+let serviceAccount;
+try {
+    const serviceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+    if (!serviceAccountBase64) {
+        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set.');
+    }
+    const serviceAccountJson = Buffer.from(serviceAccountBase64, 'base64').toString('utf8');
+    serviceAccount = JSON.parse(serviceAccountJson);
+
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: `https://${serviceAccount.project_id}.firebaseio.com`
+    });
+    db = admin.firestore(); // <-- CAMBIO INTEGRADO: Inicializa la referencia a Firestore
+    console.log('Firebase Admin SDK inicializado exitosamente.');
+} catch (error) {
+    console.error('Error al inicializar Firebase Admin SDK:', error);
+    process.exit(1);
+}
+
+
+// --- CAMBIO INTEGRADO: Función para guardar en Firestore ---
+/**
+ * Guarda un documento de venta en la colección 'ventas_sorteo' de Firestore.
+ * @param {object} ventaData - Los datos de la venta a guardar.
+ */
+async function guardarVentaEnFirestore(ventaData) {
+    if (!db) {
+        console.error('Error: Firestore no está inicializado.');
+        return { success: false, message: 'Firestore no está inicializado.' };
+    }
+    
+    try {
+        // Usa `add` para que Firestore genere un ID único para el documento
+        const docRef = await db.collection('ventas_sorteo').add(ventaData);
+        console.log('DEBUG_BACKEND: Venta guardada en Cloud Firestore con ID:', docRef.id);
+        return { success: true, docId: docRef.id };
+    } catch (error) {
+        console.error('Error al guardar la venta en Firestore:', error);
+        throw new Error('Error al guardar la venta en la base de datos de Firebase.');
+    }
+}
+// --- FIN CAMBIO INTEGRADO ---
 
 
 // ===============================================
 // === ENDPOINTS DE LA API =======================
 // ===============================================
 
-app.get('/', (req, res) => {
-    res.status(200).json({ message: 'Servidor de la API de Loterías activo. Accede a las rutas /api/ para interactuar.' });
-});
-
-// Configuración de CORS explícita y exclusiva para múltiples orígenes
-app.use(cors({
-    origin: ['https://paneladmin01.netlify.app', 'https://tuoportunidadeshoy.netlify.app'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
-}));
-
 // Obtener configuración
 app.get('/api/configuracion', async (req, res) => {
-    try {
-        // Siempre leer de la DB principal para GETs
-        const configToRead = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (configToRead) {
-            configuracion = configToRead; // Actualizar caché en memoria
-        }
-        const configToSend = { ...configuracion };
-        delete configToSend.mail_config; // No enviar credenciales sensibles
-        res.json(configToSend);
-    } catch (error) {
-        console.error('Error al obtener configuración de Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al obtener configuración.' });
-    }
+    // Asegurarse de no enviar credenciales sensibles
+    const configToSend = { ...configuracion };
+    delete configToSend.mail_config;
+    res.json(configToSend);
 });
 
 // Actualizar configuración (Cambiado de POST a PUT)
 app.put('/api/configuracion', async (req, res) => {
     const newConfig = req.body;
     try {
-        // Leer la configuración más reciente de Firestore (Primary) para asegurar consistencia
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            currentConfig = { ...configuracion };
-            console.warn('Configuración no encontrada en Firestore (Primary) para actualizar. Usando la configuración en memoria como base.');
-        }
-
+        // Fusionar solo los campos permitidos y existentes
         Object.keys(newConfig).forEach(key => {
-            if (currentConfig.hasOwnProperty(key) && key !== 'mail_config' && key !== 'block_reason_message') {
-                currentConfig[key] = newConfig[key];
+            if (configuracion.hasOwnProperty(key) && key !== 'mail_config' && key !== 'block_reason_message') { // No permitir que el frontend actualice block_reason_message directamente
+                configuracion[key] = newConfig[key];
             }
         });
 
+        // Manejar admin_email_for_reports específicamente para asegurar que sea un array
         if (newConfig.admin_email_for_reports !== undefined) {
-            currentConfig.admin_email_for_reports = Array.isArray(newConfig.admin_email_for_reports)
+            configuracion.admin_email_for_reports = Array.isArray(newConfig.admin_email_for_reports)
                                                       ? newConfig.admin_email_for_reports
-                                                      : [newConfig.admin_email_for_reports].filter(Boolean);
+                                                      : [newConfig.admin_email_for_reports].filter(Boolean); // Filtra valores falsy
         }
+        // Asegurar que admin_whatsapp_numbers sea un array
         if (newConfig.admin_whatsapp_numbers !== undefined) {
-            currentConfig.admin_whatsapp_numbers = Array.isArray(newConfig.admin_whatsapp_numbers)
+            configuracion.admin_whatsapp_numbers = Array.isArray(newConfig.admin_whatsapp_numbers)
                                                     ? newConfig.admin_whatsapp_numbers
                                                     : [newConfig.admin_whatsapp_numbers].filter(Boolean);
         }
+        // Asegurar que last_sales_notification_count sea un número (puede venir como string de un input)
         if (newConfig.last_sales_notification_count !== undefined) {
-            currentConfig.last_sales_notification_count = parseInt(newConfig.last_sales_notification_count, 10);
+            configuracion.last_sales_notification_count = parseInt(newConfig.last_sales_notification_count, 10);
         }
+        // Asegurar que sales_notification_threshold sea un número
         if (newConfig.sales_notification_threshold !== undefined) {
-            currentConfig.sales_notification_threshold = parseInt(newConfig.sales_notification_threshold, 10);
+            configuracion.sales_notification_threshold = parseInt(newConfig.sales_notification_threshold, 10);
         }
 
-        // Escribir en la base de datos principal
-        await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', currentConfig);
-        configuracion = currentConfig; // Actualizar la caché en memoria
-
+        await writeJsonFile(CONFIG_FILE, configuracion);
         res.json({ message: 'Configuración actualizada con éxito', configuracion: configuracion });
     } catch (error) {
-        console.error('Error al actualizar configuración en Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al actualizar configuración:', error);
         res.status(500).json({ message: 'Error interno del servidor al actualizar configuración.' });
     }
 });
 
 
-// Obtener estado de los números (AHORA LEE DIRECTAMENTE DE FIRESTORE PRIMARY)
-app.get('/api/numeros', async (req, res) => {
-    try {
-        const numbersSnapshot = await primaryDb.collection('raffle_numbers').get();
-        const currentNumerosFirestore = numbersSnapshot.docs.map(doc => doc.data());
-        console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde Firestore (Primary).');
-        res.json(currentNumerosFirestore);
-    } catch (error) {
-        console.error('Error al obtener números desde Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al obtener números.', error: error.message });
-    }
+// Obtener estado de los números
+app.get('/api/numeros', (req, res) => {
+    // DEBUG: Log para ver qué se envía cuando se solicita el estado de los números
+    console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros.');
+    res.json(numeros); // 'numeros' es la variable global que se mantiene en memoria
 });
 
 // Actualizar estado de los números (usado internamente o por admin)
 app.post('/api/numeros', async (req, res) => {
-    const updatedNumbers = req.body;
+    numeros = req.body; // Se espera el array completo de números
     try {
-        const primaryBatch = primaryDb.batch();
-        updatedNumbers.forEach(num => {
-            const numRef = primaryDb.collection('raffle_numbers').doc(num.numero);
-            primaryBatch.set(numRef, num, { merge: true });
-        });
-        await primaryBatch.commit();
-        numeros = updatedNumbers; // Actualizar caché en memoria
-
-        console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché (solo los comprados).');
+        await writeJsonFile(NUMEROS_FILE, numeros);
+        console.log('DEBUG_BACKEND: Números actualizados y guardados en archivo.');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
-        console.error('Error al actualizar números en Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al actualizar números:', error);
         res.status(500).json({ message: 'Error interno del servidor al actualizar números.' });
     }
 });
 
-// Ruta para obtener ventas (ahora siempre desde Firestore Primary)
+// Ruta para obtener ventas (versión que usa await readJsonFile)
+// NOTA: Esta ruta seguirá leyendo del archivo local ventas.json
 app.get('/api/ventas', async (req, res) => {
     try {
-        const currentVentas = await readFirestoreCollection(primaryDb, 'sales');
-        console.log('Enviando ventas al frontend desde Firestore (Primary):', currentVentas.length, 'ventas.');
+        const currentVentas = await readJsonFile(VENTAS_FILE);
+        console.log('Enviando ventas al frontend:', currentVentas.length, 'ventas.');
         res.status(200).json(currentVentas);
     } catch (error) {
-        console.error('Error al obtener ventas desde Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al obtener ventas:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener ventas.', error: error.message });
     }
 });
@@ -677,33 +485,29 @@ app.get('/api/compra', (req, res) => {
 // Ruta para la compra de tickets
 app.post('/api/comprar', async (req, res) => {
     console.log('DEBUG_BACKEND: Recibida solicitud POST /api/comprar.');
-    const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, horaSorteo } = req.body;
+    // Solo obtenemos los datos necesarios del body, pero la fecha del sorteo será la configurada en el backend.
+    const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, horaSorteo } = req.body; // 'fechaSorteo' se ignora de req.body para el drawDate
 
     if (!numerosSeleccionados || numerosSeleccionados.length === 0 || !valorUsd || !valorBs || !metodoPago || !comprador || !telefono || !horaSorteo) {
         console.error('DEBUG_BACKEND: Faltan datos requeridos para la compra.');
         return res.status(400).json({ message: 'Faltan datos requeridos para la compra (números, valor, método de pago, comprador, teléfono, hora del sorteo).' });
     }
 
-    let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-    if (!currentConfig) {
-        console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para la compra. Usando la configuración en memoria.');
-    } else {
-        configuracion = currentConfig;
-    }
-
+    // Verificar si la página está bloqueada
     if (configuracion.pagina_bloqueada) {
         console.warn('DEBUG_BACKEND: Página bloqueada, denegando compra.');
         return res.status(403).json({ message: 'La página está bloqueada para nuevas compras en este momento.' });
     }
 
     try {
-        const selectedNumbersSnapshot = await primaryDb.collection('raffle_numbers')
-                                            .where('numero', 'in', numerosSeleccionados)
-                                            .get();
-        const currentSelectedNumbersFirestore = selectedNumbersSnapshot.docs.map(doc => doc.data());
+        // Cargar los números más recientes para evitar conflictos
+        // Esto es CRÍTICO: Asegurarse de que `numeros` esté actualizado ANTES de modificarlo
+        const currentNumeros = await readJsonFile(NUMEROS_FILE);
+        console.log('DEBUG_BACKEND: Números actuales cargados desde archivo para verificar conflictos.');
 
+        // Verificar si los números ya están comprados
         const conflictos = numerosSeleccionados.filter(n =>
-            currentSelectedNumbersFirestore.find(numObj => numObj.numero === n && numObj.comprado)
+            currentNumeros.find(numObj => numObj.numero === n && numObj.comprado)
         );
 
         if (conflictos.length > 0) {
@@ -711,34 +515,34 @@ app.post('/api/comprar', async (req, res) => {
             return res.status(409).json({ message: `Los números ${conflictos.join(', ')} ya han sido comprados. Por favor, selecciona otros.` });
         }
 
-        const primaryBatch = primaryDb.batch();
+        // Marcar los números como comprados
         numerosSeleccionados.forEach(numSel => {
-            const numRef = primaryDb.collection('raffle_numbers').doc(numSel);
-            primaryBatch.update(numRef, {
-                comprado: true,
-                originalDrawNumber: configuracion.numero_sorteo_correlativo
-            });
-            const numObjInCache = numeros.find(n => n.numero === numSel);
-            if (numObjInCache) {
-                numObjInCache.comprado = true;
-                numObjInCache.originalDrawNumber = configuracion.numero_sorteo_correlativo;
+            const numObj = currentNumeros.find(n => n.numero === numSel);
+            if (numObj) {
+                numObj.comprado = true;
+                numObj.originalDrawNumber = configuracion.numero_sorteo_correlativo; // Guardar el correlativo del sorteo en que se compró
+                console.log(`DEBUG_BACKEND: Número ${numSel} marcado como comprado.`);
             } else {
-                numeros.push({ numero: numSel, comprado: true, originalDrawNumber: configuracion.numero_sorteo_correlativo });
+                console.warn(`DEBUG_BACKEND: Intento de marcar número no encontrado en la lista: ${numSel}`);
             }
         });
-        await primaryBatch.commit();
-        console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché (solo los comprados).');
+
+        // DEBUG: Imprimir el estado de los números seleccionados después de marcarlos como comprados
+        console.log('DEBUG_BACKEND: Estado de números seleccionados después de marcarlos como comprados (en memoria antes de guardar):',
+            currentNumeros.filter(n => numerosSeleccionados.includes(n.numero))
+        );
+
 
         const now = moment().tz("America/Caracas");
         configuracion.ultimo_numero_ticket = (configuracion.ultimo_numero_ticket || 0) + 1;
-        const numeroTicket = configuracion.ultimo_numero_ticket.toString().padStart(5, '0');
+        const numeroTicket = configuracion.ultimo_numero_ticket.toString().padStart(5, '0'); // Número de ticket correlativo de 5 dígitos
 
         const nuevaVenta = {
-            id: Date.now(),
-            purchaseDate: now.toISOString(),
-            drawDate: configuracion.fecha_sorteo,
-            drawTime: horaSorteo,
-            drawNumber: configuracion.numero_sorteo_correlativo,
+            id: Date.now(), // ID único para la venta
+            purchaseDate: now.toISOString(), // Usar ISO string para consistencia
+            drawDate: configuracion.fecha_sorteo, // *** CLAVE: Usar la fecha configurada en el backend ***
+            drawTime: horaSorteo, // Hora del sorteo, que sí viene del cliente
+            drawNumber: configuracion.numero_sorteo_correlativo, // Número correlativo del sorteo
             ticketNumber: numeroTicket,
             buyerName: comprador,
             buyerPhone: telefono,
@@ -747,65 +551,77 @@ app.post('/api/comprar', async (req, res) => {
             valueBs: parseFloat(valorBs),
             paymentMethod: metodoPago,
             paymentReference: referenciaPago,
-            voucherURL: null,
+            voucherURL: null, // Se llenará si se sube un comprobante
             validationStatus: 'Pendiente'
         };
 
-        const docRef = await primaryDb.collection('sales').add(nuevaVenta);
-        nuevaVenta.firestoreId = docRef.id;
-        console.log('DEBUG_BACKEND: Venta guardada en Firestore (Primary) con ID:', docRef.id);
+        // --- CAMBIO INTEGRADO: Guardar en Firestore ---
+        const firestoreSaveResult = await guardarVentaEnFirestore(nuevaVenta);
+        if (!firestoreSaveResult.success) {
+            throw new Error(firestoreSaveResult.message);
+        }
+        // --- FIN CAMBIO INTEGRADO ---
+        
+        // Mantener la lógica de guardado en el archivo JSON local para consistencia con otras partes que leen de allí
+        ventas.push(nuevaVenta);
+        await writeJsonFile(VENTAS_FILE, ventas);
+        console.log('DEBUG_BACKEND: Ventas guardadas en archivo local.');
 
-        await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', {
-            ultimo_numero_ticket: configuracion.ultimo_numero_ticket
-        });
-        console.log('DEBUG_BACKEND: Configuración (ultimo_numero_ticket) actualizada en Firestore (Primary).');
+        await writeJsonFile(NUMEROS_FILE, currentNumeros); // Guardar los números actualizados en el archivo
+        numeros = currentNumeros; // Actualizar la variable global 'numeros' en memoria
+        console.log('DEBUG_BACKEND: Números actualizados y guardados en archivo. Variable global "numeros" actualizada.');
+
+        await writeJsonFile(CONFIG_FILE, configuracion); // Guardar el config con el nuevo número de ticket
+        console.log('DEBUG_BACKEND: Configuración actualizada y guardada en archivo.');
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
         console.log('DEBUG_BACKEND: Respuesta de compra enviada al frontend.');
 
+        // Enviar notificación a WhatsApp (al administrador) de *compra individual*
         const whatsappMessageIndividual = `*¡Nueva Compra!*%0A%0A*Fecha Sorteo:* ${configuracion.fecha_sorteo}%0A*Hora Sorteo:* ${horaSorteo}%0A*Nro. Ticket:* ${numeroTicket}%0A*Comprador:* ${comprador}%0A*Teléfono:* ${telefono}%0A*Números:* ${numerosSeleccionados.join(', ')}%0A*Valor USD:* $${valorUsd}%0A*Valor Bs:* Bs ${valorBs}%0A*Método Pago:* ${metodoPago}%0A*Referencia:* ${referenciaPago}`;
+
+        // Utilizar la nueva función sendWhatsappNotification
         await sendWhatsappNotification(whatsappMessageIndividual);
         console.log('DEBUG_BACKEND: Proceso de compra en backend finalizado.');
 
+        // --- INICIO: Lógica para Notificación de Ventas por Umbral (Resumen) ---
         try {
-            let latestConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-            if (latestConfig) {
-                configuracion = latestConfig;
-            } else {
-                console.warn('No se pudo cargar la última configuración de Firestore (Primary) para la lógica de notificación por umbral. Usando la configuración en memoria.');
-            }
+            // Re-leer configuración y ventas para obtener los conteos más actualizados para la lógica
+            const latestConfig = await readJsonFile(CONFIG_FILE);
+            const latestVentas = await readJsonFile(VENTAS_FILE); // Lee del archivo local
+            // Contar tickets confirmados o pendientes para la fecha del sorteo actual
+            const currentTotalSales = latestVentas.filter(sale =>
+                sale.drawDate === latestConfig.fecha_sorteo && (sale.validationStatus === 'Confirmado' || sale.validationStatus === 'Pendiente')
+            ).length;
 
-            const salesSnapshot = await primaryDb.collection('sales').where('drawDate', '==', configuracion.fecha_sorteo).get();
-            const currentTotalSales = salesSnapshot.docs
-                .map(doc => doc.data())
-                .filter(sale => sale.validationStatus === 'Confirmado' || sale.validationStatus === 'Pendiente')
-                .length;
+            const prevNotifiedCount = latestConfig.last_sales_notification_count || 0;
+            const notificationThreshold = latestConfig.sales_notification_threshold || 20; // Por defecto 20
 
-            const prevNotifiedCount = configuracion.last_sales_notification_count || 0;
-            const notificationThreshold = configuracion.sales_notification_threshold || 20;
-
+            // Determinar si se ha cruzado un nuevo múltiplo del umbral de notificación
             const currentMultiple = Math.floor(currentTotalSales / notificationThreshold);
             const prevMultiple = Math.floor(prevNotifiedCount / notificationThreshold);
 
             if (currentMultiple > prevMultiple) {
                 console.log(`[WhatsApp Notificación Resumen] Ventas actuales (${currentTotalSales}) han cruzado un nuevo múltiplo (${currentMultiple * notificationThreshold}) del umbral (${notificationThreshold}). Enviando notificación de resumen.`);
-                await sendSalesSummaryNotifications();
+                // Llama a la función que ahora maneja ambos tipos de notificaciones
+                await sendSalesSummaryNotifications(); // Esta función ya carga los datos más recientes internamente
 
-                // Actualizar en la DB principal
-                await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', {
-                    last_sales_notification_count: currentMultiple * notificationThreshold
-                });
-                console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${currentMultiple * notificationThreshold} en Firestore (Primary).`);
+                // Actualizar el contador de la última notificación en la configuración
+                latestConfig.last_sales_notification_count = currentMultiple * notificationThreshold; // Actualiza al múltiplo exacto
+                await writeJsonFile(CONFIG_FILE, latestConfig);
+                console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${latestConfig.last_sales_notification_count}`);
             } else {
                 console.log(`[WhatsApp Notificación Resumen Check] Ventas actuales (${currentTotalSales}) no han cruzado un nuevo múltiplo del umbral (${notificationThreshold}). Último contador notificado: ${prevNotifiedCount}. No se envió notificación de resumen.`);
             }
 
         } catch (notificationError) {
-            console.error('Error durante la verificación de notificación de ventas por umbral:', notificationError.message); // Log más específico
+            console.error('Error durante la verificación de notificación de ventas por umbral:', notificationError);
         }
+        // --- FIN: Lógica para Notificación de Ventas por Umbral (Resumen) ---
 
     } catch (error) {
-        console.error('ERROR_BACKEND: Error al procesar la compra:', error.message); // Log más específico
+        console.error('ERROR_BACKEND: Error al procesar la compra:', error);
+        // MODIFICACIÓN: Asegurar que la respuesta sea siempre un JSON válido en caso de error.
         res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
     }
 });
@@ -823,13 +639,11 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         return res.status(400).json({ message: 'Tipo de archivo no permitido. Solo se aceptan imágenes (JPG, PNG, GIF) y PDF.' });
     }
 
-    const salesSnapshot = await primaryDb.collection('sales').where('id', '==', ventaId).limit(1).get();
-    if (salesSnapshot.empty) {
+    // Busca en las ventas del archivo local (el endpoint /api/ventas sigue leyendo de aquí)
+    const ventaIndex = ventas.findIndex(v => v.id === ventaId);
+    if (ventaIndex === -1) {
         return res.status(404).json({ message: 'Venta no encontrada.' });
     }
-    const ventaDoc = salesSnapshot.docs[0];
-    const ventaData = ventaDoc.data();
-    const firestoreVentaId = ventaDoc.id;
 
     const now = moment().tz("America/Caracas");
     const timestamp = now.format('YYYYMMDD_HHmmss');
@@ -840,21 +654,34 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
     try {
         await comprobanteFile.mv(filePath);
 
-        // Actualizar en la base de datos principal
-        await writeFirestoreDoc(primaryDb, 'sales', firestoreVentaId, { voucherURL: `/uploads/${fileName}` });
-        console.log(`Voucher URL actualizado en Firestore (Primary) para venta ${firestoreVentaId}.`);
+        // Actualiza la URL del voucher en la venta en memoria y en el archivo local
+        ventas[ventaIndex].voucherURL = `/uploads/${fileName}`; // Guardar URL relativa para acceso
+        await writeJsonFile(VENTAS_FILE, ventas);
 
+        // Opcional: Registrar en un archivo de comprobantes si necesitas una lista separada
+        comprobantes.push({
+            id: Date.now(),
+            venta_id: ventaId,
+            comprobante_nombre: fileName,
+            comprobante_tipo: comprobanteFile.mimetype,
+            fecha_subida: now.format('YYYY-MM-DD HH:mm:ss'),
+            url: `/uploads/${fileName}`
+        });
+        await writeJsonFile(COMPROBANTES_FILE, comprobantes);
+
+
+        // Envío de correo electrónico con el comprobante adjunto
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const subject = `Nuevo Comprobante de Pago para Venta #${ventaData.ticketNumber}`;
+            const subject = `Nuevo Comprobante de Pago para Venta #${ventas[ventaIndex].ticketNumber}`;
             const htmlContent = `
-                <p>Se ha subido un nuevo comprobante de pago para la venta con Ticket Nro. <strong>${ventaData.ticketNumber}</strong>.</p>
-                <p><b>Comprador:</b> ${ventaData.buyerName}</p>
-                <p><b>Teléfono:</b> ${ventaData.buyerPhone}</p>
-                <p><b>Números:</b> ${ventaData.numbers.join(', ')}</p>
-                <p><b>Monto USD:</b> $${ventaData.valueUSD.toFixed(2)}</p>
-                <p><b>Monto Bs:</b> Bs ${ventaData.valueBs.toFixed(2)}</p>
-                <p><b>Método de Pago:</b> ${ventaData.paymentMethod}</p>
-                <p><b>Referencia:</b> ${ventaData.paymentReference}</p>
+                <p>Se ha subido un nuevo comprobante de pago para la venta con Ticket Nro. <strong>${ventas[ventaIndex].ticketNumber}</strong>.</p>
+                <p><b>Comprador:</b> ${ventas[ventaIndex].buyerName}</p>
+                <p><b>Teléfono:</b> ${ventas[ventaIndex].buyerPhone}</p>
+                <p><b>Números:</b> ${ventas[ventaIndex].numbers.join(', ')}</p>
+                <p><b>Monto USD:</b> $${ventas[ventaIndex].valueUSD.toFixed(2)}</p>
+                <p><b>Monto Bs:</b> Bs ${ventas[ventaIndex].valueBs.toFixed(2)}</p>
+                <p><b>Método de Pago:</b> ${ventas[ventaIndex].paymentMethod}</p>
+                <p><b>Referencia:</b> ${ventas[ventaIndex].paymentReference}</p>
                 <p>Haz clic <a href="${API_BASE_URL}/uploads/${fileName}" target="_blank">aquí</a> para ver el comprobante.</p>
                 <p>También puedes verlo en el panel de administración.</p>
             `;
@@ -871,9 +698,10 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
             }
         }
 
+
         res.status(200).json({ message: 'Comprobante subido y asociado con éxito.', url: `/uploads/${fileName}` });
     } catch (error) {
-        console.error('Error al subir el comprobante:', error.message); // Log más específico
+        console.error('Error al subir el comprobante:', error);
         res.status(500).json({ message: 'Error interno del servidor al subir el comprobante.', error: error.message });
     }
 });
@@ -883,18 +711,8 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 
 
 // Endpoint para obtener horarios de Zulia (y Chance)
-app.get('/api/horarios-zulia', async (req, res) => {
-    try {
-        // Siempre leer de la DB principal
-        const horarios = await readFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance');
-        if (horarios) {
-            horariosZulia = horarios; // Actualizar caché
-        }
-        res.json(horariosZulia);
-    } catch (error) {
-        console.error('Error al obtener horarios de Zulia de Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
-    }
+app.get('/api/horarios-zulia', (req, res) => {
+    res.json(horariosZulia);
 });
 
 // Endpoint para actualizar horarios de Zulia (y Chance)
@@ -907,17 +725,11 @@ app.post('/api/horarios', async (req, res) => {
         return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings.' });
     }
     try {
-        let currentHorarios = await readFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance');
-        if (!currentHorarios) currentHorarios = { zulia: [], chance: [] };
-        currentHorarios[tipo] = horarios;
-
-        // Escribir en la base de datos principal
-        await writeFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance', currentHorarios);
-        horariosZulia = currentHorarios; // Actualizar caché
-
+        horariosZulia[tipo] = horarios;
+        await writeJsonFile(HORARIOS_ZULIA_FILE, horariosZulia);
         res.json({ message: `Horarios de ${tipo} actualizados con éxito.`, horarios: horariosZulia[tipo] });
     } catch (error) {
-        console.error(`Error al actualizar horarios de ${tipo} en Firestore (Primary):`, error.message); // Log más específico
+        console.error(`Error al actualizar horarios de ${tipo}:`, error);
         res.status(500).json({ message: `Error interno del servidor al actualizar horarios de ${tipo}.` });
     }
 });
@@ -931,31 +743,23 @@ app.get('/api/resultados-zulia', async (req, res) => {
     }
 
     try {
-        const resultsSnapshot = await primaryDb.collection('draw_results')
-                                      .where('fecha', '==', fecha)
-                                      .where('tipoLoteria', '==', 'zulia')
-                                      .get();
-        const resultsForDateAndZulia = resultsSnapshot.docs.map(doc => doc.data());
+        const allResultados = await readJsonFile(RESULTADOS_SORTEO_FILE);
+        const resultsForDateAndZulia = allResultados.filter(r =>
+            r.fecha === fecha && r.tipoLoteria.toLowerCase() === 'zulia'
+        );
 
         res.status(200).json(resultsForDateAndZulia);
     }
     catch (error) {
-        console.error('Error al obtener resultados de Zulia desde Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al obtener resultados de Zulia:', error);
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de Zulia.', error: error.message });
     }
 });
 
 
-// Endpoint para obtener los últimos resultados del sorteo (ahora siempre desde Firestore Primary)
-app.get('/api/resultados-sorteo', async (req, res) => {
-    try {
-        const currentResultados = await readFirestoreCollection(primaryDb, 'draw_results');
-        console.log('Enviando resultados de sorteo al frontend desde Firestore (Primary):', currentResultados.length, 'resultados.');
-        res.status(200).json(currentResultados);
-    } catch (error) {
-        console.error('Error al obtener resultados de sorteo desde Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al obtener resultados de sorteo.', error: error.message });
-    }
+// Endpoint para obtener los últimos resultados del sorteo
+app.get('/api/resultados-sorteo', (req, res) => {
+    res.json(resultadosSorteo);
 });
 
 // Endpoint para guardar/actualizar los resultados del sorteo
@@ -970,38 +774,35 @@ app.post('/api/resultados-sorteo', async (req, res) => {
     const currentDay = now.format('YYYY-MM-DD');
 
     try {
-        const existingResultsSnapshot = await primaryDb.collection('draw_results')
-                                                .where('fecha', '==', fecha)
-                                                .where('tipoLoteria', '==', tipoLoteria)
-                                                .limit(1)
-                                                .get();
+        let existingEntryIndex = resultadosSorteo.findIndex(r =>
+            r.fecha === fecha && r.tipoLoteria.toLowerCase() === tipoLoteria.toLowerCase()
+        );
 
-        let docId;
-        const dataToSave = {
-            fecha,
-            tipoLoteria,
-            resultados: resultadosPorHora,
-            ultimaActualizacion: now.format('YYYY-MM-DD HH:mm:ss')
-        };
-
-        if (!existingResultsSnapshot.empty) {
-            docId = existingResultsSnapshot.docs[0].id;
-            await writeFirestoreDoc(primaryDb, 'draw_results', docId, dataToSave);
+        if (existingEntryIndex !== -1) {
+            resultadosSorteo[existingEntryIndex].resultados = resultadosPorHora;
+            resultadosSorteo[existingEntryIndex].ultimaActualizacion = now.format('YYYY-MM-DD HH:mm:ss');
         } else {
-            docId = await addFirestoreDoc(primaryDb, 'draw_results', dataToSave);
+            resultadosSorteo.push({
+                fecha,
+                tipoLoteria,
+                resultados: resultadosPorHora,
+                ultimaActualizacion: now.format('YYYY-MM-DD HH:mm:ss')
+            });
         }
+        await writeJsonFile(RESULTADOS_SORTEO_FILE, resultadosSorteo);
 
         if (fecha === currentDay && tipoLoteria === 'zulia') {
-            await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', { ultima_fecha_resultados_zulia: fecha });
-            configuracion.ultima_fecha_resultados_zulia = fecha; // Actualizar caché de config
+            configuracion.ultima_fecha_resultados_zulia = fecha;
+            await writeJsonFile(CONFIG_FILE, configuracion);
         }
 
-        res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.' });
+        res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.', resultadosGuardados: resultadosSorteo });
     } catch (error) {
-        console.error('Error al guardar/actualizar resultados de sorteo en Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al guardar/actualizar resultados de sorteo:', error);
         res.status(500).json({ message: 'Error interno del servidor al guardar/actualizar resultados de sorteo.', error: error.message });
     }
 });
+
 
 /**
  * Genera un reporte de ventas en formato Excel y lo guarda en el directorio de reportes.
@@ -1012,14 +813,11 @@ app.post('/api/resultados-sorteo', async (req, res) => {
  * @returns {Promise<{excelFilePath: string, excelFileName: string}>} Objeto con la ruta y el nombre del archivo Excel generado.
  */
 async function generateGenericSalesExcelReport(salesData, config, reportTitle, fileNamePrefix) {
-    console.log(`[DEBUG_EXCEL] Iniciando generateGenericSalesExcelReport para: ${reportTitle}`);
-    console.log(`[DEBUG_EXCEL] salesData recibida (${salesData.length} items):`, JSON.stringify(salesData.slice(0, 5), null, 2), `... (total: ${salesData.length} items)`); // Limitar log
-
     const now = moment().tz(CARACAS_TIMEZONE);
     const todayFormatted = now.format('YYYY-MM-DD');
 
-    const totalVentasUSD = salesData.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0);
-    const totalVentasBs = salesData.reduce((sum, venta) => sum + (venta.valueBs || 0), 0);
+    const totalVentasUSD = salesData.reduce((sum, venta) => sum + venta.valueUSD, 0);
+    const totalVentasBs = salesData.reduce((sum, venta) => sum + venta.valueBs, 0);
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(reportTitle);
@@ -1032,18 +830,19 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     worksheet.addRow({ field: 'Título del Reporte', value: reportTitle });
     worksheet.addRow({ field: 'Fecha y Hora del Reporte', value: now.format('YYYY-MM-DD HH:mm:ss') });
     worksheet.addRow({ field: 'Fecha de Sorteo Reportado', value: config.fecha_sorteo || 'N/A' });
+    // MODIFICACIÓN: Asegurar que el valor sea una cadena de texto
     worksheet.addRow({ field: 'Número de Sorteo Reportado', value: String(config.numero_sorteo_correlativo || 'N/A') });
+    // MODIFICACIÓN: Asegurar que el valor sea una cadena de texto y que sea 0 si salesData es vacío
     worksheet.addRow({ field: 'Total de Tickets Vendidos', value: String(salesData.length || 0) });
     worksheet.addRow({ field: 'Total Vendido USD', value: totalVentasUSD.toFixed(2) });
     worksheet.addRow({ field: 'Total Vendido Bs', value: totalVentasBs.toFixed(2) });
 
-    worksheet.addRow({});
+    worksheet.addRow({}); // Espacio
     worksheet.addRow({ field: 'Detalle de Ventas' });
-    worksheet.addRow({});
+    worksheet.addRow({}); // Espacio
 
     const ventasHeaders = [
-        { header: 'ID Interno Venta', key: 'id', width: 20 },
-        { header: 'ID Firestore', key: 'firestoreId', width: 25 },
+        { header: 'ID Interno Venta', key: 'id', width: 20 }, // Nuevo campo: ID interno de la venta
         { header: 'Fecha/Hora Compra', key: 'purchaseDate', width: 25 },
         { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
         { header: 'Hora Sorteo', key: 'drawTime', width: 15 },
@@ -1058,35 +857,34 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
         { header: 'Referencia Pago', key: 'paymentReference', width: 20 },
         { header: 'URL Comprobante', key: 'voucherURL', width: 35 },
         { header: 'Estado Validación', key: 'validationStatus', width: 25 },
-        { header: 'Razón Anulación', key: 'voidedReason', width: 30 },
-        { header: 'Fecha Anulación', key: 'voidedAt', width: 25 },
-        { header: 'Razón Cierre', key: 'closedReason', width: 30 },
-        { header: 'Fecha Cierre', key: 'closedAt', width: 25 }
+        { header: 'Razón Anulación', key: 'voidedReason', width: 30 }, // Nuevo campo: Razón de anulación
+        { header: 'Fecha Anulación', key: 'voidedAt', width: 25 },     // Nuevo campo: Fecha de anulación
+        { header: 'Razón Cierre', key: 'closedReason', width: 30 },     // Nuevo campo: Razón de cierre
+        { header: 'Fecha Cierre', key: 'closedAt', width: 25 }          // Nuevo campo: Fecha de cierre
     ];
     worksheet.addRow(ventasHeaders.map(h => h.header));
 
-    salesData.forEach((venta, index) => {
+    salesData.forEach(venta => {
         worksheet.addRow({
-            id: venta.id,
-            firestoreId: venta.firestoreId || '',
-            purchaseDate: venta.purchaseDate ? moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '',
-            drawDate: venta.drawDate || '',
+            id: venta.id, // Mapeo del ID interno
+            purchaseDate: moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss'),
+            drawDate: venta.drawDate,
             drawTime: venta.drawTime || 'N/A',
-            drawNumber: venta.drawNumber || '',
-            ticketNumber: venta.ticketNumber || '',
-            buyerName: venta.buyerName || '',
-            buyerPhone: venta.buyerPhone || '',
-            numbers: (Array.isArray(venta.numbers) ? venta.numbers.join(', ') : (venta.numbers || '')),
-            valueUSD: venta.valueUSD || 0,
-            valueBs: venta.valueBs || 0,
-            paymentMethod: venta.paymentMethod || '',
-            paymentReference: venta.paymentReference || '',
+            drawNumber: venta.drawNumber,
+            ticketNumber: venta.ticketNumber,
+            buyerName: venta.buyerName,
+            buyerPhone: venta.buyerPhone,
+            numbers: venta.numbers.join(', '),
+            valueUSD: venta.valueUSD,
+            valueBs: venta.valueBs,
+            paymentMethod: venta.paymentMethod,
+            paymentReference: venta.paymentReference,
             voucherURL: venta.voucherURL ? `${API_BASE_URL}${venta.voucherURL}` : '',
             validationStatus: venta.validationStatus || 'Pendiente',
-            voidedReason: venta.voidedReason || '',
-            voidedAt: venta.voidedAt ? moment(venta.voidedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '',
-            closedReason: venta.closedReason || '',
-            closedAt: venta.closedAt ? moment(venta.closedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : ''
+            voidedReason: venta.voidedReason || '', // Mapeo de razón de anulación
+            voidedAt: venta.voidedAt ? moment(venta.voidedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '', // Mapeo de fecha de anulación
+            closedReason: venta.closedReason || '', // Mapeo de razón de cierre
+            closedAt: venta.closedAt ? moment(venta.closedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '' // Mapeo de fecha de cierre
         });
     });
 
@@ -1094,106 +892,20 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     const excelFilePath = path.join(REPORTS_DIR, excelFileName);
     await workbook.xlsx.writeFile(excelFilePath);
 
-    console.log(`[DEBUG_EXCEL] Excel generado en: ${excelFilePath}`);
     return { excelFilePath, excelFileName };
 }
 
-/**
- * Genera un buffer ZIP que contiene archivos Excel para cada colección de Firestore especificada.
- * @param {object} dbInstance - La instancia de Firestore desde la cual exportar.
- * @returns {Promise<Buffer>} Un buffer que representa el archivo ZIP.
- */
-async function generateDatabaseBackupZipBuffer(dbInstance) {
-    if (!dbInstance) {
-        throw new Error("No se proporcionó una instancia de base de datos para el respaldo.");
-    }
-    const archive = archiver('zip', {
-        zlib: { level: 9 }
-    });
 
-    const output = new (require('stream').PassThrough)();
-    archive.pipe(output);
-
-    try {
-        const collectionsToExport = ['app_config', 'raffle_numbers', 'sales', 'lottery_times', 'draw_results', 'prizes', 'winners'];
-
-        for (const collectionName of collectionsToExport) {
-            const snapshot = await dbInstance.collection(collectionName).get();
-            const data = snapshot.docs.map(doc => ({ firestoreId: doc.id, ...doc.data() }));
-
-            if (data.length > 0) {
-                const workbook = new ExcelJS.Workbook();
-                const worksheet = workbook.addWorksheet(collectionName);
-
-                const allKeys = new Set();
-                data.forEach(row => {
-                    Object.keys(row).forEach(key => allKeys.add(key));
-                });
-                const columns = Array.from(allKeys).map(key => ({ header: key, key: key, width: 25 }));
-                worksheet.columns = columns;
-
-                worksheet.addRow(columns.map(col => col.header));
-                data.forEach(row => {
-                    const rowData = {};
-                    columns.forEach(col => {
-                        if (Array.isArray(row[col.key])) {
-                            rowData[col.key] = row[col.key].join(', ');
-                        } else if (typeof row[col.key] === 'object' && row[col.key] !== null) {
-                            rowData[col.key] = JSON.stringify(row[col.key]);
-                        } else {
-                            rowData[col.key] = row[col.key];
-                        }
-                    });
-                    worksheet.addRow(rowData);
-                });
-
-                const excelBuffer = await workbook.xlsx.writeBuffer();
-                archive.append(excelBuffer, { name: `${collectionName}_firestore_backup.xlsx` });
-            } else {
-                console.log(`Colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'} está vacía, no se generó Excel para el backup.`);
-            }
-        }
-        
-        archive.finalize();
-
-        return new Promise((resolve, reject) => {
-            const buffers = [];
-            output.on('data', chunk => buffers.push(chunk));
-            output.on('end', () => resolve(Buffer.concat(buffers)));
-            archive.on('error', err => reject(err));
-        });
-
-    } catch (error) {
-        console.error('Error al generar el buffer ZIP de la base de datos:', error.message); // Log más específico
-        throw error;
-    }
-}
-
-
+// Endpoint para el Corte de Ventas (anteriormente corte-ventas, ahora con lógica de reseteo condicional)
 app.post('/api/corte-ventas', async (req, res) => {
-    console.log('[DEBUG_CORTE_VENTAS] Iniciando corte de ventas...');
     try {
         const now = moment().tz(CARACAS_TIMEZONE);
         const todayFormatted = now.format('YYYY-MM-DD');
 
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración no disponible en Firestore (Primary) para corte de ventas. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
-        console.log('[DEBUG_CORTE_VENTAS] Configuración actual (desde Firestore Primary o memoria):', JSON.stringify(configuracion, null, 2));
-
-        const salesSnapshot = await primaryDb.collection('sales')
-                                      .where('drawDate', '==', configuracion.fecha_sorteo)
-                                      .get();
-        const ventasDelDia = salesSnapshot.docs
-            .map(doc => ({ firestoreId: doc.id, ...doc.data() }))
-            .filter(venta => venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente');
-
-        console.log(`[DEBUG_CORTE_VENTAS] Ventas del día (${configuracion.fecha_sorteo}, Confirmadas/Pendientes) desde Firestore (Primary): ${ventasDelDia.length} items.`);
-        console.log('[DEBUG_CORTE_VENTAS] Detalle de ventasDelDia (primeras 5):', JSON.stringify(ventasDelDia.slice(0, 5), null, 2));
-
+        // Solo las ventas confirmadas o pendientes para la fecha del sorteo actual
+        const ventasDelDia = ventas.filter(venta =>
+            venta.drawDate === configuracion.fecha_sorteo && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+        );
 
         const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
             ventasDelDia,
@@ -1201,11 +913,10 @@ app.post('/api/corte-ventas', async (req, res) => {
             'Corte de Ventas',
             'Corte_Ventas'
         );
-        console.log(`[DEBUG_CORTE_VENTAS] Excel de corte de ventas generado: ${excelFileName}`);
 
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0);
-            const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + (venta.valueBs || 0), 0);
+            const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + venta.valueUSD, 0);
+            const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + venta.valueBs, 0);
 
             const subject = `Reporte de Corte de Ventas ${todayFormatted}`;
             const htmlContent = `
@@ -1224,36 +935,26 @@ app.post('/api/corte-ventas', async (req, res) => {
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, subject, htmlContent, attachments);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo de corte de ventas.');
-            } else {
-                console.log('[DEBUG_CORTE_VENTAS] Correo de corte de ventas enviado.');
             }
         }
 
-        let latestConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (latestConfig) {
-            configuracion = latestConfig;
-        } else {
-            console.warn('No se pudo cargar la última configuración para el reseteo de números. Usando la configuración en memoria.');
-        }
+        // --- INICIO DE LA NUEVA LÓGICA DE CORTE DE VENTAS Y RESETEO CONDICIONAL ---
 
-        let latestHorariosZulia = await readFirestoreDoc(primaryDb, 'lottery_times', 'zulia_chance');
-        if (latestHorariosZulia) {
-            horariosZulia = latestHorariosZulia;
-        } else {
-            console.warn('No se pudieron cargar los últimos horarios de Zulia para el reseteo de números. Usando los horarios en memoria.');
-        }
-
+        // Recargar configuración y horarios para asegurar que estén al día
+        configuracion = await readJsonFile(CONFIG_FILE);
+        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE);
 
         const fechaSorteoConfigurada = configuracion.fecha_sorteo;
-        const zuliaTimes = horariosZulia.zulia;
+        const zuliaTimes = horariosZulia.zulia; // Horarios del tipo 'zulia' (array de strings "HH:mm A")
 
         let ultimaHoraSorteo = null;
         if (Array.isArray(zuliaTimes) && zuliaTimes.length > 0) {
+            // Encontrar la hora más tardía del día para Zulia
             ultimaHoraSorteo = zuliaTimes.reduce((latestTime, currentTimeStr) => {
                 const latestMoment = moment.tz(`${fechaSorteoConfigurada} ${latestTime}`, 'YYYY-MM-DD hh:mm A', CARACAS_TIMEZONE);
                 const currentMoment = moment.tz(`${fechaSorteoConfigurada} ${currentTimeStr}`, 'YYYY-MM-DD hh:mm A', CARACAS_TIMEZONE);
                 return currentMoment.isAfter(latestMoment) ? currentTimeStr : latestTime;
-            }, zuliaTimes[0]);
+            }, zuliaTimes[0]); // Se inicializa con el primer horario
         }
 
         const currentMomentInCaracas = moment().tz(CARACAS_TIMEZONE);
@@ -1265,6 +966,9 @@ app.post('/api/corte-ventas', async (req, res) => {
         if (ultimaHoraSorteo) {
             const ultimaHoraSorteoMoment = moment.tz(`${fechaSorteoConfigurada} ${ultimaHoraSorteo}`, 'YYYY-MM-DD hh:mm A', CARACAS_TIMEZONE);
 
+            // Condición para resetear números:
+            // 1. Es el día del sorteo configurado Y ya ha pasado la última hora de sorteo de Zulia.
+            // 2. O la fecha actual ya es posterior a la fecha del sorteo configurada (maneja casos de días siguientes).
             if ((currentMomentInCaracas.isSame(drawDateMoment, 'day') && currentMomentInCaracas.isSameOrAfter(ultimaHoraSorteoMoment)) ||
                 currentMomentInCaracas.isAfter(drawDateMoment, 'day')) {
                 
@@ -1278,40 +982,48 @@ app.post('/api/corte-ventas', async (req, res) => {
         }
 
         if (shouldResetNumbers) {
-            const currentDrawCorrelativo = parseInt(configuracion.numero_sorteo_correlativo);
-            const numbersToLiberateSnapshot = await primaryDb.collection('raffle_numbers')
-                                                      .where('comprado', '==', true)
-                                                      .where('originalDrawNumber', '<', currentDrawCorrelativo - 1)
-                                                      .get();
-            const primaryBatch = primaryDb.batch();
-            let changedCount = 0;
+            // Los números que NO deben resetearse son aquellos que tienen una reserva activa.
+            // Una reserva está activa si su originalDrawNumber es el sorteo actual O el siguiente sorteo.
+            const currentDrawCorrelative = parseInt(configuracion.numero_sorteo_correlativo);
+            const nextDrawCorrelative = currentDrawCorrelative + 1;
 
-            numbersToLiberateSnapshot.docs.forEach(doc => {
-                const numRefPrimary = primaryDb.collection('raffle_numbers').doc(doc.id);
-                primaryBatch.update(numRefPrimary, { comprado: false, originalDrawNumber: null });
-                changedCount++;
-                console.log(`Número ${doc.id} liberado en Firestore (Primary). Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
+            const updatedNumeros = numeros.map(num => {
+                if (num.comprado && num.originalDrawNumber !== null) { // Solo si está comprado y tiene un sorteo original
+                    const numOriginalDrawNumber = parseInt(num.originalDrawNumber);
+                    // Si el número está reservado para el sorteo actual o el siguiente, NO lo reseteamos.
+                    if (numOriginalDrawNumber === currentDrawCorrelative || numOriginalDrawNumber === nextDrawCorrelative) {
+                        return num; // Mantener este número con su estado actual (comprado: true, originalDrawNumber)
+                    }
+                }
+                // Si no tiene originalDrawNumber, o su reserva ya pasó (caducó), resetearlo.
+                return {
+                    ...num,
+                    comprado: false,
+                    originalDrawNumber: null
+                };
             });
 
-            if (changedCount > 0) {
-                await primaryBatch.commit();
-                console.log(`Se liberaron ${changedCount} números antiguos en Firestore (Primary).`);
-            } else {
-                console.log('No hay números antiguos para liberar en Firestore en este momento.');
-            }
+            numeros = updatedNumeros; // Actualizar la variable global en memoria
+            await writeJsonFile(NUMEROS_FILE, numeros);
+            console.log('Todos los números han sido procesados. Los no reservados han sido reiniciados a disponibles.');
         }
+
+        // Se guarda el archivo de ventas nuevamente. Esto puede ser útil si hubo alguna modificación
+        // en las ventas a través de la interfaz de administración que no se reflejó de inmediato en memoria.
+        await writeJsonFile(VENTAS_FILE, ventas);
 
         res.status(200).json({ message: message });
 
     } catch (error) {
-    console.error('Error al realizar Corte de Ventas en Firestore (Primary):', error.message); // Log más específico
-    res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
+        console.error('Error al realizar Corte de Ventas:', error);
+        res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
     }
 });
 
 
 // --- RUTAS PARA PREMIOS ---
 
+// 1. GET /api/premios: Obtener premios por fecha
 app.get('/api/premios', async (req, res) => {
     const { fecha } = req.query;
 
@@ -1319,31 +1031,28 @@ app.get('/api/premios', async (req, res) => {
         return res.status(400).json({ message: 'Se requiere una fecha válida (YYYY-MM-DD) para obtener los premios.' });
     }
 
-    const fechaFormateada = moment.tz(fecha, CARACAS_TIMEZONE).format('YYYY-MM-DD');
+    const fechaFormateada = moment.tz(fecha, "America/Caracas").format('YYYY-MM-DD');
 
     try {
-        // Leer de la DB principal
-        const allPremios = await readFirestoreDoc(primaryDb, 'prizes', 'daily_prizes');
-        if (allPremios) {
-            premios = allPremios; // Actualizar caché
-        }
-
-        const premiosDelDia = premios[fechaFormateada] || {};
+        const allPremios = await readJsonFile(PREMIOS_FILE);
+        const premiosDelDia = allPremios[fechaFormateada] || {};
 
         const premiosParaFrontend = {
-            fechaSorteo: fechaFormateada,
+            fechaSorteo: fechaFormateada, // AÑADIDO: Incluir la fecha del sorteo
             sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
             sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
             sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' }
         };
 
         res.status(200).json(premiosParaFrontend);
+
     } catch (error) {
-        console.error('Error al obtener premios de Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al obtener premios.' });
+        console.error('Error al obtener premios del archivo JSON:', error);
+        res.status(500).json({ message: 'Error interno del servidor al obtener premios.', error: error.message });
     }
 });
 
+// 2. POST /api/premios: Guardar o actualizar premios
 app.post('/api/premios', async (req, res) => {
     const { fechaSorteo, sorteo12PM, sorteo3PM, sorteo5PM } = req.body;
 
@@ -1351,11 +1060,10 @@ app.post('/api/premios', async (req, res) => {
         return res.status(400).json({ message: 'La fecha del sorteo (YYYY-MM-DD) es requerida y debe ser válida para guardar premios.' });
     }
 
-    const fechaFormateada = moment.tz(fechaSorteo, CARACAS_TIMEZONE).format('YYYY-MM-DD');
+    const fechaFormateada = moment.tz(fechaSorteo, "America/Caracas").format('YYYY-MM-DD');
 
     try {
-        let allPremios = await readFirestoreDoc(primaryDb, 'prizes', 'daily_prizes');
-        if (!allPremios) allPremios = {};
+        const allPremios = await readJsonFile(PREMIOS_FILE);
 
         allPremios[fechaFormateada] = {
             sorteo12PM: sorteo12PM ? {
@@ -1378,20 +1086,17 @@ app.post('/api/premios', async (req, res) => {
             } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
         };
 
-        // Escribir en la base de datos principal
-        await writeFirestoreDoc(primaryDb, 'prizes', 'daily_prizes', allPremios);
-        premios = allPremios; // Actualizar caché
-        console.log('Premios guardados/actualizados en Firestore (Primary) y caché.');
+        await writeJsonFile(PREMIOS_FILE, allPremios);
 
         res.status(200).json({ message: 'Premios guardados/actualizados con éxito.', premiosGuardados: allPremios[fechaFormateada] });
 
     } catch (error) {
-        console.error('Error al guardar premios en Firestore (Primary):', error.message); // Log más específico
-        console.error('Detalle del error:', error.stack);
+        console.error('Error al guardar premios en el archivo JSON:', error);
         res.status(500).json({ message: 'Error interno del servidor al guardar premios.', error: error.message });
     }
 });
 
+// Ruta POST para enviar un correo de prueba
 app.post('/api/send-test-email', async (req, res) => {
     try {
         const { to, subject, html } = req.body;
@@ -1408,11 +1113,14 @@ app.post('/api/send-test-email', async (req, res) => {
             res.status(500).json({ message: 'Fallo al enviar el correo de prueba. Revisa la configuración del mailer y los logs del servidor.' });
         }
     } catch (error) {
-        console.error('Error en la ruta /api/send-test-email:', error.message); // Log más específico
+        console.error('Error en la ruta /api/send-test-email:', error);
         res.status(500).json({ message: 'Error interno del servidor al enviar correo de prueba.', error: error.message });
     }
 });
 
+
+// Endpoint para actualizar el estado de validación de una venta
+// NOTA: Esta ruta seguirá actualizando el archivo local ventas.json
 app.put('/api/tickets/validate/:id', async (req, res) => {
     const ventaId = parseInt(req.params.id);
     const { validationStatus } = req.body;
@@ -1423,36 +1131,40 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
     }
 
     try {
-        const salesSnapshot = await primaryDb.collection('sales').where('id', '==', ventaId).limit(1).get();
-        if (salesSnapshot.empty) {
+        const ventaIndex = ventas.findIndex(v => v.id === ventaId);
+
+        if (ventaIndex === -1) {
             return res.status(404).json({ message: 'Venta no encontrada.' });
         }
-        const ventaDoc = salesSnapshot.docs[0];
-        const ventaData = ventaDoc.data();
-        const firestoreVentaId = ventaDoc.id;
 
-        const oldValidationStatus = ventaData.validationStatus;
+        const oldValidationStatus = ventas[ventaIndex].validationStatus;
 
-        // Actualizar en la base de datos principal
-        await writeFirestoreDoc(primaryDb, 'sales', firestoreVentaId, { validationStatus: validationStatus });
+        ventas[ventaIndex].validationStatus = validationStatus;
 
+        // Si una venta se marca como "Falso", y antes no lo era, liberar los números asociados.
         if (validationStatus === 'Falso' && oldValidationStatus !== 'Falso') {
-            const numerosAnulados = ventaData.numbers;
+            const numerosAnulados = ventas[ventaIndex].numbers;
             if (numerosAnulados && numerosAnulados.length > 0) {
-                const primaryBatch = primaryDb.batch();
+                let currentNumeros = await readJsonFile(NUMEROS_FILE);
 
                 numerosAnulados.forEach(numAnulado => {
-                    const numRefPrimary = primaryDb.collection('raffle_numbers').doc(numAnulado);
-                    primaryBatch.update(numRefPrimary, { comprado: false, originalDrawNumber: null });
+                    const numObj = currentNumeros.find(n => n.numero === numAnulado);
+                    if (numObj) {
+                        numObj.comprado = false; // El número vuelve a estar disponible globalmente
+                        numObj.originalDrawNumber = null; // Limpiar el correlativo de sorteo original
+                    }
                 });
-                await primaryBatch.commit();
-                console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles en Firestore (Primary).`);
+                await writeJsonFile(NUMEROS_FILE, currentNumeros);
+                numeros = currentNumeros;
+                console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles.`);
             }
         }
 
-        res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${validationStatus}" con éxito.`, venta: { id: ventaId, ...ventaData, validationStatus: validationStatus } });
+        await writeJsonFile(VENTAS_FILE, ventas);
+
+        res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${validationStatus}" con éxito.`, venta: ventas[ventaIndex] });
     } catch (error) {
-        console.error(`Error al actualizar el estado de la venta ${ventaId} en Firestore (Primary):`, error.message); // Log más específico
+        console.error(`Error al actualizar el estado de la venta ${ventaId}:`, error);
         res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la venta.', error: error.message });
     }
 });
@@ -1460,16 +1172,85 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
 
 // Endpoint para exportar toda la base de datos en un archivo ZIP
 app.get('/api/export-database', async (req, res) => {
+    const archive = archiver('zip', {
+        zlib: { level: 9 }
+    });
+
     const archiveName = `rifas_db_backup_${moment().format('YYYYMMDD_HHmmss')}.zip`;
+
     res.attachment(archiveName);
+    archive.pipe(res);
 
     try {
-        // Siempre exportar desde la base de datos principal
-        const zipBuffer = await generateDatabaseBackupZipBuffer(primaryDb);
-        res.status(200).send(zipBuffer);
-        console.log('Base de datos (Primary) exportada y enviada como ZIP.');
+        for (const filePath of DATABASE_FILES) {
+            const fileName = path.basename(filePath);
+            try {
+                await fs.access(filePath);
+                archive.file(filePath, { name: fileName });
+            } catch (fileError) {
+                if (fileError.code === 'ENOENT') {
+                    console.warn(`Archivo no encontrado, omitiendo: ${fileName}`);
+                } else {
+                    throw fileError;
+                }
+            }
+        }
+        
+        // <-- CAMBIO INTEGRADO: Añade un archivo Excel con los datos de ventas de Firestore
+        const ventasSnapshot = await db.collection('ventas_sorteo').get();
+        const ventasFirestore = ventasSnapshot.docs.map(doc => doc.data());
+        
+        const workbook = new ExcelJS.Workbook();
+        const worksheet = workbook.addWorksheet('Ventas_Firestore');
+        
+        worksheet.columns = [
+            { header: 'ID Interno Venta (Firestore)', key: 'id', width: 36 },
+            { header: 'Números', key: 'numbers', width: 20 },
+            { header: 'Cantidad', key: 'quantity', width: 10 },
+            { header: 'Valor (Bs)', key: 'valueBs', width: 15 },
+            { header: 'Valor ($)', key: 'valueUSD', width: 15 },
+            { header: 'Comprador', key: 'buyerName', width: 30 },
+            { header: 'Teléfono', key: 'buyerPhone', width: 20 },
+            { header: 'Método de Pago', key: 'paymentMethod', width: 20 },
+            { header: 'Referencia', key: 'paymentReference', width: 20 },
+            { header: 'Fecha de Compra', key: 'purchaseDate', width: 25 },
+            { header: 'Fecha Sorteo', key: 'drawDate', width: 15 },
+            { header: 'Hora Sorteo', key: 'drawTime', width: 15 },
+            { header: 'Nro. Sorteo', key: 'drawNumber', width: 15 },
+            { header: 'Nro. Ticket', key: 'ticketNumber', width: 15 },
+            { header: 'URL Comprobante', key: 'voucherURL', width: 35 },
+            { header: 'Estado Validación', key: 'validationStatus', width: 25 },
+        ];
+
+        ventasFirestore.forEach(venta => {
+            worksheet.addRow({
+                id: venta.id,
+                numbers: venta.numbers ? venta.numbers.join(', ') : '',
+                quantity: venta.cantidad,
+                valueBs: venta.valueBs,
+                valueUSD: venta.valueUSD,
+                buyerName: venta.buyerName,
+                buyerPhone: venta.buyerPhone,
+                paymentMethod: venta.paymentMethod,
+                paymentReference: venta.paymentReference,
+                purchaseDate: venta.purchaseDate,
+                drawDate: venta.drawDate,
+                drawTime: venta.drawTime,
+                drawNumber: venta.drawNumber,
+                ticketNumber: venta.ticketNumber,
+                voucherURL: venta.voucherURL ? `${API_BASE_URL}${venta.voucherURL}` : '',
+                validationStatus: venta.validationStatus,
+            });
+        });
+        
+        const excelBufferFirestore = await workbook.xlsx.writeBuffer();
+        archive.append(excelBufferFirestore, { name: 'ventas_firestore_backup.xlsx' });
+        // --- FIN CAMBIO INTEGRADO ---
+
+        archive.finalize();
+        console.log('Base de datos exportada y enviada como ZIP.');
     } catch (error) {
-        console.error('Error al exportar la base de datos:', error.message); // Log más específico
+        console.error('Error al exportar la base de datos:', error);
         res.status(500).send('Error al exportar la base de datos.');
     }
 });
@@ -1483,11 +1264,11 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     }
 
     try {
-        const salesSnapshot = await primaryDb.collection('sales').where('id', '==', ventaId).limit(1).get();
-        if (salesSnapshot.empty) {
+        const venta = ventas.find(v => v.id === ventaId); // Lee del archivo local
+
+        if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp.' });
         }
-        const venta = salesSnapshot.docs[0].data();
 
         const customerPhoneNumber = venta.buyerPhone;
         const ticketNumber = venta.ticketNumber;
@@ -1515,7 +1296,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         res.status(200).json({ whatsappLink });
 
     } catch (error) {
-        console.error('Error al generar el enlace de WhatsApp para el cliente:', error.message); // Log más específico
+        console.error('Error al generar el enlace de WhatsApp para el cliente:', error);
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp.', error: error.message });
     }
 });
@@ -1529,11 +1310,11 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
     }
 
     try {
-        const salesSnapshot = await primaryDb.collection('sales').where('id', '==', ventaId).limit(1).get();
-        if (salesSnapshot.empty) {
+        const venta = ventas.find(v => v.id === ventaId); // Lee del archivo local
+
+        if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp de pago falso.' });
         }
-        const venta = salesSnapshot.docs[0].data();
 
         const customerPhoneNumber = venta.buyerPhone;
         const ticketNumber = venta.ticketNumber;
@@ -1552,7 +1333,7 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
         res.status(200).json({ whatsappLink });
 
     } catch (error) {
-        console.error('Error al generar el enlace de WhatsApp para pago falso:', error.message); // Log más específico
+        console.error('Error al generar el enlace de WhatsApp para pago falso:', error);
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp para pago falso.', error: error.message });
     }
 });
@@ -1581,7 +1362,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` + // Corregido: 🎉🥳🎉 para que no se muestre doble ?
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1596,12 +1377,13 @@ app.post('/api/notify-winner', async (req, res) => {
 
         const whatsappLink = `https://api.whatsapp.com/send?phone=${buyerPhone}&text=${whatsappMessage}`;
 
+        // Aquí podrías agregar lógica para registrar el envío de la notificación
         console.log(`Generado enlace de WhatsApp para notificar a ${buyerName} (${buyerPhone}): ${whatsappLink}`);
 
         res.status(200).json({ message: 'Enlace de notificación de WhatsApp generado con éxito. Se intentará abrir WhatsApp.', whatsappLink: whatsappLink });
 
     } catch (error) {
-        console.error('Error al generar el enlace de WhatsApp para notificar al ganador:', error.message); // Log más específico
+        console.error('Error al generar el enlace de WhatsApp para notificar al ganador:', error);
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp.', error: error.message });
     }
 });
@@ -1616,18 +1398,10 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     }
 
     try {
-        const allVentasSnapshot = await primaryDb.collection('sales').get();
-        const allVentas = allVentasSnapshot.docs.map(doc => doc.data());
-
-        const allResultadosSorteoSnapshot = await primaryDb.collection('draw_results').get();
-        const allResultadosSorteo = allResultadosSorteoSnapshot.docs.map(doc => doc.data());
-
-        let premiosDoc = await readFirestoreDoc(primaryDb, 'prizes', 'daily_prizes');
-        if (!premiosDoc) {
-            console.warn('Documento de premios no encontrado en Firestore (Primary) para procesar ganadores. Usando la caché en memoria.');
-            premiosDoc = { ...premios };
-        }
-        const allPremios = premiosDoc;
+        // Estas rutas siguen leyendo de los archivos JSON locales
+        const allVentas = await readJsonFile(VENTAS_FILE);
+        const allResultadosSorteo = await readJsonFile(RESULTADOS_SORTEO_FILE);
+        const allPremios = await readJsonFile(PREMIOS_FILE);
 
         const ticketsGanadoresParaEsteSorteo = [];
 
@@ -1644,7 +1418,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             return res.status(200).json({ message: 'No se encontraron configuraciones de premios para esta fecha para procesar ganadores.' });
         }
 
-        for (const venta of allVentas) {
+        allVentas.forEach(venta => {
             if (venta.drawDate === fecha && venta.drawNumber.toString() === numeroSorteo.toString()) {
                 let coincidentNumbers = [];
                 let totalPotentialPrizeUSD = 0;
@@ -1686,12 +1460,6 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                 });
 
                 if (coincidentNumbers.length > 0) {
-                    let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-                    if (currentConfig) {
-                        configuracion = currentConfig;
-                    } else {
-                        console.warn('No se pudo cargar la última configuración para procesar ganadores. Usando la configuración en memoria.');
-                    }
                     totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar;
                     ticketsGanadoresParaEsteSorteo.push({
                         ticketNumber: venta.ticketNumber,
@@ -1707,7 +1475,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                     });
                 }
             }
-        }
+        });
 
         const now = moment().tz(CARACAS_TIMEZONE).toISOString();
         const newWinnersEntry = {
@@ -1718,33 +1486,31 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             processedAt: now
         };
 
-        const existingWinnersSnapshot = await primaryDb.collection('winners')
-                                                .where('drawDate', '==', fecha)
-                                                .where('drawNumber', '==', parseInt(numeroSorteo))
-                                                .where('lotteryType', '==', tipoLoteria)
-                                                .limit(1)
-                                                .get();
+        const existingEntryIndex = ganadoresSorteos.findIndex(entry =>
+            entry.drawDate === fecha &&
+            entry.drawNumber.toString() === numeroSorteo.toString() &&
+            entry.lotteryType.toLowerCase() === tipoLoteria.toLowerCase()
+        );
 
-        let docId;
-        if (!existingWinnersSnapshot.empty) {
-            docId = existingWinnersSnapshot.docs[0].id;
-            await writeFirestoreDoc(primaryDb, 'winners', docId, newWinnersEntry);
-            console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} actualizados en Firestore (Primary).`);
+        if (existingEntryIndex !== -1) {
+            ganadoresSorteos[existingEntryIndex] = newWinnersEntry;
+            console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} actualizados.`);
         } else {
-            docId = await addFirestoreDoc(primaryDb, 'winners', newWinnersEntry);
-            console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} añadidos a Firestore (Primary).`);
+            ganadoresSorteos.push(newWinnersEntry);
+            console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} añadidos.`);
         }
 
+        await writeJsonFile(GANADORES_FILE, ganadoresSorteos);
         res.status(200).json({ message: 'Ganadores procesados y guardados con éxito.', totalGanadores: ticketsGanadoresParaEsteSorteo.length });
 
     } catch (error) {
-        console.error('Error al procesar y guardar tickets ganadores en Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al procesar y guardar tickets ganadores:', error);
         res.status(500).json({ message: 'Error interno del servidor al procesar y guardar tickets ganadores.', error: error.message });
     }
 });
 
 
-// GET /api/tickets/ganadores (ahora siempre desde Firestore Primary)
+// GET /api/tickets/ganadores
 app.get('/api/tickets/ganadores', async (req, res) => {
     const { fecha, numeroSorteo, tipoLoteria } = req.query;
 
@@ -1753,71 +1519,66 @@ app.get('/api/tickets/ganadores', async (req, res) => {
     }
 
     try {
-        const winnersSnapshot = await primaryDb.collection('winners')
-                                        .where('drawDate', '==', fecha)
-                                        .where('drawNumber', '==', parseInt(numeroSorteo))
-                                        .where('lotteryType', '==', tipoLoteria)
-                                        .limit(1)
-                                        .get();
+        const foundEntry = ganadoresSorteos.find(entry => // Lee del archivo local
+            entry.drawDate === fecha &&
+            entry.drawNumber.toString() === numeroSorteo.toString() &&
+            entry.lotteryType.toLowerCase() === tipoLoteria.toLowerCase()
+        );
 
-        if (!winnersSnapshot.empty) {
-            const foundEntry = winnersSnapshot.docs[0].data();
+        if (foundEntry) {
             res.status(200).json({ ganadores: foundEntry.winners });
         } else {
             res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
         }
+
     } catch (error) {
-        console.error('Error al obtener ganadores desde Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al obtener ganadores.', error: error.message });
+        console.error('Error al consultar tickets ganadores desde ganadores.json:', error);
+        res.status(500).json({ message: 'Error interno del servidor al consultar tickets ganadores.', error: error.message });
     }
 });
 
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
-async function liberateOldReservedNumbers(currentDrawCorrelativo) {
+async function liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros) {
     console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
-    
-    const numbersToLiberateSnapshot = await primaryDb.collection('raffle_numbers')
-                                              .where('comprado', '==', true)
-                                              .where('originalDrawNumber', '<', currentDrawCorrelativo - 1)
-                                              .get();
-    const primaryBatch = primaryDb.batch();
-    let changedCount = 0;
-
-    numbersToLiberateSnapshot.docs.forEach(doc => {
-        const numRefPrimary = primaryDb.collection('raffle_numbers').doc(doc.id);
-        primaryBatch.update(numRefPrimary, { comprado: false, originalDrawNumber: null });
-        changedCount++;
-        console.log(`Número ${doc.id} liberado en Firestore (Primary). Comprado originalmente para sorteo ${doc.data().originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
+    let changed = false;
+    currentNumeros.forEach(numObj => {
+        // Un número está comprado y tiene un correlativo de sorteo original
+        if (numObj.comprado && numObj.originalDrawNumber !== null) {
+            // Si el correlativo actual es 2 o más que el correlativo original de compra
+            // (ej: comprado para sorteo N, reservado para N y N+1. Se libera para sorteo N+2. Si actual es N+2 o más)
+            if (currentDrawCorrelative >= (numObj.originalDrawNumber + 2)) {
+                numObj.comprado = false;
+                numObj.originalDrawNumber = null;
+                changed = true;
+                console.log(`Número ${numObj.numero} liberado. Comprado originalmente para sorteo ${numObj.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelative}.`);
+            }
+        }
     });
-
-    if (changedCount > 0) {
-        await primaryBatch.commit();
-        console.log(`Se liberaron ${changedCount} números antiguos en Firestore (Primary).`);
+    if (changed) {
+        await writeJsonFile(NUMEROS_FILE, currentNumeros);
+        numeros = currentNumeros; // Update global variable
+        console.log('[liberateOldReservedNumbers] Números procesados y archivo guardado.');
     } else {
-        console.log('No hay números antiguos para liberar en Firestore en este momento.');
+        console.log('[liberateOldReservedNumbers] No hay números antiguos para liberar en este momento.');
     }
 }
 
 // Función auxiliar para avanzar la configuración del sorteo (fecha, correlativo, último ticket)
 async function advanceDrawConfiguration(currentConfig, targetDate) {
-    const updatedConfig = {
-        fecha_sorteo: targetDate,
-        numero_sorteo_correlativo: (currentConfig.numero_sorteo_correlativo || 0) + 1,
-        ultimo_numero_ticket: 0,
-        pagina_bloqueada: false,
-        last_sales_notification_count: 0,
-        block_reason_message: ""
-    };
-    await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', updatedConfig);
-    configuracion = { ...configuracion, ...updatedConfig };
-
-    console.log(`Configuración avanzada en Firestore (Primary) para el siguiente sorteo: Fecha ${configuracion.fecha_sorteo}, Correlativo ${configuracion.numero_sorteo_correlativo}.`);
+    currentConfig.fecha_sorteo = targetDate; // Set to the specific target date
+    currentConfig.numero_sorteo_correlativo = (currentConfig.numero_sorteo_correlativo || 0) + 1;
+    currentConfig.ultimo_numero_ticket = 0;
+    currentConfig.pagina_bloqueada = false; // Desbloquear la página automáticamente al avanzar
+    currentConfig.last_sales_notification_count = 0; // Resetear el contador de notificaciones de ventas
+    currentConfig.block_reason_message = ""; // NUEVO: Limpiar la razón de bloqueo al avanzar el sorteo
+    await writeJsonFile(CONFIG_FILE, currentConfig);
+    console.log(`Configuración avanzada para el siguiente sorteo: Fecha ${currentConfig.fecha_sorteo}, Correlativo ${currentConfig.numero_sorteo_correlativo}.`);
 }
 
 
 /**
  * Evalúa el estado del sorteo actual basándose en el porcentaje de ventas
- * y actualiza el estado de los tickets en Firestore, sin avanzar la fecha del sorteo.
+ * y actualiza el estado de los tickets, sin avanzar la fecha del sorteo.
  * @param {moment.Moment} nowMoment - El objeto moment actual para la hora de Caracas.
  * @returns {Promise<Object>} Resultado de la evaluación.
  */
@@ -1825,21 +1586,16 @@ async function evaluateDrawStatusOnly(nowMoment) {
     console.log(`[evaluateDrawStatusOnly] Iniciando evaluación de estado de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para evaluación. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
-        
+        // Cargar los datos más recientes para asegurar la precisión
+        let currentConfig = await readJsonFile(CONFIG_FILE);
+        let currentTickets = await readJsonFile(VENTAS_FILE); // Lee del archivo local
+
         const currentDrawDateStr = currentConfig.fecha_sorteo;
 
-        const salesSnapshot = await primaryDb.collection('sales')
-                                      .where('drawDate', '==', currentDrawDateStr)
-                                      .get();
-        const soldTicketsForCurrentDraw = salesSnapshot.docs
-            .map(doc => ({ firestoreId: doc.id, ...doc.data() }))
-            .filter(venta => venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente');
+        // **CORRECCIÓN AQUÍ:** Filtrar las ventas para obtener los objetos de venta, no solo la longitud.
+        const soldTicketsForCurrentDraw = currentTickets.filter(venta =>
+            venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+        );
         const totalSoldTicketsCount = soldTicketsForCurrentDraw.length;
 
 
@@ -1852,20 +1608,20 @@ async function evaluateDrawStatusOnly(nowMoment) {
         let whatsappMessageContent = '';
         let emailSubject = '';
         let emailHtmlContent = '';
+        let updatedVentas = [...currentTickets]; // Crear una copia para modificar
         let excelReport = { excelFilePath: null, excelFileName: null };
 
-        const primaryBatch = primaryDb.batch();
-
         if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
-            console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Marcando tickets como anulados en Firestore.`);
+            console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Marcando tickets como anulados.`);
 
-            soldTicketsForCurrentDraw.forEach(venta => {
-                const ventaRefPrimary = primaryDb.collection('sales').doc(venta.firestoreId);
-                primaryBatch.update(ventaRefPrimary, {
-                    validationStatus: 'Anulado por bajo porcentaje',
-                    voidedReason: 'Ventas insuficientes para el sorteo',
-                    voidedAt: nowMoment.toISOString()
-                });
+            updatedVentas = currentTickets.map(venta => {
+                // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como anuladas
+                if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
+                    venta.validationStatus = 'Anulado por bajo porcentaje'; // Nuevo estado
+                    venta.voidedReason = 'Ventas insuficientes para el sorteo';
+                    venta.voidedAt = nowMoment.toISOString();
+                }
+                return venta;
             });
             message = `Sorteo del ${currentDrawDateStr} marcado como anulado por ventas insuficientes.`;
             whatsappMessageContent = `*¡Alerta de Sorteo Suspendido!* 🚨\n\nEl sorteo del *${currentDrawDateStr}* ha sido *ANULADO* debido a un bajo porcentaje de ventas (${soldPercentage.toFixed(2)}%).\n\nTodos los tickets válidos para este sorteo serán revalidados automáticamente para el próximo sorteo.`;
@@ -1879,30 +1635,36 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
-            await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', {
-                pagina_bloqueada: true,
-                block_reason_message: "El sorteo ha sido ANULADO por bajo porcentaje de ventas. Tus tickets válidos han sido revalidados para el próximo sorteo. ¡Vuelve pronto!"
-            });
-            configuracion.pagina_bloqueada = true;
-            configuracion.block_reason_message = "El sorteo ha sido ANULADO por bajo porcentaje de ventas. Tus tickets válidos han sido revalidados para el próximo sorteo. ¡Vuelve pronto!";
+            // Establecer el mensaje de bloqueo para el cliente
+            currentConfig.pagina_bloqueada = true;
+            currentConfig.block_reason_message = "El sorteo ha sido ANULADO por bajo porcentaje de ventas. Tus tickets válidos han sido revalidados para el próximo sorteo. ¡Vuelve pronto!";
 
+            // INICIO DEBUG LOGS PARA EL REPORTE
+            console.log(`DEBUG_REPORTE: Fecha de Sorteo actual (currentDrawDateStr): ${currentDrawDateStr}`);
+            console.log(`DEBUG_REPORTE: Tickets Confirmados/Pendientes para el sorteo actual (soldTicketsForCurrentDraw):`, soldTicketsForCurrentDraw);
+            console.log(`DEBUG_REPORTE: Cantidad de tickets Confirmados/Pendientes: ${soldTicketsForCurrentDraw.length}`);
+            console.log(`DEBUG_REPORTE: Número de sorteo correlativo de la configuración: ${currentConfig.numero_sorteo_correlativo}`);
+            // FIN DEBUG LOGS PARA EL REPORTE
+            // Generar Excel para el reporte de suspensión
             excelReport = await generateGenericSalesExcelReport(
-                soldTicketsForCurrentDraw,
+                soldTicketsForCurrentDraw, // **PASANDO EL ARRAY DE OBJETOS DE VENTA**
                 currentConfig,
                 `Reporte de Suspensión del Sorteo ${currentDrawDateStr}`,
                 'Reporte_Suspension'
             );
 
         } else {
-            console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Marcando tickets como cerrados en Firestore.`);
+            // Si las ventas son suficientes, el sorteo se cierra automáticamente para nuevas ventas.
+            console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Marcando tickets como cerrados.`);
 
-            soldTicketsForCurrentDraw.forEach(venta => {
-                const ventaRefPrimary = primaryDb.collection('sales').doc(venta.firestoreId);
-                primaryBatch.update(ventaRefPrimary, {
-                    validationStatus: 'Cerrado por Suficiencia de Ventas',
-                    closedReason: 'Ventas suficientes para el sorteo',
-                    closedAt: nowMoment.toISOString()
-                });
+            updatedVentas = currentTickets.map(venta => {
+                // Marcar ventas confirmadas o pendientes para la fecha del sorteo actual como cerradas por suficiencia de ventas
+                if (venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')) {
+                    venta.validationStatus = 'Cerrado por Suficiencia de Ventas'; // Nuevo estado final para ventas de este sorteo
+                    venta.closedReason = 'Ventas suficientes para el sorteo';
+                    venta.closedAt = nowMoment.toISOString();
+                }
+                return venta;
             });
             message = `Sorteo del ${currentDrawDateStr} marcado como cerrado por suficiencia de ventas.`;
             whatsappMessageContent = `*¡Sorteo Cerrado Exitosamente!* ✅\n\nEl sorteo del *${currentDrawDateStr}* ha sido *CERRADO* con éxito. Se alcanzó el porcentaje de ventas (${soldPercentage.toFixed(2)}%) requerido.`;
@@ -1915,26 +1677,33 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 <p>La página de compra para este sorteo ha sido bloqueada. Por favor, revisen el panel de administración para más detalles.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
-            await writeFirestoreDoc(primaryDb, 'app_config', 'main_config', {
-                pagina_bloqueada: true,
-                block_reason_message: "El sorteo ha sido CERRADO exitosamente por haber alcanzado las ventas requeridas. No se aceptan más compras para este sorteo. ¡Gracias por participar!"
-            });
-            configuracion.pagina_bloqueada = true;
-            configuracion.block_reason_message = "El sorteo ha sido CERRADO exitosamente por haber alcanzado las ventas requeridas. No se aceptan más compras para este sorteo. ¡Gracias por participar!";
+            // Establecer el mensaje de bloqueo para el cliente
+            currentConfig.pagina_bloqueada = true;
+            currentConfig.block_reason_message = "El sorteo ha sido CERRADO exitosamente por haber alcanzado las ventas requeridas. No se aceptan más compras para este sorteo. ¡Gracias por participar!";
 
+            // INICIO DEBUG LOGS PARA EL REPORTE
+            console.log(`DEBUG_REPORTE: Fecha de Sorteo actual (currentDrawDateStr): ${currentDrawDateStr}`);
+            console.log(`DEBUG_REPORTE: Tickets Confirmados/Pendientes para el sorteo actual (soldTicketsForCurrentDraw):`, soldTicketsForCurrentDraw);
+            console.log(`DEBUG_REPORTE: Cantidad de tickets Confirmados/Pendientes: ${soldTicketsForCurrentDraw.length}`);
+            console.log(`DEBUG_REPORTE: Número de sorteo correlativo de la configuración: ${currentConfig.numero_sorteo_correlativo}`);
+            // FIN DEBUG LOGS PARA EL REPORTE
+            // Generar Excel para el reporte de cierre
             excelReport = await generateGenericSalesExcelReport(
-                soldTicketsForCurrentDraw,
+                soldTicketsForCurrentDraw, // **PASANDO EL ARRAY DE OBJETOS DE VENTA**
                 currentConfig,
                 `Reporte de Cierre del Sorteo ${currentDrawDateStr}`,
                 'Reporte_Cierre'
             );
         }
 
-        await primaryBatch.commit();
-        console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado en Firestore (Primary).');
+        await writeJsonFile(VENTAS_FILE, updatedVentas);
+        ventas = updatedVentas; // Actualiza la variable global en memoria
+        console.log('[evaluateDrawStatusOnly] Estado de ventas actualizado.');
 
+        // Enviar notificación de WhatsApp con el resultado de la evaluación
         await sendWhatsappNotification(whatsappMessageContent);
 
+        // Enviar notificación por correo electrónico con adjunto Excel
         if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
             const attachments = excelReport.excelFilePath ? [{
                 filename: excelReport.excelFileName,
@@ -1948,10 +1717,14 @@ async function evaluateDrawStatusOnly(nowMoment) {
             }
         }
 
+        // Bloquear la página (ya se hizo arriba) y guardar la configuración con el mensaje
+        await writeJsonFile(CONFIG_FILE, currentConfig);
+        console.log('[evaluateDrawStatusOnly] Página bloqueada para nuevas compras con mensaje actualizado.');
+
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
     } catch (error) {
-        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo en Firestore (Primary):', error.message); // Log más específico
+        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo:', error.stack || error.message);
         return { success: false, message: `Error interno al evaluar estado de sorteo: ${error.message}` };
     }
 }
@@ -1962,39 +1735,48 @@ async function cerrarSorteoManualmente(nowMoment) {
     console.log(`[cerrarSorteoManualmente] Iniciando cierre manual de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para cierre manual. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
+        let currentConfig = await readJsonFile(CONFIG_FILE); // Usar let para permitir la modificación
+        let currentNumeros = await readJsonFile(NUMEROS_FILE); // Cargar números para actualizar su estado
         
-        const currentDrawCorrelativo = configuracion.numero_sorteo_correlativo;
+        const currentDrawDateStr = currentConfig.fecha_sorteo;
+        const currentDrawCorrelative = currentConfig.numero_sorteo_correlativo;
 
+        // Step 1: Evaluate sales status (anular/cerrar sales)
+        // This call to evaluateDrawStatusOnly will handle sending the WhatsApp and Email with Excel for the closure/suspension.
         const evaluationResult = await evaluateDrawStatusOnly(nowMoment);
         if (!evaluationResult.success) {
-            return evaluationResult;
+            return evaluationResult; // Propagar el error si la evaluación inicial falla
         }
 
-        await liberateOldReservedNumbers(currentDrawCorrelativo);
+        // Step 2: Liberate numbers based on the *current* draw correlative
+        await liberateOldReservedNumbers(currentDrawCorrelative, currentNumeros);
 
+
+        // Step 3: Advance the configuration to the next day
+        // Pass the new date as a formatted string
         const nextDayDate = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
         await advanceDrawConfiguration(currentConfig, nextDayDate);
 
-        const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${configuracion.numero_sorteo_correlativo}* para la fecha *${configuracion.fecha_sorteo}*.`;
+        // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
+        currentConfig = await readJsonFile(CONFIG_FILE); // Recargar config para el mensaje de WhatsApp/Email
+
+        // Se envía una notificación de WhatsApp específica para el cierre manual
+        // Note: The Excel report and basic email were already sent by evaluateDrawStatusOnly. This is an additional summary.
+        const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha *${currentConfig.fecha_sorteo}*.`;
         await sendWhatsappNotification(whatsappMessage);
 
-        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const emailSubject = `CONFIRMACIÓN: Avance de Sorteo Manual - A Sorteo ${configuracion.numero_sorteo_correlativo}`;
+        // Si se desea un correo EXTRA de confirmación de AVANCE:
+        if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
+            const emailSubject = `CONFIRMACIÓN: Avance de Sorteo Manual - A Sorteo ${currentConfig.numero_sorteo_correlativo}`;
             const emailHtmlContent = `
                 <p>Estimados administradores,</p>
                 <p>Se les confirma que se ha realizado el <strong>avance de sorteo manual</strong>.</p>
                 <p><b>Sorteo Anterior:</b> Fecha ${evaluationResult.evaluatedDate}, Ventas ${evaluationResult.salesPercentage.toFixed(2)}%</p>
-                <p><b>Nuevo Sorteo Activo:</b> Nro. <b>${configuracion.numero_sorteo_correlativo}</b> para la fecha <b>${configuracion.fecha_sorteo}</b>.</p>
+                <p><b>Nuevo Sorteo Activo:</b> Nro. <b>${currentConfig.numero_sorteo_correlativo}</b> para la fecha <b>${currentConfig.fecha_sorteo}</b>.</p>
                 <p>La página de compra ha sido desbloqueada para nuevas ventas.</p>
                 <p>Atentamente,<br>El equipo de Rifas</p>
             `;
-            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent);
+            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo de notificación de cierre manual y avance.');
             }
@@ -2008,7 +1790,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         };
 
     } catch (error) {
-        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo en Firestore (Primary):', error.message); // Log más específico
+        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo:', error.stack || error.message);
         return { success: false, message: `Error interno: ${error.message}` };
     }
 }
@@ -2018,23 +1800,21 @@ async function cerrarSorteoManualmente(nowMoment) {
 app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
     console.log('API: Recibida solicitud para cierre manual de sorteo.');
     try {
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para cierre manual. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
-        
+        // Cargar la configuración para obtener la fecha del sorteo actual
+        await loadInitialData(); // Asegura que `configuracion`, `ventas` y `numeros` estén actualizadas en memoria
         const currentDrawDateStr = configuracion.fecha_sorteo;
 
+        // Crear un objeto Moment que simule ser el día del sorteo pero después de la hora de corte.
         const simulatedMoment = moment().tz(CARACAS_TIMEZONE);
-        const currentDrawDateMoment = moment.tz(currentDrawDateStr, 'YYYY-MM-DD', CARACAS_TIMEZONE);
+        const currentDrawDateMoment = moment.tz(currentDrawDateStr, CARACAS_TIMEZONE);
 
+        // Si el sorteo es para hoy, simulamos 5 minutos después del corte para asegurar que se ejecute la lógica
         if (simulatedMoment.isSame(currentDrawDateMoment, 'day')) {
              simulatedMoment.set({ hour: DRAW_SUSPENSION_HOUR, minute: DRAW_SUSPENSION_MINUTE + 5, second: 0 });
         } else if (simulatedMoment.isBefore(currentDrawDateMoment, 'day')) {
              return res.status(400).json({ message: 'No se puede cerrar manualmente un sorteo cuya fecha aún no ha llegado.' });
         }
+        // Si simulatedMoment ya es una fecha posterior a currentDrawDateMoment, la lógica de la función lo manejará.
 
         const result = await cerrarSorteoManualmente(simulatedMoment);
 
@@ -2044,33 +1824,29 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de cierre manual de sorteo en Firestore (Primary):', error.message); // Log más específico
+        console.error('Error en la API de cierre manual de sorteo:', error.stack || error.message);
         res.status(500).json({ message: 'Error interno del servidor al cerrar el sorteo manualmente.', error: error.message });
     }
 });
 
 
 // --- ENDPOINT PARA SUSPENDER SORTEO (Evaluate Sales Only) ---
+// Este endpoint permite evaluar las ventas y marcar los tickets, sin avanzar el sorteo.
 app.post('/api/suspender-sorteo', async (req, res) => {
     console.log('API: Recibida solicitud para suspender sorteo (evaluación de ventas).');
     try {
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para suspensión. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
-        
+        await loadInitialData(); // Carga los últimos datos
         const now = moment().tz(CARACAS_TIMEZONE);
 
-        const result = await evaluateDrawStatusOnly(now);
+        const result = await evaluateDrawStatusOnly(now); // Llama a la nueva función de solo evaluación
+
         if (result.success) {
             res.status(200).json({ message: result.message, evaluatedDate: result.evaluatedDate, salesPercentage: result.salesPercentage });
         } else {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de suspensión de sorteo en Firestore (Primary):', error.message); // Log más específico
+        console.error('Error en la API de suspensión de sorteo:', error.stack || error.message);
         res.status(500).json({ message: 'Error interno del servidor al suspender sorteo.', error: error.message });
     }
 });
@@ -2086,45 +1862,49 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     }
 
     try {
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para establecer fecha manual. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
+        let currentConfig = await readJsonFile(CONFIG_FILE);
+        let currentNumeros = await readJsonFile(NUMEROS_FILE);
+        let currentVentas = await readJsonFile(VENTAS_FILE); // Lee del archivo local
         
+        // Guardamos la fecha y el correlativo anteriores para el mensaje de correo/WhatsApp
         const oldDrawDate = currentConfig.fecha_sorteo;
-        const oldDrawCorrelativo = currentConfig.numero_sorteo_correlativo; 
+        const oldDrawCorrelative = currentConfig.numero_sorteo_correlativo; 
 
+        // 1. Avanzar la configuración a la fecha manualmente establecida
         await advanceDrawConfiguration(currentConfig, newDrawDate);
+        // `currentConfig` ahora contiene el nuevo correlativo y fecha
 
-        await liberateOldReservedNumbers(configuracion.numero_sorteo_correlativo);
+        // 2. Liberar números reservados que ya no son válidos con el NUEVO correlativo.
+        await liberateOldReservedNumbers(currentConfig.numero_sorteo_correlativo, currentNumeros);
 
-        const salesForOldDrawSnapshot = await primaryDb.collection('sales')
-                                                .where('drawDate', '==', oldDrawDate)
-                                                .get();
-        const salesForOldDraw = salesForOldDrawSnapshot.docs
-            .map(doc => doc.data())
-            .filter(venta => ['Confirmado', 'Pendiente', 'Cerrado por Suficiencia de Ventas', 'Anulado por bajo porcentaje'].includes(venta.validationStatus));
+        // Re-leer la configuración para asegurar que los datos de la respuesta son los más recientes
+        currentConfig = await readJsonFile(CONFIG_FILE);
 
+        // Filtrar ventas para el reporte Excel: Ventas del sorteo ANTERIOR que estaban confirmadas/pendientes.
+        const salesForOldDraw = currentVentas.filter(venta =>
+            venta.drawDate === oldDrawDate && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente' || venta.validationStatus === 'Cerrado por Suficiencia de Ventas' || venta.validationStatus === 'Anulado por bajo porcentaje')
+        );
 
+        // Generar Excel para el reporte de reprogramación
         const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
             salesForOldDraw,
-            { fecha_sorteo: oldDrawDate, numero_sorteo_correlativo: oldDrawCorrelativo },
+            { fecha_sorteo: oldDrawDate, numero_sorteo_correlativo: oldDrawCorrelative }, // Pass old config for report context
             `Reporte de Reprogramación del Sorteo ${oldDrawDate}`,
             'Reporte_Reprogramacion'
         );
 
-        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelativo}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${configuracion.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
+        // Se envía la notificación de WhatsApp después de establecer la fecha manualmente
+        const whatsappMessage = `*¡Sorteo Reprogramado!* 🗓️\n\nLa fecha del sorteo ha sido actualizada manualmente. Anteriormente Sorteo Nro. *${oldDrawCorrelative}* de fecha *${oldDrawDate}*.\n\nAhora Sorteo Nro. *${currentConfig.numero_sorteo_correlativo}* para la fecha: *${newDrawDate}*.\n\n¡La página de compra está nuevamente activa!`;
         await sendWhatsappNotification(whatsappMessage);
 
-        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
+        // Enviar notificación por correo electrónico para la reprogramación con adjunto Excel
+        if (currentConfig.admin_email_for_reports && currentConfig.admin_email_for_reports.length > 0) {
             const emailSubject = `NOTIFICACIÓN: Sorteo Reprogramado - Nueva Fecha ${newDrawDate}`;
             const emailHtmlContent = `
                 <p>Estimados administradores,</p>
                 <p>Se les informa que el sorteo ha sido <strong>reprogramado manualmente</strong>.</p>
-                <p><b>Fecha Anterior:</b> ${oldDrawDate} (Sorteo Nro. ${oldDrawCorrelativo})</p>
-                <p><b>Nueva Fecha:</b> ${newDrawDate} (Sorteo Nro. ${configuracion.numero_sorteo_correlativo})</p>
+                <p><b>Fecha Anterior:</b> ${oldDrawDate} (Sorteo Nro. ${oldDrawCorrelative})</p>
+                <p><b>Nueva Fecha:</b> ${newDrawDate} (Sorteo Nro. ${currentConfig.numero_sorteo_correlativo})</p>
                 <p>Adjunto encontrarás el reporte de ventas del sorteo anterior (${oldDrawDate}) al momento de la reprogramación.</p>
                 <p>La página de compra ha sido desbloqueada automáticamente.</p>
                 <p>Por favor, revisen el panel de administración para más detalles.</p>
@@ -2136,7 +1916,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
                 contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             }] : [];
 
-            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
+            const emailSent = await sendEmail(currentConfig.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (!emailSent) {
                 console.error('Fallo al enviar el correo de notificación de reprogramación.');
             }
@@ -2144,13 +1924,13 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
         res.status(200).json({
             success: true,
-            message: `Fecha del sorteo actualizada manualmente a ${newDrawDate}. El número de sorteo ha avanzado al ${configuracion.numero_sorteo_correlativo} y los números reservados antiguos han sido liberados.`,
-            newConfig: configuracion
+            message: `Fecha del sorteo actualizada manualmente a ${newDrawDate}. El número de sorteo ha avanzado al ${currentConfig.numero_sorteo_correlativo} y los números reservados antiguos han sido liberados.`,
+            newConfig: currentConfig
         });
 
     } catch (error) {
-        console.error('Error en la API de set-manual-draw-date en Firestore (Primary):', error.message); // Log más específico
-        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.message });
+        console.error('Error en la API de set-manual-draw-date:', error.stack || error.message);
+        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.stack || error.message });
     }
 });
 
@@ -2159,23 +1939,13 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 app.post('/api/developer-sales-notification', async (req, res) => {
     console.log('API: Recibida solicitud para notificación de ventas para desarrolladores.');
     try {
-        let currentConfig = await readFirestoreDoc(primaryDb, 'app_config', 'main_config');
-        if (!currentConfig) {
-            console.warn('Configuración de la aplicación no disponible en Firestore (Primary) para notificación de desarrolladores. Usando la configuración en memoria.');
-            currentConfig = { ...configuracion };
-        }
-        configuracion = currentConfig;
-        
+        await loadInitialData(); // Asegura que la configuración y ventas estén al día
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const currentDrawDateStr = configuracion.fecha_sorteo;
-        const salesSnapshot = await primaryDb.collection('sales')
-                                      .where('drawDate', '==', currentDrawDateStr)
-                                      .get();
-        const ventasParaFechaSorteo = salesSnapshot.docs
-            .map(doc => doc.data())
-            .filter(venta => venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente');
-
+        const ventasParaFechaSorteo = ventas.filter(venta => // Lee del archivo local
+            venta.drawDate === currentDrawDateStr && (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
+        );
         const totalVentas = ventasParaFechaSorteo.length;
         const totalPossibleTickets = TOTAL_RAFFLE_NUMBERS;
         const soldPercentage = (totalVentas / totalPossibleTickets) * 100;
@@ -2197,7 +1967,7 @@ app.post('/api/developer-sales-notification', async (req, res) => {
         res.status(200).json({ message: 'Notificación de ventas para desarrolladores enviada exitosamente por WhatsApp.' });
 
     } catch (error) {
-        console.error('Error al enviar notificación de ventas para desarrolladores desde Firestore (Primary):', error.message); // Log más específico
+        console.error('Error al enviar notificación de ventas para desarrolladores:', error);
         res.status(500).json({ message: 'Error interno del servidor al enviar notificación de ventas para desarrolladores.', error: error.message });
     }
 });
@@ -2205,104 +1975,81 @@ app.post('/api/developer-sales-notification', async (req, res) => {
 
 // Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
 app.post('/api/admin/limpiar-datos', async (req, res) => {
-    // Pasar las dependencias necesarias a la función importada
-    // handleLimpiarDatos ahora solo acepta primaryDb
-    await handleLimpiarDatos(primaryDb, configuracion, CARACAS_TIMEZONE, loadInitialData, res);
+    try {
+        // Limpia los datos en memoria y en archivos
+        ventas = [];
+        premios = [];
+        horariosZulia = [];
+        historialSorteos = [];
+        numeros = Array.from({ length: 1000 }, (_, i) => ({
+            numero: String(i).padStart(3, '0'),
+            comprado: false,
+            originalDrawNumber: 0
+        }));
+        await writeJsonFile(VENTAS_FILE, ventas); // Limpia el archivo local de ventas
+        await writeJsonFile(NUMEROS_FILE, numeros);
+        await writeJsonFile(PREMIOS_FILE, premios);
+        await writeJsonFile(HORARIOS_ZULIA_FILE, horariosZulia);
+        await writeJsonFile(GANADORES_FILE, ganadoresSorteos); // Limpia el archivo local de ganadores
+
+        // <-- CAMBIO INTEGRADO: Limpia la colección de ventas de Firestore
+        if (db) {
+            const ventasRef = db.collection('ventas_sorteo');
+            const snapshot = await ventasRef.get();
+            const batch = db.batch();
+            snapshot.docs.forEach(doc => {
+                batch.delete(doc.ref);
+            });
+            await batch.commit();
+            console.log('DEBUG_BACKEND: Colección de ventas de Firestore limpiada.');
+        } else {
+            console.warn('Firestore no está inicializado, no se pudo limpiar la colección de ventas.');
+        }
+        // --- FIN CAMBIO INTEGRADO ---
+
+        res.status(200).json({ success: true, message: 'Todos los datos de ventas, números y premios han sido limpiados.' });
+    } catch (error) {
+        console.error('Error al limpiar los datos:', error);
+        res.status(500).json({ success: false, message: 'Error interno del servidor al limpiar los datos.' });
+    }
 });
 
 
 // Tareas programadas (Cron Jobs)
-// Se ejecutarán después de que el servidor se inicie y los datos se carguen
+// ... (El resto de tus cron jobs y lógica permanece sin cambios) ...
 
-/**
- * Función asíncrona para la tarea programada de verificación diaria de ventas
- * y posible anulación/cierre de sorteo, y avance al siguiente sorteo.
- */
-async function dailyDrawCheckCronJob() {
+// --- Tarea programada para verificación de sorteo (Cron Job Real) ---
+// Se ejecuta cada día a las 12:15 PM (hora de Caracas)
+cron.schedule('15 12 * * *', async () => {
     console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
+    // Llama a la función cerrarSorteoManualmente con el momento actual real
     const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
     console.log(`CRON JOB Resultado: ${cronResult.message}`);
-}
-
-cron.schedule('15 12 * * *', dailyDrawCheckCronJob, {
-    timezone: CARACAS_TIMEZONE
+}, {
+    timezone: CARACAS_TIMEZONE // Asegura que el cron se ejecuta en la zona horaria de Caracas
 });
+// --- FIN TAREA PROGRAMADA ---
 
-/**
- * Función asíncrona para la tarea programada de Notificación de ventas por WhatsApp y Email.
- * Se ejecuta periódicamente para enviar resúmenes de ventas a los administradores.
- */
-async function salesSummaryCronJob() {
+// --- Tarea programada para Notificación de ventas por WhatsApp y Email (cada 55 minutos) ---
+cron.schedule('*/55 * * * *', async () => { // Cambiado a cada 55 minutos
     console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp y Email.');
-    await sendSalesSummaryNotifications();
-}
-
-cron.schedule('*/55 * * * *', salesSummaryCronJob);
-
-/**
- * NUEVA FUNCIÓN CRON JOB: Respaldo automático de la base de datos y envío por correo.
- * Se ejecuta cada 55 minutos para generar un backup y enviarlo.
- */
-async function dailyDatabaseBackupCronJob() {
-    console.log('CRON JOB: Iniciando respaldo automático de la base de datos y envío por correo.');
-    try {
-        const now = moment().tz(CARACAS_TIMEZONE);
-        const backupFileName = `rifas_db_backup_${now.format('YYYYMMDD_HHmmss')}.zip`;
-        // Siempre generar el backup desde la base de datos principal
-        const zipBuffer = await generateDatabaseBackupZipBuffer(primaryDb);
-
-        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const emailSubject = `Respaldo Automático de Base de Datos - ${now.format('YYYY-MM-DD HH:mm')}`;
-            const emailHtmlContent = `
-                <p>Estimados administradores,</p>
-                <p>Se ha generado el respaldo automático de la base de datos de Rifas.</p>
-                <p>Fecha y Hora del Respaldo: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
-                <p>Adjunto encontrarás el archivo ZIP con los datos de Firestore exportados a Excel.</p>
-                <p>Por favor, guarden este archivo en un lugar seguro.</p>
-                <p>Atentamente,<br>El equipo de Rifas</p>
-            `;
-            const attachments = [
-                {
-                    filename: backupFileName,
-                    content: zipBuffer,
-                    contentType: 'application/zip'
-                }
-            ];
-            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
-            if (emailSent) {
-                console.log('Respaldo de base de datos enviado por correo exitosamente.');
-            } else {
-                console.error('Fallo al enviar el correo de respaldo de base de datos.');
-            }
-        } else {
-            console.warn('No hay correos de administrador configurados para enviar el respaldo de la base de datos.');
-        }
-    } catch (error) {
-        console.error('Error durante el cron job de respaldo automático de la base de datos:', error.message); // Log más específico
-    }
-}
-
-cron.schedule('*/55 * * * *', dailyDatabaseBackupCronJob, {
-    timezone: CARACAS_TIMEZONE
+    await sendSalesSummaryNotifications(); // Llama a la función que ahora envía ambos
 });
+// --- FIN TAREA PROGRAMADA ---
 
 
 // Inicialización del servidor
-(async () => {
-    try {
-        console.log('DEBUG: Iniciando IIFE de inicialización del servidor.');
-        await ensureDataAndComprobantesDirs();
-        console.log('DEBUG: Directorios asegurados.');
-        await loadInitialData();
-        console.log('DEBUG: Datos iniciales cargados.');
-        configureMailer();
-        console.log('DEBUG: Mailer configurado.');
+ensureDataAndComprobantesDirs().then(() => {
+    loadInitialData().then(() => {
+        configureMailer(); // Asegura que el mailer se configure después de cargar la configuración
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
             console.log(`API Base URL: ${API_BASE_URL}`);
+
         });
-    } catch (err) {
-        console.error('Failed to initialize data and start server:', err.message); // Log más específico
-        process.exit(1);
-    }
-})();
+    });
+}).catch(err => {
+    console.error('Failed to initialize data and start server:', err);
+    process.exit(1); // Sale del proceso si la carga inicial de datos falla
+});
+
