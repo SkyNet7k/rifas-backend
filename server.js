@@ -1,5 +1,34 @@
 // server.js
 
+// IMPORTANTE: Asegúrate de que las funciones `readFirestoreDoc` y `writeFirestoreDoc`
+// en tu archivo `./adminUtils.js` sean funciones `async` y devuelvan Promesas.
+// Por ejemplo, en adminUtils.js:
+// async function readFirestoreDoc(db, collectionName, docId) {
+//     try {
+//         const docRef = db.collection(collectionName).doc(docId);
+//         const docSnap = await docRef.get();
+//         if (docSnap.exists) {
+//             return docSnap.data();
+//         } else {
+//             return null;
+//         }
+//     } catch (error) {
+//         console.error(`Error al leer documento ${docId} de ${collectionName}:`, error);
+//         throw error; // Propagar el error para que el llamador lo maneje
+//     }
+// }
+// async function writeFirestoreDoc(db, collectionName, docId, data) {
+//     try {
+//         const docRef = db.collection(collectionName).doc(docId);
+//         await docRef.set(data, { merge: true });
+//         return true;
+//     } catch (error) {
+//         console.error(`Error al escribir documento ${docId} en ${collectionName}:`, error);
+//         throw error;
+//     }
+// }
+
+
 const express = require('express');
 const fileUpload = require('express-fileupload');
 const fs = require('fs').promises; // Todavía necesario para directorios y archivos de reportes/comprobantes
@@ -20,7 +49,9 @@ const crypto = require('crypto');
 const { log } = require('console');
 
 // Importar funciones de utilidad de administración
-const { handleLimpiarDatos } = require('./adminUtils'); // handleLimpiarDatos ya no necesita db como parámetro directo aquí
+// Asegúrate de que handleLimpiarDatos también acepte primaryDb y secondaryDb si los usa
+const { handleLimpiarDatos } = require('./adminUtils');
+
 
 dotenv.config();
 
@@ -68,7 +99,7 @@ try {
     if (!primaryServiceAccountBase64) {
         throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY environment variable is not set.');
     }
-    // Reemplazar saltos de línea por escapados para asegurar un JSON válido antes de decodificar
+    // Reemplazar saltos de línea por saltos de línea reales antes de decodificar
     const cleanedPrimaryServiceAccountBase64 = primaryServiceAccountBase64.replace(/\\n/g, '\n');
     primaryServiceAccount = JSON.parse(Buffer.from(cleanedPrimaryServiceAccountBase64, 'base64').toString('utf8'));
 
@@ -90,7 +121,7 @@ try {
 try {
     const secondaryServiceAccountBase64 = process.env.FIREBASE_SERVICE_ACCOUNT_KEY_SECONDARY;
     if (secondaryServiceAccountBase64) {
-        // Reemplazar saltos de línea por escapados para asegurar un JSON válido antes de decodificar
+        // Reemplazar saltos de línea por saltos de línea reales antes de decodificar
         const cleanedSecondaryServiceAccountBase64 = secondaryServiceAccountBase64.replace(/\\n/g, '\n');
         secondaryServiceAccount = JSON.parse(Buffer.from(cleanedSecondaryServiceAccountBase64, 'base64').toString('utf8'));
         
@@ -273,7 +304,7 @@ async function loadInitialData() {
         const userHorariosContent = readFileSync(USER_HORARIOS_PATH, 'utf8');
         const parsedHorarios = JSON.parse(userHorariosContent);
         if (Array.isArray(parsedHorarios)) {
-            horariosZulia = { zulia: [], chance: [] };
+            horariosZulia = { zulia: parsedHorarios, chance: [] };
         } else {
             horariosZulia = parsedHorarios;
         }
@@ -1732,7 +1763,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! �🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -2297,7 +2328,6 @@ app.post('/api/suspender-sorteo', async (req, res) => {
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const result = await evaluateDrawStatusOnly(now);
-
         if (result.success) {
             res.status(200).json({ message: result.message, evaluatedDate: result.evaluatedDate, salesPercentage: result.salesPercentage });
         } else {
@@ -2440,6 +2470,7 @@ app.post('/api/developer-sales-notification', async (req, res) => {
 // Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
 app.post('/api/admin/limpiar-datos', async (req, res) => {
     // Pasar las dependencias necesarias a la función importada
+    // Asegúrate de que handleLimpiarDatos en adminUtils.js pueda manejar primaryDb y secondaryDb
     await handleLimpiarDatos(primaryDb, secondaryDb, configuracion, CARACAS_TIMEZONE, loadInitialData, res);
 });
 
