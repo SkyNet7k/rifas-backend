@@ -96,7 +96,7 @@ try {
     console.log('Firebase Admin SDK (Primary) inicializado exitosamente.');
 
 } catch (error) {
-    console.error('Error al inicializar Firebase Admin SDK (Primary):', error);
+    console.error('Error al inicializar Firebase Admin SDK (Primary):', error.message); // Log más específico
     process.exit(1); // Salir si no se puede inicializar la DB principal
 }
 
@@ -127,7 +127,7 @@ async function readFirestoreDoc(dbInstance, collectionName, docId) {
         }
     } catch (error) {
         // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error leyendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
+        console.error(`Error leyendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
         throw error; // Re-lanzar el error para que sea manejado por el llamador
     }
 }
@@ -154,7 +154,7 @@ async function writeFirestoreDoc(dbInstance, collectionName, docId, data, merge 
         console.log(`Documento ${docId} escrito/actualizado en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}.`);
     } catch (error) {
         // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error escribiendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
+        console.error(`Error escribiendo documento ${docId} en colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
         throw error;
     }
 }
@@ -178,7 +178,7 @@ async function addFirestoreDoc(dbInstance, collectionName, data) {
         return docRef.id;
     } catch (error) {
         // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error añadiendo documento a colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
+        console.error(`Error añadiendo documento a colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
         throw error;
     }
 }
@@ -202,7 +202,7 @@ async function deleteFirestoreDoc(dbInstance, collectionName, docId) {
         return true;
     } catch (error) {
         // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error eliminando documento ${docId} de colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
+        console.error(`Error eliminando documento ${docId} de colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
         throw error;
     }
 }
@@ -223,7 +223,7 @@ async function readFirestoreCollection(dbInstance, collectionName) {
         return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     } catch (error) {
         // Se usa ?.name para evitar errores si dbInstance.app es undefined
-        console.error(`Error leyendo colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error);
+        console.error(`Error leyendo colección ${collectionName} de ${dbInstance.app?.name || 'unknown_db'}:`, error.message); // Log más específico
         return [];
     }
 }
@@ -334,7 +334,7 @@ async function loadInitialData() {
         console.log('Sincronización con Firestore (Primary) completada. El servidor usará los datos más recientes de Primary.');
 
     } catch (error) {
-        console.error('Error al sincronizar datos con Firestore (Primary) durante la carga inicial. El servidor continuará operando con los datos cargados localmente:', error);
+        console.error('Error al sincronizar datos con Firestore (Primary) durante la carga inicial. El servidor continuará operando con los datos cargados localmente:', error.message); // Log más específico
     }
 }
 
@@ -388,7 +388,7 @@ async function sendEmail(to, subject, html, attachments = []) {
         console.log('Correo enviado exitosamente.');
         return true;
     }  catch (error) {
-        console.error('Error al enviar correo:', error);
+        console.error('Error al enviar correo:', error.message); // Log más específico
         return false;
     }
 }
@@ -415,7 +415,7 @@ async function sendWhatsappNotification(messageText) {
         }
 
     } catch (error) {
-        console.error('Error al enviar notificación por WhatsApp:', error);
+        console.error('Error al enviar notificación por WhatsApp:', error.message); // Log más específico
     }
 }
 
@@ -483,7 +483,7 @@ async function sendSalesSummaryNotifications() {
             }
         }
     } catch (emailError) {
-        console.error('Error al generar o enviar el reporte de ventas periódico por correo:', emailError);
+        console.error('Error al generar o enviar el reporte de ventas periódico por correo:', emailError.message); // Log más específico
     }
 }
 
@@ -516,7 +516,7 @@ app.get('/api/configuracion', async (req, res) => {
         delete configToSend.mail_config; // No enviar credenciales sensibles
         res.json(configToSend);
     } catch (error) {
-        console.error('Error al obtener configuración de Firestore (Primary):', error);
+        console.error('Error al obtener configuración de Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener configuración.' });
     }
 });
@@ -561,7 +561,7 @@ app.put('/api/configuracion', async (req, res) => {
 
         res.json({ message: 'Configuración actualizada con éxito', configuracion: configuracion });
     } catch (error) {
-        console.error('Error al actualizar configuración en Firestore (Primary):', error);
+        console.error('Error al actualizar configuración en Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al actualizar configuración.' });
     }
 });
@@ -575,7 +575,7 @@ app.get('/api/numeros', async (req, res) => {
         console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde Firestore (Primary).');
         res.json(currentNumerosFirestore);
     } catch (error) {
-        console.error('Error al obtener números desde Firestore (Primary):', error);
+        console.error('Error al obtener números desde Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener números.', error: error.message });
     }
 });
@@ -595,7 +595,7 @@ app.post('/api/numeros', async (req, res) => {
         console.log('DEBUG_BACKEND: Números actualizados en Firestore (Primary) y en caché (solo los comprados).');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
-        console.error('Error al actualizar números en Firestore (Primary):', error);
+        console.error('Error al actualizar números en Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al actualizar números.' });
     }
 });
@@ -607,7 +607,7 @@ app.get('/api/ventas', async (req, res) => {
         console.log('Enviando ventas al frontend desde Firestore (Primary):', currentVentas.length, 'ventas.');
         res.status(200).json(currentVentas);
     } catch (error) {
-        console.error('Error al obtener ventas desde Firestore (Primary):', error);
+        console.error('Error al obtener ventas desde Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener ventas.', error: error.message });
     }
 });
@@ -749,11 +749,11 @@ app.post('/api/comprar', async (req, res) => {
             }
 
         } catch (notificationError) {
-            console.error('Error durante la verificación de notificación de ventas por umbral:', notificationError);
+            console.error('Error durante la verificación de notificación de ventas por umbral:', notificationError.message); // Log más específico
         }
 
     } catch (error) {
-        console.error('ERROR_BACKEND: Error al procesar la compra:', error);
+        console.error('ERROR_BACKEND: Error al procesar la compra:', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
     }
 });
@@ -821,7 +821,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
 
         res.status(200).json({ message: 'Comprobante subido y asociado con éxito.', url: `/uploads/${fileName}` });
     } catch (error) {
-        console.error('Error al subir el comprobante:', error);
+        console.error('Error al subir el comprobante:', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al subir el comprobante.', error: error.message });
     }
 });
@@ -840,7 +840,7 @@ app.get('/api/horarios-zulia', async (req, res) => {
         }
         res.json(horariosZulia);
     } catch (error) {
-        console.error('Error al obtener horarios de Zulia de Firestore (Primary):', error);
+        console.error('Error al obtener horarios de Zulia de Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
     }
 });
@@ -865,7 +865,7 @@ app.post('/api/horarios', async (req, res) => {
 
         res.json({ message: `Horarios de ${tipo} actualizados con éxito.`, horarios: horariosZulia[tipo] });
     } catch (error) {
-        console.error(`Error al actualizar horarios de ${tipo} en Firestore (Primary):`, error);
+        console.error(`Error al actualizar horarios de ${tipo} en Firestore (Primary):`, error.message); // Log más específico
         res.status(500).json({ message: `Error interno del servidor al actualizar horarios de ${tipo}.` });
     }
 });
@@ -888,7 +888,7 @@ app.get('/api/resultados-zulia', async (req, res) => {
         res.status(200).json(resultsForDateAndZulia);
     }
     catch (error) {
-        console.error('Error al obtener resultados de Zulia desde Firestore (Primary):', error);
+        console.error('Error al obtener resultados de Zulia desde Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de Zulia.', error: error.message });
     }
 });
@@ -901,7 +901,7 @@ app.get('/api/resultados-sorteo', async (req, res) => {
         console.log('Enviando resultados de sorteo al frontend desde Firestore (Primary):', currentResultados.length, 'resultados.');
         res.status(200).json(currentResultados);
     } catch (error) {
-        console.error('Error al obtener resultados de sorteo desde Firestore (Primary):', error);
+        console.error('Error al obtener resultados de sorteo desde Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de sorteo.', error: error.message });
     }
 });
@@ -946,7 +946,7 @@ app.post('/api/resultados-sorteo', async (req, res) => {
 
         res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.' });
     } catch (error) {
-        console.error('Error al guardar/actualizar resultados de sorteo en Firestore (Primary):', error);
+        console.error('Error al guardar/actualizar resultados de sorteo en Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al guardar/actualizar resultados de sorteo.', error: error.message });
     }
 });
@@ -1112,7 +1112,7 @@ async function generateDatabaseBackupZipBuffer(dbInstance) {
         });
 
     } catch (error) {
-        console.error('Error al generar el buffer ZIP de la base de datos:', error);
+        console.error('Error al generar el buffer ZIP de la base de datos:', error.message); // Log más específico
         throw error;
     }
 }
@@ -1252,7 +1252,7 @@ app.post('/api/corte-ventas', async (req, res) => {
         res.status(200).json({ message: message });
 
     } catch (error) {
-    console.error('Error al realizar Corte de Ventas en Firestore (Primary):', error);
+    console.error('Error al realizar Corte de Ventas en Firestore (Primary):', error.message); // Log más específico
     res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
     }
 });
@@ -1287,7 +1287,7 @@ app.get('/api/premios', async (req, res) => {
 
         res.status(200).json(premiosParaFrontend);
     } catch (error) {
-        console.error('Error al obtener premios de Firestore (Primary):', error);
+        console.error('Error al obtener premios de Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener premios.' });
     }
 });
@@ -1334,7 +1334,7 @@ app.post('/api/premios', async (req, res) => {
         res.status(200).json({ message: 'Premios guardados/actualizados con éxito.', premiosGuardados: allPremios[fechaFormateada] });
 
     } catch (error) {
-        console.error('Error al guardar premios en Firestore (Primary):', error);
+        console.error('Error al guardar premios en Firestore (Primary):', error.message); // Log más específico
         console.error('Detalle del error:', error.stack);
         res.status(500).json({ message: 'Error interno del servidor al guardar premios.', error: error.message });
     }
@@ -1356,7 +1356,7 @@ app.post('/api/send-test-email', async (req, res) => {
             res.status(500).json({ message: 'Fallo al enviar el correo de prueba. Revisa la configuración del mailer y los logs del servidor.' });
         }
     } catch (error) {
-        console.error('Error en la ruta /api/send-test-email:', error);
+        console.error('Error en la ruta /api/send-test-email:', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al enviar correo de prueba.', error: error.message });
     }
 });
@@ -1400,7 +1400,7 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
 
         res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${validationStatus}" con éxito.`, venta: { id: ventaId, ...ventaData, validationStatus: validationStatus } });
     } catch (error) {
-        console.error(`Error al actualizar el estado de la venta ${ventaId} en Firestore (Primary):`, error);
+        console.error(`Error al actualizar el estado de la venta ${ventaId} en Firestore (Primary):`, error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la venta.', error: error.message });
     }
 });
@@ -1417,7 +1417,7 @@ app.get('/api/export-database', async (req, res) => {
         res.status(200).send(zipBuffer);
         console.log('Base de datos (Primary) exportada y enviada como ZIP.');
     } catch (error) {
-        console.error('Error al exportar la base de datos:', error);
+        console.error('Error al exportar la base de datos:', error.message); // Log más específico
         res.status(500).send('Error al exportar la base de datos.');
     }
 });
@@ -1463,7 +1463,7 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         res.status(200).json({ whatsappLink });
 
     } catch (error) {
-        console.error('Error al generar el enlace de WhatsApp para el cliente:', error);
+        console.error('Error al generar el enlace de WhatsApp para el cliente:', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp.', error: error.message });
     }
 });
@@ -1500,7 +1500,7 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
         res.status(200).json({ whatsappLink });
 
     } catch (error) {
-        console.error('Error al generar el enlace de WhatsApp para pago falso:', error);
+        console.error('Error al generar el enlace de WhatsApp para pago falso:', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp para pago falso.', error: error.message });
     }
 });
@@ -1529,7 +1529,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉�🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1549,7 +1549,7 @@ app.post('/api/notify-winner', async (req, res) => {
         res.status(200).json({ message: 'Enlace de notificación de WhatsApp generado con éxito. Se intentará abrir WhatsApp.', whatsappLink: whatsappLink });
 
     } catch (error) {
-        console.error('Error al generar el enlace de WhatsApp para notificar al ganador:', error);
+        console.error('Error al generar el enlace de WhatsApp para notificar al ganador:', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al generar el enlace de WhatsApp.', error: error.message });
     }
 });
@@ -1686,7 +1686,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
         res.status(200).json({ message: 'Ganadores procesados y guardados con éxito.', totalGanadores: ticketsGanadoresParaEsteSorteo.length });
 
     } catch (error) {
-        console.error('Error al procesar y guardar tickets ganadores en Firestore (Primary):', error);
+        console.error('Error al procesar y guardar tickets ganadores en Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al procesar y guardar tickets ganadores.', error: error.message });
     }
 });
@@ -1715,7 +1715,7 @@ app.get('/api/tickets/ganadores', async (req, res) => {
             res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
         }
     } catch (error) {
-        console.error('Error al obtener ganadores desde Firestore (Primary):', error);
+        console.error('Error al obtener ganadores desde Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al obtener ganadores.', error: error.message });
     }
 });
@@ -1899,7 +1899,7 @@ async function evaluateDrawStatusOnly(nowMoment) {
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
     } catch (error) {
-        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo en Firestore (Primary):', error.stack || error.message);
+        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo en Firestore (Primary):', error.message); // Log más específico
         return { success: false, message: `Error interno al evaluar estado de sorteo: ${error.message}` };
     }
 }
@@ -1956,7 +1956,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         };
 
     } catch (error) {
-        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo en Firestore (Primary):', error.stack || error.message);
+        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo en Firestore (Primary):', error.message); // Log más específico
         return { success: false, message: `Error interno: ${error.message}` };
     }
 }
@@ -1992,7 +1992,7 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de cierre manual de sorteo en Firestore (Primary):', error.stack || error.message);
+        console.error('Error en la API de cierre manual de sorteo en Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al cerrar el sorteo manualmente.', error: error.message });
     }
 });
@@ -2018,7 +2018,7 @@ app.post('/api/suspender-sorteo', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de suspensión de sorteo en Firestore (Primary):', error.stack || error.message);
+        console.error('Error en la API de suspensión de sorteo en Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al suspender sorteo.', error: error.message });
     }
 });
@@ -2097,8 +2097,8 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error en la API de set-manual-draw-date en Firestore (Primary):', error.stack || error.message);
-        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.stack || error.message });
+        console.error('Error en la API de set-manual-draw-date en Firestore (Primary):', error.message); // Log más específico
+        res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.message });
     }
 });
 
@@ -2145,7 +2145,7 @@ app.post('/api/developer-sales-notification', async (req, res) => {
         res.status(200).json({ message: 'Notificación de ventas para desarrolladores enviada exitosamente por WhatsApp.' });
 
     } catch (error) {
-        console.error('Error al enviar notificación de ventas para desarrolladores desde Firestore (Primary):', error);
+        console.error('Error al enviar notificación de ventas para desarrolladores desde Firestore (Primary):', error.message); // Log más específico
         res.status(500).json({ message: 'Error interno del servidor al enviar notificación de ventas para desarrolladores.', error: error.message });
     }
 });
@@ -2226,7 +2226,7 @@ async function dailyDatabaseBackupCronJob() {
             console.warn('No hay correos de administrador configurados para enviar el respaldo de la base de datos.');
         }
     } catch (error) {
-        console.error('Error durante el cron job de respaldo automático de la base de datos:', error);
+        console.error('Error durante el cron job de respaldo automático de la base de datos:', error.message); // Log más específico
     }
 }
 
@@ -2250,7 +2250,7 @@ cron.schedule('*/55 * * * *', dailyDatabaseBackupCronJob, {
             console.log(`API Base URL: ${API_BASE_URL}`);
         });
     } catch (err) {
-        console.error('Failed to initialize data and start server:', err);
+        console.error('Failed to initialize data and start server:', err.message); // Log más específico
         process.exit(1);
     }
 })();
