@@ -467,6 +467,8 @@ async function loadInitialData() {
 
         // --- Cargar/Inicializar Configuración ---
         let configuracion = await getConfiguracionFromDB();
+        let configId = null; // To store the ID of the config row
+
         if (Object.keys(configuracion).length === 0) {
             console.warn('No se encontró configuración en la DB. Insertando valores por defecto.');
             const default_config = {
@@ -475,8 +477,8 @@ async function loadInitialData() {
                 precio_ticket: 3.00,
                 numero_sorteo_correlativo: 1,
                 ultimo_numero_ticket: 0,
-                ultima_fecha_resultados_zulia: null, // Mantener como null para TIMESTAMP si no hay fecha
-                tasa_dolar: [36.50], // Corregido: Debe ser un array para JSONB
+                ultima_fecha_resultados_zulia: null,
+                tasa_dolar: [36.50],
                 admin_whatsapp_numbers: [],
                 mail_config_host: "", mail_config_port: 587, mail_config_secure: false,
                 mail_config_user: "", mail_config_pass: "", mail_config_sender_name: "",
@@ -500,7 +502,7 @@ async function loadInitialData() {
                 default_config.pagina_bloqueada, default_config.fecha_sorteo, default_config.precio_ticket,
                 default_config.numero_sorteo_correlativo, default_config.ultimo_numero_ticket,
                 default_config.ultima_fecha_resultados_zulia,
-                JSON.stringify(default_config.tasa_dolar), // Stringify para JSONB
+                JSON.stringify(default_config.tasa_dolar),
                 JSON.stringify(default_config.admin_whatsapp_numbers),
                 JSON.stringify(default_config.admin_email_for_reports),
                 default_config.mail_config_host, default_config.mail_config_port, default_config.mail_config_secure,
@@ -509,7 +511,25 @@ async function loadInitialData() {
                 default_config.sales_notification_threshold, default_config.block_reason_message
             ];
             const res = await client.query(insertQuery, insertValues);
-            configuracion = { id: res.rows[0].id, ...default_config }; // Asignar el ID generado
+            configuracion = { id: res.rows[0].id, ...default_config };
+            configId = res.rows[0].id;
+        } else {
+            configId = configuracion.id; // Get existing ID
+            // Ensure all expected properties exist, setting defaults if missing
+            configuracion.raffleNumbersInitialized = configuracion.raffleNumbersInitialized !== undefined ? configuracion.raffleNumbersInitialized : false;
+            configuracion.last_sales_notification_count = configuracion.last_sales_notification_count !== undefined ? configuracion.last_sales_notification_count : 0;
+            configuracion.sales_notification_threshold = configuracion.sales_notification_threshold !== undefined ? configuracion.sales_notification_threshold : 20;
+            configuracion.block_reason_message = configuracion.block_reason_message !== undefined ? configuracion.block_reason_message : "";
+            configuracion.mail_config_host = configuracion.mail_config_host !== undefined ? configuracion.mail_config_host : "";
+            configuracion.mail_config_port = configuracion.mail_config_port !== undefined ? configuracion.mail_config_port : 587;
+            configuracion.mail_config_secure = configuracion.mail_config_secure !== undefined ? configuracion.mail_config_secure : false;
+            configuracion.mail_config_user = configuracion.mail_config_user !== undefined ? configuracion.mail_config_user : "";
+            configuracion.mail_config_pass = configuracion.mail_config_pass !== undefined ? configuracion.mail_config_pass : "";
+            configuracion.mail_config_sender_name = configuracion.mail_config_sender_name !== undefined ? configuracion.mail_config_sender_name : "";
+            // Also ensure JSONB fields are arrays if they somehow became null or undefined
+            configuracion.tasa_dolar = Array.isArray(configuracion.tasa_dolar) ? configuracion.tasa_dolar : [36.50];
+            configuracion.admin_whatsapp_numbers = Array.isArray(configuracion.admin_whatsapp_numbers) ? configuracion.admin_whatsapp_numbers : [];
+            configuracion.admin_email_for_reports = Array.isArray(configuracion.admin_email_for_reports) ? configuracion.admin_email_for_reports : [];
         }
 
         // --- Inicializar Números de Rifa si no están (o si hay menos de 1000) ---
@@ -527,18 +547,18 @@ async function loadInitialData() {
                 }
             }
             if (initialNumbersToInsert.length > 0) {
-                await upsertNumerosInDB(initialNumbersToInsert); // Usar la función de upsert
+                await upsertNumerosInDB(initialNumbersToInsert);
                 console.log(`Insertados ${initialNumbersToInsert.length} números iniciales.`);
             }
-            // Actualizar el flag si se inicializaron números
-            if (!configuracion.raffleNumbersInitialized && initialNumbersToInsert.length > 0) {
+            if (!configuracion.raffleNumbersInitialized) { // Check again after potential initial insert
                 configuracion.raffleNumbersInitialized = true;
-                await updateConfiguracionInDB(configuracion);
+                // Use the configId to update the specific row
+                await updateConfiguracionInDB({ ...configuracion, id: configId });
             }
         } else if (!configuracion.raffleNumbersInitialized) {
-             // Si ya hay 1000 números pero el flag es falso, actualiza el flag
             configuracion.raffleNumbersInitialized = true;
-            await updateConfiguracionInDB(configuracion);
+            // Use the configId to update the specific row
+            await updateConfiguracionInDB({ ...configuracion, id: configId });
         }
 
         console.log('Datos iniciales cargados o asegurados en la base de datos.');
