@@ -116,8 +116,17 @@ async function updateConfiguracionInDB(configData) {
 async function getNumerosFromDB() {
     const client = await pool.connect();
     try {
+        // Log the query before execution
+        console.log('DEBUG_DB: Ejecutando SELECT en tabla numeros: SELECT numero, comprado, originaldrawnumber FROM numeros ORDER BY numero::INTEGER');
         const res = await client.query('SELECT numero, comprado, originaldrawnumber FROM numeros ORDER BY numero::INTEGER');
+        console.log(`DEBUG_DB: Consulta SELECT en numeros exitosa. Filas encontradas: ${res.rows.length}`);
         return res.rows;
+    } catch (dbError) { // Catch the specific DB error
+        console.error('ERROR_DB_GET_NUMEROS: Fallo al ejecutar la consulta SELECT en la tabla numeros. Mensaje:', dbError.message);
+        console.error('ERROR_DB_GET_NUMEROS: Código SQL:', dbError.code); // PostgreSQL error code
+        console.error('ERROR_DB_GET_NUMEROS: Detalle:', dbError.detail); // More specific detail
+        console.error('ERROR_DB_GET_NUMEROS: Stack trace:', dbError.stack);
+        throw new Error('Error al cargar números desde la base de datos: ' + dbError.message); // Re-throw with original message
     } finally {
         client.release();
     }
@@ -535,10 +544,13 @@ async function loadInitialData() {
         // --- Inicializar Números de Rifa si no están (o si hay menos de 1000) ---
         let numerosCountRes = await client.query('SELECT COUNT(*) FROM numeros');
         const currentNumbersCount = parseInt(numerosCountRes.rows[0].count, 10);
+        console.log(`DEBUG_LOAD_INITIAL: currentNumbersCount en la tabla numeros: ${currentNumbersCount}`);
+
 
         if (currentNumbersCount < TOTAL_RAFFLE_NUMBERS) {
-            console.warn(`Se encontraron ${currentNumbersCount} números. Inicializando/completando hasta ${TOTAL_RAFFLE_NUMBERS}.`);
+            console.warn(`DEBUG_LOAD_INITIAL: Se encontraron ${currentNumbersCount} números. Inicializando/completando hasta ${TOTAL_RAFFLE_NUMBERS}.`);
             const existingNumbers = (await client.query('SELECT numero FROM numeros')).rows.map(row => row.numero);
+            console.log(`DEBUG_LOAD_INITIAL: Números existentes antes de upsert: ${existingNumbers.length}`);
             const initialNumbersToInsert = [];
             for (let i = 0; i < TOTAL_RAFFLE_NUMBERS; i++) {
                 const numStr = i.toString().padStart(3, '0');
@@ -547,18 +559,25 @@ async function loadInitialData() {
                 }
             }
             if (initialNumbersToInsert.length > 0) {
+                console.log(`DEBUG_LOAD_INITIAL: Preparando para insertar/actualizar ${initialNumbersToInsert.length} números.`);
                 await upsertNumerosInDB(initialNumbersToInsert);
-                console.log(`Insertados ${initialNumbersToInsert.length} números iniciales.`);
+                console.log(`DEBUG_LOAD_INITIAL: Insertados/actualizados ${initialNumbersToInsert.length} números iniciales.`);
+            } else {
+                console.log('DEBUG_LOAD_INITIAL: No se necesitan insertar números adicionales. La tabla ya tiene todos los números esperados.');
             }
             if (!configuracion.raffleNumbersInitialized) { // Check again after potential initial insert
                 configuracion.raffleNumbersInitialized = true;
                 // Use the configId to update the specific row
                 await updateConfiguracionInDB({ ...configuracion, id: configId });
+                console.log('DEBUG_LOAD_INITIAL: raffleNumbersInitialized actualizado a true en configuración.');
             }
         } else if (!configuracion.raffleNumbersInitialized) {
             configuracion.raffleNumbersInitialized = true;
             // Use the configId to update the specific row
             await updateConfiguracionInDB({ ...configuracion, id: configId });
+            console.log('DEBUG_LOAD_INITIAL: raffleNumbersInitialized actualizado a true en configuración (ya tenía 1000 números).');
+        } else {
+            console.log('DEBUG_LOAD_INITIAL: La tabla numeros ya tiene 1000 números y raffleNumbersInitialized es true.');
         }
 
         console.log('Datos iniciales cargados o asegurados en la base de datos.');
@@ -821,7 +840,7 @@ app.get('/api/numeros', async (req, res) => {
         console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde DB.');
         res.json(numeros);
     } catch (error) {
-        console.error('Error al obtener números desde DB:', error.message);
+        console.error('Error al obtener números desde DB (API endpoint):', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener números.', error: error.message });
     }
 });
