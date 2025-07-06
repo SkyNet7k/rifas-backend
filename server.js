@@ -2,8 +2,6 @@
 
 const express = require('express');
 const fileUpload = require('express-fileupload');
-const fs = require('fs').promises; // Para operaciones asíncronas de archivos
-const { readFileSync } = require('fs'); // Para leer archivos de configuración locales de forma síncrona
 const path = require('path');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
@@ -14,6 +12,8 @@ const moment = require('moment-timezone');
 const archiver = require('archiver');
 const { v4: uuidv4 } = require('uuid'); // Para generar IDs únicos
 const crypto = require('crypto'); // Para generar IDs únicos si es necesario
+const { Pool } = require('pg'); // Importar la librería pg para PostgreSQL
+const fs = require('fs').promises; // Necesario para operaciones de archivos locales (uploads, reports)
 
 dotenv.config();
 
@@ -24,77 +24,428 @@ const port = process.env.PORT || 3000;
 app.use(express.json());
 app.use(fileUpload());
 
+// Configuración del pool de conexiones a la base de datos PostgreSQL
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false // Importante para conexiones SSL en Render
+    }
+});
+
 // Constantes y configuraciones
 const CARACAS_TIMEZONE = 'America/Caracas';
 const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onrender.com';
 
-// Rutas a tus directorios y archivos JSON locales
+// Rutas a tus directorios locales (para uploads y reports, no para JSONs)
 const UPLOADS_DIR = path.join(__dirname, 'uploads'); // Para comprobantes
 const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
-
-const CONFIG_FILE = path.join(__dirname, 'configuracion.json');
-const NUMEROS_FILE = path.join(__dirname, 'numeros.json');
-const HORARIOS_ZULIA_FILE = path.join(__dirname, 'horarios_zulia.json');
-const PREMIOS_FILE = path.join(__dirname, 'premios.json');
-const VENTAS_FILE = path.join(__dirname, 'ventas.json');
-const RESULTADOS_ZULIA_FILE = path.join(__dirname, 'resultados_zulia.json');
-const GANADORES_FILE = path.join(__dirname, 'ganadores.json');
-const COMPROBANTES_FILE = path.join(__dirname, 'comprobantes.json'); // Para el registro de comprobantes
-
-
-// --- Variables globales en memoria (caché de datos de los archivos JSON) ---
-let configuracion = {};
-let numeros = []; // Caché de los 1000 números de la rifa (estado comprado/no comprado)
-let horariosZulia = { zulia: [], chance: [] };
-let premios = {}; // Caché para los premios
-let ventas = []; // Caché para las ventas
-let resultadosZulia = []; // Caché para los resultados de Zulia
-let ganadores = []; // Caché para los ganadores
-let comprobantes = []; // Caché para los comprobantes (metadata)
 
 const SALES_THRESHOLD_PERCENTAGE = 80;
 const DRAW_SUSPENSION_HOUR = 12;
 const DRAW_SUSPENSION_MINUTE = 15;
 const TOTAL_RAFFLE_NUMBERS = 1000;
 
-// --- Funciones Auxiliares para Operaciones con Archivos JSON ---
+// --- Funciones Auxiliares para Operaciones con la Base de Datos ---
 
 /**
- * Lee un archivo JSON y devuelve su contenido. Si el archivo no existe, lo crea con un valor por defecto.
- * @param {string} filePath - La ruta al archivo JSON.
- * @param {any} defaultValue - El valor por defecto si el archivo no existe.
- * @returns {Promise<object|Array>} El contenido parseado del JSON.
+ * Obtiene la configuración de la base de datos.
+ * @returns {Promise<object>} El objeto de configuración.
  */
-async function readJsonFile(filePath, defaultValue) {
+async function getConfiguracionFromDB() {
+    const client = await pool.connect();
     try {
-        const data = await fs.readFile(filePath, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        if (error.code === 'ENOENT') { // File not found
-            console.warn(`Archivo no encontrado: ${filePath}. Creando con valor por defecto.`);
-            await writeJsonFile(filePath, defaultValue); // Create with default
-            return defaultValue;
+        const res = await client.query('SELECT * FROM configuracion LIMIT 1');
+        if (res.rows.length > 0) {
+            const config = res.rows[0];
+            // El driver pg automáticamente parsea JSONB, pero esta verificación es robusta
+            // en caso de que los datos se hayan insertado como strings antes de la migración.
+            if (typeof config.tasa_dolar === 'string') config.tasa_dolar = JSON.parse(config.tasa_dolar);
+            if (typeof config.admin_whatsapp_numbers === 'string') config.admin_whatsapp_numbers = JSON.parse(config.admin_whatsapp_numbers);
+            if (typeof config.admin_email_for_reports === 'string') config.admin_email_for_reports = JSON.parse(config.admin_email_for_reports);
+            return config;
         }
-        console.error(`Error leyendo ${filePath}:`, error);
-        throw error;
+        return {}; // Retorna un objeto vacío si no hay configuración
+    } finally {
+        client.release();
     }
 }
 
 /**
- * Escribe datos en un archivo JSON.
- * @param {string} filePath - La ruta al archivo JSON.
- * @param {object|Array} data - Los datos a escribir.
- * @returns {Promise<void>}
+ * Actualiza la configuración en la base de datos.
+ * @param {object} configData - Los datos de configuración a actualizar.
  */
-async function writeJsonFile(filePath, data) {
+async function updateConfiguracionInDB(configData) {
+    const client = await pool.connect();
     try {
-        await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf8');
-        console.log(`Datos escritos en ${filePath}`);
-    } catch (error) {
-        console.error(`Error escribiendo ${filePath}:`, error);
-        throw error;
+        const query = `
+            UPDATE configuracion SET
+                pagina_bloqueada = $1, fecha_sorteo = $2, precio_ticket = $3,
+                numero_sorteo_correlativo = $4, ultimo_numero_ticket = $5,
+                ultima_fecha_resultados_zulia = $6, tasa_dolar = $7,
+                admin_whatsapp_numbers = $8, admin_email_for_reports = $9,
+                mail_config_host = $10, mail_config_port = $11, mail_config_secure = $12,
+                mail_config_user = $13, mail_config_pass = $14, mail_config_sender_name = $15,
+                raffleNumbersInitialized = $16, last_sales_notification_count = $17,
+                sales_notification_threshold = $18, block_reason_message = $19
+            WHERE id = $20
+        `;
+        const values = [
+            configData.pagina_bloqueada, configData.fecha_sorteo, configData.precio_ticket,
+            configData.numero_sorteo_correlativo, configData.ultimo_numero_ticket,
+            configData.ultima_fecha_resultados_zulia,
+            // Convertir arrays/objetos a strings JSON válidos para columnas JSONB
+            JSON.stringify(configData.tasa_dolar),
+            JSON.stringify(configData.admin_whatsapp_numbers),
+            JSON.stringify(configData.admin_email_for_reports),
+            configData.mail_config_host, configData.mail_config_port, configData.mail_config_secure,
+            configData.mail_config_user, configData.mail_config_pass, configData.mail_config_sender_name,
+            configData.raffleNumbersInitialized, configData.last_sales_notification_count,
+            configData.sales_notification_threshold, configData.block_reason_message,
+            configData.id // Asumiendo que el ID de la configuración es 1 o el ID existente
+        ];
+        await client.query(query, values);
+    } finally {
+        client.release();
     }
 }
+
+/**
+ * Obtiene los números de rifa desde la base de datos.
+ * @returns {Promise<Array>} Array de objetos de números.
+ */
+async function getNumerosFromDB() {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('SELECT numero, comprado, originaldrawnumber FROM numeros ORDER BY numero::INTEGER');
+        return res.rows;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Actualiza un número de rifa en la base de datos.
+ * @param {string} numero - El número a actualizar.
+ * @param {boolean} comprado - Estado de comprado.
+ * @param {number|null} originalDrawNumber - Número de sorteo original.
+ */
+async function updateNumeroInDB(numero, comprado, originalDrawNumber) {
+    const client = await pool.connect();
+    try {
+        await client.query(
+            'UPDATE numeros SET comprado = $1, originalDrawNumber = $2 WHERE numero = $3',
+            [comprado, originalDrawNumber, numero]
+        );
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta o actualiza múltiples números de rifa en una transacción.
+ * @param {Array<Object>} numerosArray - Array de objetos de números { numero, comprado, originalDrawNumber }.
+ */
+async function upsertNumerosInDB(numerosArray) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN'); // Iniciar transacción
+        for (const item of numerosArray) {
+            await client.query(
+                `INSERT INTO numeros (numero, comprado, originalDrawNumber)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (numero) DO UPDATE SET
+                    comprado = EXCLUDED.comprado,
+                    originalDrawNumber = EXCLUDED.originalDrawNumber`,
+                [item.numero, item.comprado, item.originalDrawNumber]
+            );
+        }
+        await client.query('COMMIT'); // Confirmar transacción
+    } catch (e) {
+        await client.query('ROLLBACK'); // Revertir en caso de error
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Obtiene las ventas desde la base de datos.
+ * @returns {Promise<Array>} Array de objetos de ventas.
+ */
+async function getVentasFromDB() {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('SELECT * FROM ventas');
+        // Asegurarse de que el campo 'numbers' (JSONB) sea un array de JS
+        return res.rows.map(row => ({
+            ...row,
+            numbers: typeof row.numbers === 'string' ? JSON.parse(row.numbers) : row.numbers
+        }));
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta una nueva venta en la base de datos.
+ * @param {object} ventaData - Los datos de la venta a insertar.
+ */
+async function insertVentaInDB(ventaData) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            INSERT INTO ventas (
+                id, purchaseDate, drawDate, drawTime, drawNumber, ticketNumber,
+                buyerName, buyerPhone, numbers, valueUSD, valueBs, paymentMethod,
+                paymentReference, voucherURL, validationStatus
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        `;
+        const values = [
+            ventaData.id, ventaData.purchaseDate, ventaData.drawDate, ventaData.drawTime, ventaData.drawNumber, ventaData.ticketNumber,
+            ventaData.buyerName, ventaData.buyerPhone, JSON.stringify(ventaData.numbers), ventaData.valueUSD, ventaData.valueBs, ventaData.paymentMethod,
+            ventaData.paymentReference, ventaData.voucherURL, ventaData.validationStatus
+        ];
+        await client.query(query, values);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Actualiza el estado de validación de una venta en la base de datos.
+ * @param {number} ventaId - ID de la venta.
+ * @param {string} validationStatus - Nuevo estado de validación.
+ * @param {string|null} voidedReason - Razón de anulación (si aplica).
+ * @param {string|null} voidedAt - Timestamp de anulación (si aplica).
+ * @param {string|null} closedReason - Razón de cierre (si aplica).
+ * @param {string|null} closedAt - Timestamp de cierre (si aplica).
+ * @returns {Promise<object|null>} La venta actualizada o null si no se encontró.
+ */
+async function updateVentaStatusInDB(ventaId, validationStatus, voidedReason = null, voidedAt = null, closedReason = null, closedAt = null) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            UPDATE ventas SET
+                validationStatus = $1,
+                voidedReason = $2,
+                voidedAt = $3,
+                closedReason = $4,
+                closedAt = $5
+            WHERE id = $6
+            RETURNING *;
+        `;
+        const res = await client.query(query, [validationStatus, voidedReason, voidedAt, closedReason, closedAt, ventaId]);
+        return res.rows[0] || null;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Actualiza la URL del comprobante en una venta específica.
+ * @param {number} ventaId - ID de la venta.
+ * @param {string} voucherURL - La nueva URL del comprobante.
+ */
+async function updateVentaVoucherURLInDB(ventaId, voucherURL) {
+    const client = await pool.connect();
+    try {
+        await client.query('UPDATE ventas SET voucherURL = $1 WHERE id = $2', [voucherURL, ventaId]);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta un nuevo comprobante en la base de datos.
+ * @param {object} comprobanteData - Los datos del comprobante a insertar.
+ */
+async function insertComprobanteInDB(comprobanteData) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            INSERT INTO comprobantes (
+                id, ventaId, comprador, telefono, comprobante_nombre, comprobante_tipo, fecha_compra, url_comprobante
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `;
+        const values = [
+            comprobanteData.id, comprobanteData.ventaId, comprobanteData.comprador, comprobanteData.telefono,
+            comprobanteData.comprobante_nombre, comprobanteData.comprobante_tipo, comprobanteData.fecha_compra,
+            comprobanteData.url_comprobante
+        ];
+        await client.query(query, values);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Obtiene los horarios de Zulia desde la base de datos.
+ * @returns {Promise<object>} Objeto con horarios de zulia y chance.
+ */
+async function getHorariosZuliaFromDB() {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('SELECT hora FROM horarios_zulia');
+        // Asumiendo que solo hay una columna 'hora' y que los tipos 'zulia' y 'chance' se manejan en el frontend
+        // o si hay una columna 'tipo' en la DB, se debería filtrar por ella.
+        // Por la estructura original, asumimos que 'horarios_zulia' solo almacena las horas de Zulia.
+        return { zulia: res.rows.map(row => row.hora), chance: [] }; // Adaptar al formato esperado por el frontend
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Actualiza los horarios de Zulia en la base de datos.
+ * @param {string} tipo - Tipo de lotería ('zulia' o 'chance').
+ * @param {Array<string>} horarios - Array de strings de horarios.
+ */
+async function updateHorariosInDB(tipo, horarios) {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        // Si la tabla horarios_zulia solo tiene 'hora', asumimos que 'tipo' no se almacena en la DB.
+        // Si 'tipo' fuera una columna, la lógica sería diferente.
+        // Para este caso, truncamos y reinsertamos si es 'zulia'.
+        if (tipo === 'zulia') {
+            await client.query('TRUNCATE TABLE horarios_zulia RESTART IDENTITY;');
+            for (const hora of horarios) {
+                await client.query('INSERT INTO horarios_zulia (hora) VALUES ($1)', [hora]);
+            }
+        }
+        // Si tuvieras una tabla 'horarios_chance' o una columna 'tipo' en 'horarios_zulia',
+        // la lógica para 'chance' iría aquí.
+        await client.query('COMMIT');
+    } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Obtiene los resultados de Zulia desde la base de datos.
+ * @param {string} fecha - Fecha de los resultados.
+ * @param {string} tipoLoteria - Tipo de lotería.
+ * @returns {Promise<Array>} Array de objetos de resultados.
+ */
+async function getResultadosZuliaFromDB(fecha, tipoLoteria) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            'SELECT data FROM resultados_zulia WHERE (data->>\'fecha\')::text = $1 AND (data->>\'tipoLoteria\')::text = $2',
+            [fecha, tipoLoteria]
+        );
+        return res.rows.map(row => row.data); // 'data' es JSONB, así que ya viene parseado por el driver
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta o actualiza resultados de sorteo en la base de datos.
+ * @param {object} resultData - Los datos del resultado a insertar/actualizar.
+ */
+async function upsertResultadosZuliaInDB(resultData) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            INSERT INTO resultados_zulia (data)
+            VALUES ($1)
+            ON CONFLICT ((data->>'fecha'), (data->>'tipoLoteria')) DO UPDATE SET
+                data = EXCLUDED.data;
+        `;
+        const values = [JSON.stringify(resultData)]; // Stringify the whole object for JSONB
+        await client.query(query, values);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Obtiene los premios desde la base de datos para una fecha específica.
+ * @param {string} fecha - Fecha de los premios.
+ * @returns {Promise<object>} Objeto con los premios para la fecha.
+ */
+async function getPremiosFromDB(fecha) {
+    const client = await pool.connect();
+    try {
+        // Asumiendo que la tabla 'premios' almacena un objeto JSONB completo por fecha
+        const res = await client.query('SELECT data FROM premios WHERE (data->>\'fechaSorteo\')::text = $1 LIMIT 1', [fecha]);
+        if (res.rows.length > 0) {
+            return res.rows[0].data; // 'data' es JSONB, ya viene parseado
+        }
+        return null;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta o actualiza premios en la base de datos.
+ * @param {object} premiosData - Los datos de los premios a insertar/actualizar.
+ */
+async function upsertPremiosInDB(premiosData) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            INSERT INTO premios (data)
+            VALUES ($1)
+            ON CONFLICT ((data->>'fechaSorteo')) DO UPDATE SET
+                data = EXCLUDED.data;
+        `;
+        // Asumiendo que premiosData tiene una propiedad 'fechaSorteo' para el ON CONFLICT
+        const values = [JSON.stringify(premiosData)]; // Stringify the whole object for JSONB
+        await client.query(query, values);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Obtiene los ganadores desde la base de datos.
+ * @param {string} fecha - Fecha del sorteo.
+ * @param {number} numeroSorteo - Número de sorteo.
+ * @param {string} tipoLoteria - Tipo de lotería.
+ * @returns {Promise<Array>} Array de objetos de ganadores.
+ */
+async function getGanadoresFromDB(fecha, numeroSorteo, tipoLoteria) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            'SELECT data FROM ganadores WHERE (data->>\'drawDate\')::text = $1 AND (data->>\'drawNumber\')::int = $2 AND (data->>\'lotteryType\')::text = $3 LIMIT 1',
+            [fecha, numeroSorteo, tipoLoteria]
+        );
+        if (res.rows.length > 0 && res.rows[0].data && res.rows[0].data.winners) {
+            return res.rows[0].data.winners;
+        }
+        return [];
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta o actualiza ganadores en la base de datos.
+ * @param {object} ganadoresEntry - La entrada de ganadores a insertar/actualizar.
+ */
+async function upsertGanadoresInDB(ganadoresEntry) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            INSERT INTO ganadores (data)
+            VALUES ($1)
+            ON CONFLICT ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType')) DO UPDATE SET
+                data = EXCLUDED.data;
+        `;
+        const values = [JSON.stringify(ganadoresEntry)]; // Stringify the whole object for JSONB
+        await client.query(query, values);
+    } finally {
+        client.release();
+    }
+}
+
 
 // Función para asegurar que los directorios existan (solo para archivos locales como comprobantes y reportes)
 async function ensureDataAndComprobantesDirs() {
@@ -107,101 +458,113 @@ async function ensureDataAndComprobantesDirs() {
     }
 }
 
-// Carga inicial de datos desde archivos JSON locales
+// Carga inicial de datos desde la base de datos o inicialización con valores por defecto
 async function loadInitialData() {
-    console.log('Iniciando carga inicial de datos desde archivos JSON locales...');
-
+    console.log('Iniciando carga inicial de datos desde la base de datos...');
+    let client;
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, {
-            tasa_dolar: 36.50,
-            pagina_bloqueada: false,
-            fecha_sorteo: moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
-            precio_ticket: 3.00,
-            numero_sorteo_correlativo: 1,
-            ultimo_numero_ticket: 0,
-            ultima_fecha_resultados_zulia: null,
-            admin_whatsapp_numbers: [],
-            mail_config: { host: "", port: 587, secure: false, user: "", pass: "", senderName: "" },
-            admin_email_for_reports: [],
-            raffleNumbersInitialized: false, // Nuevo flag para inicialización de números
-            last_sales_notification_count: 0,
-            sales_notification_threshold: 20,
-            block_reason_message: ""
-        });
+        client = await pool.connect();
 
-        // Asegurar que la configuración tenga los valores por defecto si faltan
-        if (typeof configuracion.raffleNumbersInitialized === 'undefined') configuracion.raffleNumbersInitialized = false;
-        if (Array.isArray(configuracion.tasa_dolar) || typeof configuracion.tasa_dolar !== 'number') configuracion.tasa_dolar = 36.50;
-        if (!configuracion.fecha_sorteo || !moment(configuracion.fecha_sorteo, 'YYYY-MM-DD', true).isValid()) {
-            configuracion.fecha_sorteo = moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD');
+        // --- Cargar/Inicializar Configuración ---
+        let configuracion = await getConfiguracionFromDB();
+        if (Object.keys(configuracion).length === 0) {
+            console.warn('No se encontró configuración en la DB. Insertando valores por defecto.');
+            const default_config = {
+                pagina_bloqueada: false,
+                fecha_sorteo: moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
+                precio_ticket: 3.00,
+                numero_sorteo_correlativo: 1,
+                ultimo_numero_ticket: 0,
+                ultima_fecha_resultados_zulia: null, // Mantener como null para TIMESTAMP si no hay fecha
+                tasa_dolar: [36.50], // Corregido: Debe ser un array para JSONB
+                admin_whatsapp_numbers: [],
+                mail_config_host: "", mail_config_port: 587, mail_config_secure: false,
+                mail_config_user: "", mail_config_pass: "", mail_config_sender_name: "",
+                admin_email_for_reports: [],
+                raffleNumbersInitialized: false,
+                last_sales_notification_count: 0,
+                sales_notification_threshold: 20,
+                block_reason_message: ""
+            };
+            const insertQuery = `
+                INSERT INTO configuracion (
+                    pagina_bloqueada, fecha_sorteo, precio_ticket, numero_sorteo_correlativo,
+                    ultimo_numero_ticket, ultima_fecha_resultados_zulia, tasa_dolar,
+                    admin_whatsapp_numbers, admin_email_for_reports,
+                    mail_config_host, mail_config_port, mail_config_secure,
+                    mail_config_user, mail_config_pass, mail_config_sender_name,
+                    raffleNumbersInitialized, last_sales_notification_count, sales_notification_threshold, block_reason_message
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id;
+            `;
+            const insertValues = [
+                default_config.pagina_bloqueada, default_config.fecha_sorteo, default_config.precio_ticket,
+                default_config.numero_sorteo_correlativo, default_config.ultimo_numero_ticket,
+                default_config.ultima_fecha_resultados_zulia,
+                JSON.stringify(default_config.tasa_dolar), // Stringify para JSONB
+                JSON.stringify(default_config.admin_whatsapp_numbers),
+                JSON.stringify(default_config.admin_email_for_reports),
+                default_config.mail_config_host, default_config.mail_config_port, default_config.mail_config_secure,
+                default_config.mail_config_user, default_config.mail_config_pass, default_config.mail_config_sender_name,
+                default_config.raffleNumbersInitialized, default_config.last_sales_notification_count,
+                default_config.sales_notification_threshold, default_config.block_reason_message
+            ];
+            const res = await client.query(insertQuery, insertValues);
+            configuracion = { id: res.rows[0].id, ...default_config }; // Asignar el ID generado
         }
-        if (!configuracion.mail_config) configuracion.mail_config = { host: "", port: 587, secure: false, user: "", pass: "", senderName: "" };
-        if (!configuracion.admin_whatsapp_numbers) configuracion.admin_whatsapp_numbers = [];
-        if (!configuracion.admin_email_for_reports) configuracion.admin_email_for_reports = [];
-        if (typeof configuracion.last_sales_notification_count === 'undefined') configuracion.last_sales_notification_count = 0;
-        if (typeof configuracion.sales_notification_threshold === 'undefined') configuracion.sales_notification_threshold = 20;
-        if (typeof configuracion.block_reason_message === 'undefined') configuracion.block_reason_message = "";
 
+        // --- Inicializar Números de Rifa si no están (o si hay menos de 1000) ---
+        let numerosCountRes = await client.query('SELECT COUNT(*) FROM numeros');
+        const currentNumbersCount = parseInt(numerosCountRes.rows[0].count, 10);
 
-        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, { zulia: [], chance: [] });
-        if (Array.isArray(horariosZulia)) { // Compatibilidad con formato antiguo si era un array
-            horariosZulia = { zulia: horariosZulia, chance: [] };
-        }
-        if (!horariosZulia.zulia) horariosZulia.zulia = [];
-        if (!horariosZulia.chance) horariosZulia.chance = [];
-
-        premios = await readJsonFile(PREMIOS_FILE, {});
-        ventas = await readJsonFile(VENTAS_FILE, []);
-        resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE, []);
-        ganadores = await readJsonFile(GANADORES_FILE, []);
-        comprobantes = await readJsonFile(COMPROBANTES_FILE, []);
-
-
-        // Inicializar colección de números de rifa si no ha sido inicializada
-        if (!configuracion.raffleNumbersInitialized) {
-            console.warn('Flag "raffleNumbersInitialized" es false. Inicializando colección de números de rifa.');
-            const initialNumbers = [];
+        if (currentNumbersCount < TOTAL_RAFFLE_NUMBERS) {
+            console.warn(`Se encontraron ${currentNumbersCount} números. Inicializando/completando hasta ${TOTAL_RAFFLE_NUMBERS}.`);
+            const existingNumbers = (await client.query('SELECT numero FROM numeros')).rows.map(row => row.numero);
+            const initialNumbersToInsert = [];
             for (let i = 0; i < TOTAL_RAFFLE_NUMBERS; i++) {
                 const numStr = i.toString().padStart(3, '0');
-                initialNumbers.push({ numero: numStr, comprado: false, originalDrawNumber: null });
-            }
-            await writeJsonFile(NUMEROS_FILE, initialNumbers);
-            numeros = initialNumbers;
-            configuracion.raffleNumbersInitialized = true;
-            await writeJsonFile(CONFIG_FILE, configuracion); // Guardar la configuración actualizada
-            console.log('Colección de números de rifa inicializada y flag actualizado.');
-        } else {
-            numeros = await readJsonFile(NUMEROS_FILE, []);
-            if (numeros.length === 0 && TOTAL_RAFFLE_NUMBERS > 0) { // Si el archivo existe pero está vacío
-                console.warn('Archivo de números de rifa vacío. Reinicializando con 1000 números por defecto.');
-                const initialNumbers = [];
-                for (let i = 0; i < TOTAL_RAFFLE_NUMBERS; i++) {
-                    const numStr = i.toString().padStart(3, '0');
-                    initialNumbers.push({ numero: numStr, comprado: false, originalDrawNumber: null });
+                if (!existingNumbers.includes(numStr)) {
+                    initialNumbersToInsert.push({ numero: numStr, comprado: false, originalDrawNumber: null });
                 }
-                await writeJsonFile(NUMEROS_FILE, initialNumbers);
-                numeros = initialNumbers;
             }
+            if (initialNumbersToInsert.length > 0) {
+                await upsertNumerosInDB(initialNumbersToInsert); // Usar la función de upsert
+                console.log(`Insertados ${initialNumbersToInsert.length} números iniciales.`);
+            }
+            // Actualizar el flag si se inicializaron números
+            if (!configuracion.raffleNumbersInitialized && initialNumbersToInsert.length > 0) {
+                configuracion.raffleNumbersInitialized = true;
+                await updateConfiguracionInDB(configuracion);
+            }
+        } else if (!configuracion.raffleNumbersInitialized) {
+             // Si ya hay 1000 números pero el flag es falso, actualiza el flag
+            configuracion.raffleNumbersInitialized = true;
+            await updateConfiguracionInDB(configuracion);
         }
 
-        console.log('Datos iniciales cargados desde los archivos JSON locales.');
+        console.log('Datos iniciales cargados o asegurados en la base de datos.');
     } catch (err) {
-        console.error('Error CRÍTICO al cargar los archivos JSON locales. Asegúrate de que existan y sean válidos:', err);
+        console.error('Error CRÍTICO al cargar o inicializar datos en la base de datos:', err);
         process.exit(1);
+    } finally {
+        if (client) {
+            client.release();
+        }
     }
 }
 
+
 // Configuración de Nodemailer
 let transporter;
-function configureMailer() {
-    const emailUser = process.env.EMAIL_USER || configuracion.mail_config.user;
-    const emailPass = process.env.EMAIL_PASS || configuracion.mail_config.pass;
+async function configureMailer() {
+    const configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
+    const emailUser = process.env.EMAIL_USER || configuracion.mail_config_user;
+    const emailPass = process.env.EMAIL_PASS || configuracion.mail_config_pass;
 
-    if (configuracion.mail_config && emailUser && emailPass) {
+    if (configuracion.mail_config_host && emailUser && emailPass) {
         transporter = nodemailer.createTransport({
-            host: configuracion.mail_config.host,
-            port: configuracion.mail_config.port,
-            secure: configuracion.mail_config.secure,
+            host: configuracion.mail_config_host,
+            port: configuracion.mail_config_port,
+            secure: configuracion.mail_config_secure,
             auth: {
                 user: emailUser,
                 pass: emailPass
@@ -228,10 +591,11 @@ async function sendEmail(to, subject, html, attachments = []) {
         console.error('Mailer no configurado. No se pudo enviar el correo.');
         return false;
     }
+    const configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
     try {
         const recipients = Array.isArray(to) ? to.join(',') : to;
         const mailOptions = {
-            from: `${configuracion.mail_config.senderName || 'Sistema de Rifas'} <${configuracion.mail_config.user}>`,
+            from: `${configuracion.mail_config_sender_name || 'Sistema de Rifas'} <${configuracion.mail_config_user}>`,
             to: recipients,
             subject,
             html,
@@ -254,6 +618,7 @@ async function sendEmail(to, subject, html, attachments = []) {
 async function sendWhatsappNotification(messageText) {
     try {
         const encodedMessage = encodeURIComponent(messageText);
+        const configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
 
         if (configuracion.admin_whatsapp_numbers && configuracion.admin_whatsapp_numbers.length > 0) {
             console.log(`\n--- Notificación de WhatsApp para Administradores ---`);
@@ -274,15 +639,14 @@ async function sendWhatsappNotification(messageText) {
 
 // Función auxiliar para enviar notificación de resumen de ventas (WhatsApp y Email)
 async function sendSalesSummaryNotifications() {
-    // Recargar configuración para asegurar que `last_sales_notification_count` y `sales_notification_threshold` estén al día.
-    configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Cargar la más reciente
+    let configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
+    let ventas = await getVentasFromDB(); // Obtener las ventas más recientes
 
     console.log('[sendSalesSummaryNotifications] Iniciando notificación de resumen de ventas.');
     const now = moment().tz(CARACAS_TIMEZONE);
 
-    // Obtener ventas directamente de la caché (que se actualiza al inicio)
-    const ventasParaFechaSorteo = ventas.filter(venta => 
-        venta.drawDate === configuracion.fecha_sorteo && 
+    const ventasParaFechaSorteo = ventas.filter(venta =>
+        venta.drawDate === configuracion.fecha_sorteo &&
         (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
     );
 
@@ -367,10 +731,9 @@ app.options('*', cors()); // Enable pre-flight across all routes
 // Obtener configuración
 app.get('/api/configuracion', async (req, res) => {
     try {
-        // Leer siempre del archivo para asegurar la última versión
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion);
+        const configuracion = await getConfiguracionFromDB();
         const configToSend = { ...configuracion };
-        delete configToSend.mail_config; // No enviar credenciales sensibles
+        delete configToSend.mail_config_pass; // No enviar credenciales sensibles
         res.json(configToSend);
     } catch (error) {
         console.error('Error al obtener configuración:', error.message);
@@ -382,15 +745,25 @@ app.get('/api/configuracion', async (req, res) => {
 app.put('/api/configuracion', async (req, res) => {
     const newConfig = req.body;
     try {
-        // Leer la configuración más reciente del archivo para asegurar consistencia
-        let currentConfig = await readJsonFile(CONFIG_FILE, configuracion); // Usar la caché como fallback
-        
+        let currentConfig = await getConfiguracionFromDB();
+
+        // Actualizar solo los campos que vienen en newConfig y que existen en currentConfig
+        // Excluir campos de mail_config si se manejan por separado o no se deben actualizar directamente aquí
         Object.keys(newConfig).forEach(key => {
-            if (currentConfig.hasOwnProperty(key) && key !== 'mail_config') {
+            // Mapear campos de mail_config si vienen anidados
+            if (key === 'mail_config' && typeof newConfig.mail_config === 'object') {
+                currentConfig.mail_config_host = newConfig.mail_config.host;
+                currentConfig.mail_config_port = newConfig.mail_config.port;
+                currentConfig.mail_config_secure = newConfig.mail_config.secure;
+                currentConfig.mail_config_user = newConfig.mail_config.user;
+                currentConfig.mail_config_pass = newConfig.mail_config.pass;
+                currentConfig.mail_config_sender_name = newConfig.mail_config.senderName;
+            } else if (currentConfig.hasOwnProperty(key)) {
                 currentConfig[key] = newConfig[key];
             }
         });
 
+        // Asegurar que los arrays JSONB se manejen correctamente
         if (newConfig.admin_email_for_reports !== undefined) {
             currentConfig.admin_email_for_reports = Array.isArray(newConfig.admin_email_for_reports)
                                                       ? newConfig.admin_email_for_reports
@@ -411,11 +784,9 @@ app.put('/api/configuracion', async (req, res) => {
             currentConfig.block_reason_message = newConfig.block_reason_message;
         }
 
+        await updateConfiguracionInDB(currentConfig);
 
-        await writeJsonFile(CONFIG_FILE, currentConfig);
-        configuracion = currentConfig; // Actualizar la caché en memoria
-
-        res.json({ message: 'Configuración actualizada con éxito', configuracion: configuracion });
+        res.json({ message: 'Configuración actualizada con éxito', configuracion: currentConfig });
     } catch (error) {
         console.error('Error al actualizar configuración:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al actualizar configuración.' });
@@ -423,41 +794,39 @@ app.put('/api/configuracion', async (req, res) => {
 });
 
 
-// Obtener estado de los números (AHORA LEE DIRECTAMENTE DEL ARCHIVO LOCAL)
+// Obtener estado de los números
 app.get('/api/numeros', async (req, res) => {
     try {
-        numeros = await readJsonFile(NUMEROS_FILE, []); // Recargar para asegurar la última versión
-        console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde archivo local.');
+        const numeros = await getNumerosFromDB();
+        console.log('DEBUG_BACKEND: Recibida solicitud GET /api/numeros. Enviando estado actual de numeros desde DB.');
         res.json(numeros);
     } catch (error) {
-        console.error('Error al obtener números desde archivo local:', error.message);
+        console.error('Error al obtener números desde DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener números.', error: error.message });
     }
 });
 
 // Actualizar estado de los números (usado internamente o por admin)
 app.post('/api/numeros', async (req, res) => {
-    const updatedNumbers = req.body;
+    const updatedNumbers = req.body; // Array de objetos de números
     try {
-        await writeJsonFile(NUMEROS_FILE, updatedNumbers);
-        numeros = updatedNumbers; // Actualizar caché en memoria
-
-        console.log('DEBUG_BACKEND: Números actualizados en archivo local y en caché.');
+        await upsertNumerosInDB(updatedNumbers); // Usar upsert para actualizar o insertar
+        console.log('DEBUG_BACKEND: Números actualizados en DB.');
         res.json({ message: 'Números actualizados con éxito.' });
     } catch (error) {
-        console.error('Error al actualizar números en archivo local:', error.message);
+        console.error('Error al actualizar números en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al actualizar números.' });
     }
 });
 
-// Ruta para obtener ventas (ahora siempre desde archivo local)
+// Ruta para obtener ventas
 app.get('/api/ventas', async (req, res) => {
     try {
-        ventas = await readJsonFile(VENTAS_FILE, []); // Recargar para asegurar la última versión
-        console.log('Enviando ventas al frontend desde archivo local:', ventas.length, 'ventas.');
+        const ventas = await getVentasFromDB();
+        console.log('Enviando ventas al frontend desde DB:', ventas.length, 'ventas.');
         res.status(200).json(ventas);
     } catch (error) {
-        console.error('Error al obtener ventas desde archivo local:', error.message);
+        console.error('Error al obtener ventas desde DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener ventas.', error: error.message });
     }
 });
@@ -482,37 +851,47 @@ app.post('/api/comprar', async (req, res) => {
         return res.status(400).json({ message: 'Faltan datos requeridos para la compra (números, valor, método de pago, comprador, teléfono, hora del sorteo).' });
     }
 
-    configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Cargar la más reciente
-    numeros = await readJsonFile(NUMEROS_FILE, numeros); // Cargar la más reciente
-    ventas = await readJsonFile(VENTAS_FILE, ventas); // Cargar la más reciente
-
-    if (configuracion.pagina_bloqueada) {
-        console.warn('DEBUG_BACKEND: Página bloqueada, denegando compra.');
-        return res.status(403).json({ message: 'La página está bloqueada para nuevas compras en este momento.' });
-    }
-
+    let client;
     try {
+        client = await pool.connect();
+        await client.query('BEGIN'); // Iniciar transacción
+
+        let configuracion = await getConfiguracionFromDB();
+        let numeros = await getNumerosFromDB();
+        let ventas = await getVentasFromDB();
+
+        if (configuracion.pagina_bloqueada) {
+            console.warn('DEBUG_BACKEND: Página bloqueada, denegando compra.');
+            await client.query('ROLLBACK');
+            return res.status(403).json({ message: 'La página está bloqueada para nuevas compras en este momento.' });
+        }
+
         const conflictos = numerosSeleccionados.filter(n =>
             numeros.find(numObj => numObj.numero === n && numObj.comprado)
         );
 
         if (conflictos.length > 0) {
             console.warn(`DEBUG_BACKEND: Conflicto de números: ${conflictos.join(', ')} ya comprados.`);
+            await client.query('ROLLBACK');
             return res.status(409).json({ message: `Los números ${conflictos.join(', ')} ya han sido comprados. Por favor, selecciona otros.` });
         }
 
-        numerosSeleccionados.forEach(numSel => {
-            const numObjInCache = numeros.find(n => n.numero === numSel);
-            if (numObjInCache) {
-                numObjInCache.comprado = true;
-                numObjInCache.originalDrawNumber = configuracion.numero_sorteo_correlativo;
+        for (const numSel of numerosSeleccionados) {
+            const numObjInDB = numeros.find(n => n.numero === numSel);
+            if (numObjInDB) {
+                await client.query(
+                    'UPDATE numeros SET comprado = TRUE, originalDrawNumber = $1 WHERE numero = $2',
+                    [configuracion.numero_sorteo_correlativo, numSel]
+                );
             } else {
                 // Esto no debería pasar si los números se inicializan correctamente
-                numeros.push({ numero: numSel, comprado: true, originalDrawNumber: configuracion.numero_sorteo_correlativo });
+                await client.query(
+                    'INSERT INTO numeros (numero, comprado, originalDrawNumber) VALUES ($1, TRUE, $2)',
+                    [numSel, configuracion.numero_sorteo_correlativo]
+                );
             }
-        });
-        await writeJsonFile(NUMEROS_FILE, numeros);
-        console.log('DEBUG_BACKEND: Números actualizados en archivo local y en caché.');
+        }
+        console.log('DEBUG_BACKEND: Números actualizados en DB.');
 
         const now = moment().tz("America/Caracas");
         configuracion.ultimo_numero_ticket = (configuracion.ultimo_numero_ticket || 0) + 1;
@@ -536,15 +915,16 @@ app.post('/api/comprar', async (req, res) => {
             validationStatus: 'Pendiente'
         };
 
-        ventas.push(nuevaVenta);
-        await writeJsonFile(VENTAS_FILE, ventas);
-        console.log('DEBUG_BACKEND: Venta guardada en archivo local.');
+        await insertVentaInDB(nuevaVenta);
+        console.log('DEBUG_BACKEND: Venta guardada en DB.');
 
-        await writeJsonFile(CONFIG_FILE, {
-            ...configuracion, // Mantener el resto de la configuración
+        await updateConfiguracionInDB({
+            ...configuracion,
             ultimo_numero_ticket: configuracion.ultimo_numero_ticket
         });
-        console.log('DEBUG_BACKEND: Configuración (ultimo_numero_ticket) actualizada en archivo local.');
+        console.log('DEBUG_BACKEND: Configuración (ultimo_numero_ticket) actualizada en DB.');
+
+        await client.query('COMMIT'); // Confirmar transacción
 
         res.status(200).json({ message: 'Compra realizada con éxito!', ticket: nuevaVenta });
         console.log('DEBUG_BACKEND: Respuesta de compra enviada al frontend.');
@@ -553,12 +933,12 @@ app.post('/api/comprar', async (req, res) => {
         await sendWhatsappNotification(whatsappMessageIndividual);
         console.log('DEBUG_BACKEND: Proceso de compra en backend finalizado.');
 
-        // Lógica de notificación por umbral de ventas (ahora con datos locales)
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar la más reciente
+        // Lógica de notificación por umbral de ventas
+        configuracion = await getConfiguracionFromDB(); // Recargar la más reciente
+        ventas = await getVentasFromDB(); // Recargar la más reciente
 
-        const currentTotalSales = ventas.filter(sale => 
-            sale.drawDate === configuracion.fecha_sorteo && 
+        const currentTotalSales = ventas.filter(sale =>
+            sale.drawDate === configuracion.fecha_sorteo &&
             (sale.validationStatus === 'Confirmado' || sale.validationStatus === 'Pendiente')
         ).length;
 
@@ -573,15 +953,18 @@ app.post('/api/comprar', async (req, res) => {
             await sendSalesSummaryNotifications();
 
             configuracion.last_sales_notification_count = currentMultiple * notificationThreshold;
-            await writeJsonFile(CONFIG_FILE, configuracion);
-            console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${currentMultiple * notificationThreshold} en archivo local.`);
+            await updateConfiguracionInDB(configuracion);
+            console.log(`[WhatsApp Notificación Resumen] Contador 'last_sales_notification_count' actualizado a ${currentMultiple * notificationThreshold} en DB.`);
         } else {
             console.log(`[WhatsApp Notificación Resumen Check] Ventas actuales (${currentTotalSales}) no han cruzado un nuevo múltiplo del umbral (${notificationThreshold}). Último contador notificado: ${prevNotifiedCount}. No se envió notificación de resumen.`);
         }
 
     } catch (error) {
+        if (client) await client.query('ROLLBACK'); // Revertir en caso de error
         console.error('ERROR_BACKEND: Error al procesar la compra:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al procesar la compra.', error: error.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -598,30 +981,35 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         return res.status(400).json({ message: 'Tipo de archivo no permitido. Solo se aceptan imágenes (JPG, PNG, GIF) y PDF.' });
     }
 
-    ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar para asegurar la última versión
-    let ventaIndex = ventas.findIndex(v => v.id === ventaId);
-    if (ventaIndex === -1) {
-        return res.status(404).json({ message: 'Venta no encontrada.' });
-    }
-    let ventaData = ventas[ventaIndex];
-
-    const now = moment().tz("America/Caracas");
-    const timestamp = now.format('YYYYMMDD_HHmmss');
-    const originalExtension = path.extname(comprobanteFile.name);
-    const fileName = `comprobante_${ventaId}_${timestamp}${originalExtension}`;
-    const filePath = path.join(UPLOADS_DIR, fileName);
-
+    let client;
     try {
+        client = await pool.connect();
+        await client.query('BEGIN'); // Iniciar transacción
+
+        const ventasRes = await client.query('SELECT * FROM ventas WHERE id = $1', [ventaId]);
+        if (ventasRes.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Venta no encontrada.' });
+        }
+        let ventaData = ventasRes.rows[0];
+        // Asegurarse de que ventaData.numbers sea un array para el email
+        ventaData.numbers = typeof ventaData.numbers === 'string' ? JSON.parse(ventaData.numbers) : ventaData.numbers;
+
+
+        const now = moment().tz("America/Caracas");
+        const timestamp = now.format('YYYYMMDD_HHmmss');
+        const originalExtension = path.extname(comprobanteFile.name);
+        const fileName = `comprobante_${ventaId}_${timestamp}${originalExtension}`;
+        const filePath = path.join(UPLOADS_DIR, fileName);
+
         await comprobanteFile.mv(filePath);
 
         // Actualizar la URL del comprobante en la venta
-        ventaData.voucherURL = `/uploads/${fileName}`;
-        await writeJsonFile(VENTAS_FILE, ventas); // Guardar cambios en ventas.json
-        console.log(`Voucher URL actualizado en archivo local para venta ${ventaId}.`);
+        await updateVentaVoucherURLInDB(ventaId, `/uploads/${fileName}`);
+        console.log(`Voucher URL actualizado en DB para venta ${ventaId}.`);
 
-        // Registrar en comprobantes.json (metadata)
-        comprobantes = await readJsonFile(COMPROBANTES_FILE, []); // Recargar
-        comprobantes.push({
+        // Registrar en comprobantes (metadata)
+        await insertComprobanteInDB({
             id: Date.now(), // Nuevo ID para el registro de comprobante
             ventaId: ventaId,
             comprador: ventaData.buyerName,
@@ -631,10 +1019,11 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
             fecha_compra: moment(ventaData.purchaseDate).format('YYYY-MM-DD'),
             url_comprobante: `/uploads/${fileName}`
         });
-        await writeJsonFile(COMPROBANTES_FILE, comprobantes);
-        console.log(`Comprobante registrado en ${COMPROBANTES_FILE}.`);
+        console.log(`Comprobante registrado en DB.`);
 
+        await client.query('COMMIT'); // Confirmar transacción
 
+        const configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
             const subject = `Nuevo Comprobante de Pago para Venta #${ventaData.ticketNumber}`;
             const htmlContent = `
@@ -664,8 +1053,11 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
 
         res.status(200).json({ message: 'Comprobante subido y asociado con éxito.', url: `/uploads/${fileName}` });
     } catch (error) {
+        if (client) await client.query('ROLLBACK');
         console.error('Error al subir el comprobante:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al subir el comprobante.', error: error.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -676,10 +1068,10 @@ app.use('/uploads', express.static(UPLOADS_DIR));
 // Endpoint para obtener horarios de Zulia (y Chance)
 app.get('/api/horarios-zulia', async (req, res) => {
     try {
-        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, horariosZulia); // Recargar la más reciente
+        const horariosZulia = await getHorariosZuliaFromDB();
         res.json(horariosZulia);
     } catch (error) {
-        console.error('Error al obtener horarios de Zulia de archivo local:', error.message);
+        console.error('Error al obtener horarios de Zulia de DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener horarios.' });
     }
 });
@@ -694,15 +1086,13 @@ app.post('/api/horarios', async (req, res) => {
         return res.status(400).json({ message: 'Formato de horarios inválido. Espera un array de strings.' });
     }
     try {
-        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, horariosZulia); // Recargar la más reciente
-        horariosZulia[tipo] = horarios;
+        await updateHorariosInDB(tipo, horarios); // Asumiendo que esta función maneja la lógica de la DB
+        const updatedHorarios = await getHorariosZuliaFromDB(); // Obtener los horarios actualizados para la respuesta
+        console.log(`Horarios de ${tipo} actualizados en DB.`);
 
-        await writeJsonFile(HORARIOS_ZULIA_FILE, horariosZulia);
-        console.log(`Horarios de ${tipo} actualizados en archivo local y caché.`);
-
-        res.json({ message: `Horarios de ${tipo} actualizados con éxito.`, horarios: horariosZulia[tipo] });
+        res.json({ message: `Horarios de ${tipo} actualizados con éxito.`, horarios: updatedHorarios[tipo] });
     } catch (error) {
-        console.error(`Error al actualizar horarios de ${tipo} en archivo local:`, error.message);
+        console.error(`Error al actualizar horarios de ${tipo} en DB:`, error.message);
         res.status(500).json({ message: `Error interno del servidor al actualizar horarios de ${tipo}.` });
     }
 });
@@ -716,29 +1106,30 @@ app.get('/api/resultados-zulia', async (req, res) => {
     }
 
     try {
-        resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE, []); // Recargar
-        const resultsForDateAndZulia = resultadosZulia.filter(r =>
-            r.fecha === fecha && r.tipoLoteria === 'zulia'
-        );
-
+        const resultsForDateAndZulia = await getResultadosZuliaFromDB(fecha, 'zulia');
         res.status(200).json(resultsForDateAndZulia);
     }
     catch (error) {
-        console.error('Error al obtener resultados de Zulia desde archivo local:', error.message);
+        console.error('Error al obtener resultados de Zulia desde DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de Zulia.', error: error.message });
     }
 });
 
 
-// Endpoint para obtener los últimos resultados del sorteo (ahora siempre desde archivo local)
+// Endpoint para obtener los últimos resultados del sorteo
 app.get('/api/resultados-sorteo', async (req, res) => {
+    const client = await pool.connect();
     try {
-        resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE, []); // Recargar
-        console.log('Enviando resultados de sorteo al frontend desde archivo local:', resultadosZulia.length, 'resultados.');
+        // Obtener todos los resultados de Zulia para este endpoint
+        const resDB = await client.query('SELECT data FROM resultados_zulia');
+        const resultadosZulia = resDB.rows.map(row => row.data); // 'data' es JSONB, ya viene parseado
+        console.log('Enviando resultados de sorteo al frontend desde DB:', resultadosZulia.length, 'resultados.');
         res.status(200).json(resultadosZulia);
     } catch (error) {
-        console.error('Error al obtener resultados de sorteo desde archivo local:', error.message);
+        console.error('Error al obtener resultados de sorteo desde DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener resultados de sorteo.', error: error.message });
+    } finally {
+        client.release();
     }
 });
 
@@ -754,11 +1145,6 @@ app.post('/api/resultados-sorteo', async (req, res) => {
     const currentDay = now.format('YYYY-MM-DD');
 
     try {
-        resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE, []); // Recargar
-        const existingResultIndex = resultadosZulia.findIndex(r =>
-            r.fecha === fecha && r.tipoLoteria === tipoLoteria
-        );
-
         const dataToSave = {
             fecha,
             tipoLoteria,
@@ -766,23 +1152,19 @@ app.post('/api/resultados-sorteo', async (req, res) => {
             ultimaActualizacion: now.format('YYYY-MM-DD HH:mm:ss')
         };
 
-        if (existingResultIndex !== -1) {
-            resultadosZulia[existingResultIndex] = dataToSave;
-        } else {
-            resultadosZulia.push(dataToSave);
-        }
-        await writeJsonFile(RESULTADOS_ZULIA_FILE, resultadosZulia);
-        console.log('Resultados de sorteo guardados/actualizados en archivo local y caché.');
+        await upsertResultadosZuliaInDB(dataToSave);
+        console.log('Resultados de sorteo guardados/actualizados en DB.');
 
         if (fecha === currentDay && tipoLoteria === 'zulia') {
+            let configuracion = await getConfiguracionFromDB();
             configuracion.ultima_fecha_resultados_zulia = fecha;
-            await writeJsonFile(CONFIG_FILE, configuracion);
-            console.log('Configuración (ultima_fecha_resultados_zulia) actualizada en archivo local.');
+            await updateConfiguracionInDB(configuracion);
+            console.log('Configuración (ultima_fecha_resultados_zulia) actualizada en DB.');
         }
 
         res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.' });
     } catch (error) {
-        console.error('Error al guardar/actualizar resultados de sorteo en archivo local:', error.message);
+        console.error('Error al guardar/actualizar resultados de sorteo en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al guardar/actualizar resultados de sorteo.', error: error.message });
     }
 });
@@ -797,7 +1179,7 @@ app.post('/api/resultados-sorteo', async (req, res) => {
  */
 async function generateGenericSalesExcelReport(salesData, config, reportTitle, fileNamePrefix) {
     console.log(`[DEBUG_EXCEL] Iniciando generateGenericSalesExcelReport para: ${reportTitle}`);
-    console.log(`[DEBUG_EXCEL] salesData recibida (${salesData.length} items):`, JSON.stringify(salesData.slice(0, 5), null, 2), `... (total: ${salesData.length} items)`); // Limitar log
+    // console.log(`[DEBUG_EXCEL] salesData recibida (${salesData.length} items):`, JSON.stringify(salesData.slice(0, 5), null, 2), `... (total: ${salesData.length} items)`); // Limitar log
 
     const now = moment().tz(CARACAS_TIMEZONE);
     const todayFormatted = now.format('YYYY-MM-DD');
@@ -858,7 +1240,8 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
             ticketNumber: venta.ticketNumber || '',
             buyerName: venta.buyerName || '',
             buyerPhone: venta.buyerPhone || '',
-            numbers: (Array.isArray(venta.numbers) ? venta.numbers.join(', ') : (venta.numbers || '')),
+            // 'numbers' ya debería ser un array debido a getVentasFromDB
+            numbers: (Array.isArray(venta.numbers) ? venta.numbers.join(', ') : ''),
             valueUSD: venta.valueUSD || 0,
             valueBs: venta.valueBs || 0,
             paymentMethod: venta.paymentMethod || '',
@@ -881,7 +1264,7 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
 }
 
 /**
- * Genera un buffer ZIP que contiene archivos Excel para cada archivo JSON especificado.
+ * Genera un buffer ZIP que contiene archivos Excel para cada tabla de la base de datos especificada.
  * @returns {Promise<Buffer>} Un buffer que representa el archivo ZIP.
  */
 async function generateDatabaseBackupZipBuffer() {
@@ -892,73 +1275,61 @@ async function generateDatabaseBackupZipBuffer() {
     const output = new (require('stream').PassThrough)();
     archive.pipe(output);
 
+    const client = await pool.connect();
     try {
-        const filesToExport = [
-            { path: CONFIG_FILE, name: 'configuracion.json' },
-            { path: NUMEROS_FILE, name: 'numeros.json' },
-            { path: VENTAS_FILE, name: 'ventas.json' },
-            { path: HORARIOS_ZULIA_FILE, name: 'horarios_zulia.json' },
-            { path: RESULTADOS_ZULIA_FILE, name: 'resultados_zulia.json' },
-            { path: PREMIOS_FILE, name: 'premios.json' },
-            { path: GANADORES_FILE, name: 'ganadores.json' },
-            { path: COMPROBANTES_FILE, name: 'comprobantes.json' }
+        const tablesToExport = [
+            { name: 'configuracion', columns: ['id', 'pagina_bloqueada', 'fecha_sorteo', 'precio_ticket', 'numero_sorteo_correlativo', 'ultimo_numero_ticket', 'ultima_fecha_resultados_zulia', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports', 'mail_config_host', 'mail_config_port', 'mail_config_secure', 'mail_config_user', 'mail_config_pass', 'mail_config_sender_name', 'raffleNumbersInitialized', 'last_sales_notification_count', 'sales_notification_threshold', 'block_reason_message'] },
+            { name: 'numeros', columns: ['id', 'numero', 'comprado', 'originalDrawNumber'] },
+            { name: 'ventas', columns: ['id', 'purchaseDate', 'drawDate', 'drawTime', 'drawNumber', 'ticketNumber', 'buyerName', 'buyerPhone', 'numbers', 'valueUSD', 'valueBs', 'paymentMethod', 'paymentReference', 'voucherURL', 'validationStatus', 'voidedReason', 'voidedAt', 'closedReason', 'closedAt'] },
+            { name: 'horarios_zulia', columns: ['id', 'hora'] },
+            { name: 'resultados_zulia', columns: ['id', 'data'] }, // 'data' is JSONB
+            { name: 'premios', columns: ['id', 'data'] }, // 'data' is JSONB
+            { name: 'ganadores', columns: ['id', 'data'] }, // 'data' is JSONB
+            { name: 'comprobantes', columns: ['id', 'ventaId', 'comprador', 'telefono', 'comprobante_nombre', 'comprobante_tipo', 'fecha_compra', 'url_comprobante'] }
         ];
 
-        for (const fileInfo of filesToExport) {
+        for (const tableInfo of tablesToExport) {
             try {
-                const data = await fs.readFile(fileInfo.path, 'utf8');
-                const parsedData = JSON.parse(data);
+                const res = await client.query(`SELECT ${tableInfo.columns.join(',')} FROM ${tableInfo.name}`);
+                const data = res.rows;
 
                 const workbook = new ExcelJS.Workbook();
-                const worksheet = workbook.addWorksheet(fileInfo.name.replace('.json', ''));
+                const worksheet = workbook.addWorksheet(tableInfo.name);
 
-                if (Array.isArray(parsedData) && parsedData.length > 0) {
-                    const allKeys = new Set();
-                    parsedData.forEach(row => {
-                        Object.keys(row).forEach(key => allKeys.add(key));
-                    });
-                    const columns = Array.from(allKeys).map(key => ({ header: key, key: key, width: 25 }));
+                if (data.length > 0) {
+                    const columns = tableInfo.columns.map(key => ({ header: key, key: key, width: 25 }));
                     worksheet.columns = columns;
                     worksheet.addRow(columns.map(col => col.header));
-                    parsedData.forEach(row => {
+                    data.forEach(row => {
                         const rowData = {};
                         columns.forEach(col => {
-                            if (Array.isArray(row[col.key])) {
-                                rowData[col.key] = row[col.key].join(', ');
-                            } else if (typeof row[col.key] === 'object' && row[col.key] !== null) {
-                                rowData[col.key] = JSON.stringify(row[col.key]);
+                            let value = row[col.key];
+                            if (typeof value === 'object' && value !== null) {
+                                // Handle JSONB columns explicitly
+                                if (['data', 'numbers', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports'].includes(col.key)) {
+                                    rowData[col.key] = JSON.stringify(value);
+                                } else if (Array.isArray(value)) {
+                                    rowData[col.key] = value.join(', ');
+                                } else {
+                                    rowData[col.key] = JSON.stringify(value);
+                                }
                             } else {
-                                rowData[col.key] = row[col.key];
+                                rowData[col.key] = value;
                             }
                         });
                         worksheet.addRow(rowData);
                     });
-                } else if (typeof parsedData === 'object' && parsedData !== null) { // For single object JSONs like config or prizes
-                    worksheet.columns = [
-                        { header: 'Key', key: 'key', width: 30 },
-                        { header: 'Value', key: 'value', width: 70 }
-                    ];
-                    worksheet.addRow(['Key', 'Value']);
-                    for (const key in parsedData) {
-                        let value = parsedData[key];
-                        if (Array.isArray(value)) {
-                            value = value.join(', ');
-                        } else if (typeof value === 'object' && value !== null) {
-                            value = JSON.stringify(value);
-                        }
-                        worksheet.addRow([key, value]);
-                    }
                 } else {
-                    worksheet.addRow(['No data or unsupported format']);
+                    worksheet.addRow(['No data']);
                 }
 
                 const excelBuffer = await workbook.xlsx.writeBuffer();
-                archive.append(excelBuffer, { name: `${fileInfo.name.replace('.json', '')}_backup.xlsx` });
-            } catch (readError) {
-                console.warn(`No se pudo leer o procesar ${fileInfo.path} para el respaldo: ${readError.message}. Se omitirá.`);
+                archive.append(excelBuffer, { name: `${tableInfo.name}_backup.xlsx` });
+            } catch (queryError) {
+                console.warn(`No se pudo leer o procesar la tabla ${tableInfo.name} para el respaldo: ${queryError.message}. Se omitirá.`);
             }
         }
-        
+
         archive.finalize();
 
         return new Promise((resolve, reject) => {
@@ -971,6 +1342,8 @@ async function generateDatabaseBackupZipBuffer() {
     } catch (error) {
         console.error('Error al generar el buffer ZIP de la base de datos:', error.message);
         throw error;
+    } finally {
+        client.release();
     }
 }
 
@@ -981,18 +1354,18 @@ app.post('/api/corte-ventas', async (req, res) => {
         const now = moment().tz(CARACAS_TIMEZONE);
         const todayFormatted = now.format('YYYY-MM-DD');
 
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar la más reciente
+        let configuracion = await getConfiguracionFromDB();
+        let ventas = await getVentasFromDB();
 
-        console.log('[DEBUG_CORTE_VENTAS] Configuración actual (desde archivo local):', JSON.stringify(configuracion, null, 2));
+        console.log('[DEBUG_CORTE_VENTAS] Configuración actual (desde DB):', JSON.stringify(configuracion, null, 2));
 
         const ventasDelDia = ventas.filter(venta =>
             venta.drawDate === configuracion.fecha_sorteo &&
             (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
         );
 
-        console.log(`[DEBUG_CORTE_VENTAS] Ventas del día (${configuracion.fecha_sorteo}, Confirmadas/Pendientes) desde archivo local: ${ventasDelDia.length} items.`);
-        console.log('[DEBUG_CORTE_VENTAS] Detalle de ventasDelDia (primeras 5):', JSON.stringify(ventasDelDia.slice(0, 5), null, 2));
+        console.log(`[DEBUG_CORTE_VENTAS] Ventas del día (${configuracion.fecha_sorteo}, Confirmadas/Pendientes) desde DB: ${ventasDelDia.length} items.`);
+        // console.log('[DEBUG_CORTE_VENTAS] Detalle de ventasDelDia (primeras 5):', JSON.stringify(ventasDelDia.slice(0, 5), null, 2));
 
 
         const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
@@ -1029,8 +1402,8 @@ app.post('/api/corte-ventas', async (req, res) => {
             }
         }
 
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        horariosZulia = await readJsonFile(HORARIOS_ZULIA_FILE, horariosZulia); // Recargar la más reciente
+        configuracion = await getConfiguracionFromDB();
+        const horariosZulia = await getHorariosZuliaFromDB();
 
         const fechaSorteoConfigurada = configuracion.fecha_sorteo;
         const zuliaTimes = horariosZulia.zulia;
@@ -1055,7 +1428,7 @@ app.post('/api/corte-ventas', async (req, res) => {
 
             if ((currentMomentInCaracas.isSame(drawDateMoment, 'day') && currentMomentInCaracas.isSameOrAfter(ultimaHoraSorteoMoment)) ||
                 currentMomentInCaracas.isAfter(drawDateMoment, 'day')) {
-                
+
                 shouldResetNumbers = true;
                 message = 'Corte de ventas realizado. Números procesados y reseteados condicionalmente.';
             } else {
@@ -1066,22 +1439,20 @@ app.post('/api/corte-ventas', async (req, res) => {
         }
 
         if (shouldResetNumbers) {
-            numeros = await readJsonFile(NUMEROS_FILE, numeros); // Recargar la más reciente
+            let numeros = await getNumerosFromDB();
             const currentDrawCorrelativo = parseInt(configuracion.numero_sorteo_correlativo);
             let changedCount = 0;
 
-            numeros.forEach(num => {
-                if (num.comprado && num.originalDrawNumber < currentDrawCorrelativo - 1) {
-                    num.comprado = false;
-                    num.originalDrawNumber = null;
+            for (const num of numeros) {
+                if (num.comprado && num.originaldrawnumber < currentDrawCorrelativo - 1) { // Nota: 'originaldrawnumber' en minúsculas por DB
+                    await updateNumeroInDB(num.numero, false, null);
                     changedCount++;
-                    console.log(`Número ${num.numero} liberado. Comprado originalmente para sorteo ${num.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
+                    console.log(`Número ${num.numero} liberado. Comprado originalmente para sorteo ${num.originaldrawnumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
                 }
-            });
+            }
 
             if (changedCount > 0) {
-                await writeJsonFile(NUMEROS_FILE, numeros);
-                console.log(`Se liberaron ${changedCount} números antiguos en archivo local.`);
+                console.log(`Se liberaron ${changedCount} números antiguos en DB.`);
             } else {
                 console.log('No hay números antiguos para liberar en este momento.');
             }
@@ -1090,7 +1461,7 @@ app.post('/api/corte-ventas', async (req, res) => {
         res.status(200).json({ message: message });
 
     } catch (error) {
-    console.error('Error al realizar Corte de Ventas en archivo local:', error.message);
+    console.error('Error al realizar Corte de Ventas en DB:', error.message);
     res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
     }
 });
@@ -1108,20 +1479,18 @@ app.get('/api/premios', async (req, res) => {
     const fechaFormateada = moment.tz(fecha, CARACAS_TIMEZONE).format('YYYY-MM-DD');
 
     try {
-        premios = await readJsonFile(PREMIOS_FILE, premios); // Recargar la más reciente
-
-        const premiosDelDia = premios[fechaFormateada] || {};
+        const premiosDelDia = await getPremiosFromDB(fechaFormateada);
 
         const premiosParaFrontend = {
             fechaSorteo: fechaFormateada,
-            sorteo12PM: premiosDelDia.sorteo12PM || { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
-            sorteo3PM: premiosDelDia.sorteo3PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
-            sorteo5PM: premiosDelDia.sorteo5PM || { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' }
+            sorteo12PM: premiosDelDia ? premiosDelDia.sorteo12PM : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
+            sorteo3PM: premiosDelDia ? premiosDelDia.sorteo3PM : { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' },
+            sorteo5PM: premiosDelDia ? premiosDelDia.sorteo5PM : { tripleA: '', tripleB: '', 'valorTripleA': '', 'valorTripleB': '' }
         };
 
         res.status(200).json(premiosParaFrontend);
     } catch (error) {
-        console.error('Error al obtener premios de archivo local:', error.message);
+        console.error('Error al obtener premios de DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener premios.' });
     }
 });
@@ -1136,9 +1505,8 @@ app.post('/api/premios', async (req, res) => {
     const fechaFormateada = moment.tz(fechaSorteo, CARACAS_TIMEZONE).format('YYYY-MM-DD');
 
     try {
-        premios = await readJsonFile(PREMIOS_FILE, {}); // Recargar la más reciente
-
-        premios[fechaFormateada] = {
+        const premiosData = {
+            fechaSorteo: fechaFormateada,
             sorteo12PM: sorteo12PM ? {
                 tripleA: sorteo12PM.tripleA || '',
                 tripleB: sorteo12PM.tripleB || '',
@@ -1159,13 +1527,13 @@ app.post('/api/premios', async (req, res) => {
             } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
         };
 
-        await writeJsonFile(PREMIOS_FILE, premios);
-        console.log('Premios guardados/actualizados en archivo local y caché.');
+        await upsertPremiosInDB(premiosData);
+        console.log('Premios guardados/actualizados en DB.');
 
-        res.status(200).json({ message: 'Premios guardados/actualizados con éxito.', premiosGuardados: premios[fechaFormateada] });
+        res.status(200).json({ message: 'Premios guardados/actualizados con éxito.', premiosGuardados: premiosData });
 
     } catch (error) {
-        console.error('Error al guardar premios en archivo local:', error.message);
+        console.error('Error al guardar premios en DB:', error.message);
         console.error('Detalle del error:', error.stack);
         res.status(500).json({ message: 'Error interno del servidor al guardar premios.', error: error.message });
     }
@@ -1196,44 +1564,48 @@ app.put('/api/tickets/validate/:id', async (req, res) => {
     const ventaId = parseInt(req.params.id);
     const { validationStatus } = req.body;
 
-    const estadosValidos = ['Confirmado', 'Falso', 'Pendiente'];
+    const estadosValidos = ['Confirmado', 'Falso', 'Pendiente', 'Anulado por bajo porcentaje', 'Cerrado por Suficiencia de Ventas'];
     if (!validationStatus || !estadosValidos.includes(validationStatus)) {
-        return res.status(400).json({ message: 'Estado de validación inválido. Debe ser "Confirmado", "Falso" o "Pendiente".' });
+        return res.status(400).json({ message: 'Estado de validación inválido. Debe ser "Confirmado", "Falso", "Pendiente", "Anulado por bajo porcentaje" o "Cerrado por Suficiencia de Ventas".' });
     }
 
+    let client;
     try {
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar la más reciente
-        let ventaIndex = ventas.findIndex(v => v.id === ventaId);
-        if (ventaIndex === -1) {
+        client = await pool.connect();
+        await client.query('BEGIN');
+
+        const ventasRes = await client.query('SELECT * FROM ventas WHERE id = $1', [ventaId]);
+        if (ventasRes.rows.length === 0) {
+            await client.query('ROLLBACK');
             return res.status(404).json({ message: 'Venta no encontrada.' });
         }
-        let ventaData = ventas[ventaIndex];
-
+        let ventaData = ventasRes.rows[0];
         const oldValidationStatus = ventaData.validationStatus;
+        // Asegurarse de que ventaData.numbers sea un array (viene de JSONB)
+        ventaData.numbers = typeof ventaData.numbers === 'string' ? JSON.parse(ventaData.numbers) : ventaData.numbers;
 
-        ventaData.validationStatus = validationStatus;
-        await writeJsonFile(VENTAS_FILE, ventas); // Guardar cambios en ventas.json
+
+        await updateVentaStatusInDB(ventaId, validationStatus); // Actualiza el estado en la DB
 
         if (validationStatus === 'Falso' && oldValidationStatus !== 'Falso') {
-            numeros = await readJsonFile(NUMEROS_FILE, numeros); // Recargar
-            const numerosAnulados = ventaData.numbers;
+            const numerosAnulados = ventaData.numbers; // Ya es un array
             if (numerosAnulados && numerosAnulados.length > 0) {
-                numerosAnulados.forEach(numAnulado => {
-                    const numObj = numeros.find(n => n.numero === numAnulado);
-                    if (numObj) {
-                        numObj.comprado = false;
-                        numObj.originalDrawNumber = null;
-                    }
-                });
-                await writeJsonFile(NUMEROS_FILE, numeros);
-                console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles en archivo local.`);
+                for (const numAnulado of numerosAnulados) {
+                    await updateNumeroInDB(numAnulado, false, null);
+                }
+                console.log(`Números ${numerosAnulados.join(', ')} de la venta ${ventaId} (marcada como Falsa) han sido puestos nuevamente disponibles en DB.`);
             }
         }
 
+        await client.query('COMMIT');
+
         res.status(200).json({ message: `Estado de la venta ${ventaId} actualizado a "${validationStatus}" con éxito.`, venta: { id: ventaId, ...ventaData, validationStatus: validationStatus } });
     } catch (error) {
-        console.error(`Error al actualizar el estado de la venta ${ventaId} en archivo local:`, error.message);
+        if (client) await client.query('ROLLBACK');
+        console.error(`Error al actualizar el estado de la venta ${ventaId} en DB:`, error.message);
         res.status(500).json({ message: 'Error interno del servidor al actualizar el estado de la venta.', error: error.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -1246,7 +1618,7 @@ app.get('/api/export-database', async (req, res) => {
     try {
         const zipBuffer = await generateDatabaseBackupZipBuffer();
         res.status(200).send(zipBuffer);
-        console.log('Base de datos local exportada y enviada como ZIP.');
+        console.log('Base de datos exportada y enviada como ZIP.');
     } catch (error) {
         console.error('Error al exportar la base de datos:', error.message);
         res.status(500).send('Error al exportar la base de datos.');
@@ -1262,15 +1634,19 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
     }
 
     try {
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar
-        const venta = ventas.find(v => v.id === ventaId);
+        const client = await pool.connect();
+        const ventaRes = await client.query('SELECT * FROM ventas WHERE id = $1', [ventaId]);
+        client.release();
+
+        const venta = ventaRes.rows[0];
         if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp.' });
         }
 
         const customerPhoneNumber = venta.buyerPhone;
         const ticketNumber = venta.ticketNumber;
-        const purchasedNumbers = venta.numbers.join(', ');
+        // 'numbers' ya debería ser un array debido a getVentasFromDB
+        const purchasedNumbers = Array.isArray(venta.numbers) ? venta.numbers.join(', ') : '';
         const valorUsd = venta.valueUSD.toFixed(2);
         const valorBs = venta.valueBs.toFixed(2);
         const metodoPago = venta.paymentMethod;
@@ -1308,8 +1684,11 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
     }
 
     try {
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar
-        const venta = ventas.find(v => v.id === ventaId);
+        const client = await pool.connect();
+        const ventaRes = await client.query('SELECT * FROM ventas WHERE id = $1', [ventaId]);
+        client.release();
+
+        const venta = ventaRes.rows[0];
         if (!venta) {
             return res.status(404).json({ message: 'Venta no encontrada para generar el enlace de WhatsApp de pago falso.' });
         }
@@ -1395,10 +1774,10 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
     }
 
     try {
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar
-        resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE, resultadosZulia); // Recargar
-        premios = await readJsonFile(PREMIOS_FILE, premios); // Recargar
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar
+        const ventas = await getVentasFromDB();
+        const resultadosZulia = (await pool.query('SELECT data FROM resultados_zulia WHERE (data->>\'fecha\')::text = $1 AND (data->>\'tipoLoteria\')::text = $2', [fecha, tipoLoteria])).rows.map(row => row.data);
+        const premios = await getPremiosFromDB(fecha);
+        const configuracion = await getConfiguracionFromDB();
 
         const ticketsGanadoresParaEsteSorteo = [];
 
@@ -1410,12 +1789,15 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             return res.status(200).json({ message: 'No se encontraron resultados de sorteo para esta fecha y lotería para procesar ganadores.' });
         }
 
-        const premiosDelDia = premios[fecha];
+        const premiosDelDia = premios; // getPremiosFromDB ya devuelve el objeto para la fecha
         if (!premiosDelDia) {
             return res.status(200).json({ message: 'No se encontraron configuraciones de premios para esta fecha para procesar ganadores.' });
         }
 
         for (const venta of ventas) {
+            // Asegurarse de que venta.numbers sea un array (viene de JSONB)
+            const ventaNumbers = Array.isArray(venta.numbers) ? venta.numbers : JSON.parse(venta.numbers || '[]');
+
             if (venta.drawDate === fecha && venta.drawNumber.toString() === numeroSorteo.toString()) {
                 let coincidentNumbers = [];
                 let totalPotentialPrizeUSD = 0;
@@ -1427,10 +1809,10 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
 
                     let currentCoincidentNumbersForHour = [];
 
-                    if (winningTripleA && venta.numbers.includes(winningTripleA)) {
+                    if (winningTripleA && ventaNumbers.includes(winningTripleA)) {
                         currentCoincidentNumbersForHour.push(parseInt(winningTripleA, 10));
                     }
-                    if (winningTripleB && venta.numbers.includes(winningTripleB)) {
+                    if (winningTripleB && ventaNumbers.includes(winningTripleB)) {
                         currentCoincidentNumbersForHour.push(parseInt(winningTripleB, 10));
                     }
 
@@ -1457,12 +1839,12 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                 });
 
                 if (coincidentNumbers.length > 0) {
-                    totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar;
+                    totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar[0]; // Acceder al valor numérico del array
                     ticketsGanadoresParaEsteSorteo.push({
                         ticketNumber: venta.ticketNumber,
                         buyerName: venta.buyerName,
                         buyerPhone: venta.buyerPhone,
-                        numbers: venta.numbers,
+                        numbers: ventaNumbers, // Asegurarse de que sea el array
                         drawDate: venta.drawDate,
                         drawNumber: venta.drawNumber,
                         purchaseDate: venta.purchaseDate,
@@ -1474,7 +1856,6 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             }
         }
 
-        ganadores = await readJsonFile(GANADORES_FILE, []); // Recargar
         const now = moment().tz(CARACAS_TIMEZONE).toISOString();
         const newWinnersEntry = {
             drawDate: fecha,
@@ -1484,28 +1865,19 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
             processedAt: now
         };
 
-        const existingWinnersIndex = ganadores.findIndex(w =>
-            w.drawDate === fecha && w.drawNumber === parseInt(numeroSorteo) && w.lotteryType === tipoLoteria
-        );
-
-        if (existingWinnersIndex !== -1) {
-            ganadores[existingWinnersIndex] = newWinnersEntry;
-        } else {
-            ganadores.push(newWinnersEntry);
-        }
-        await writeJsonFile(GANADORES_FILE, ganadores);
-        console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} guardados/actualizados en archivo local.`);
+        await upsertGanadoresInDB(newWinnersEntry);
+        console.log(`Ganadores para el sorteo ${numeroSorteo} de ${tipoLoteria} del ${fecha} guardados/actualizados en DB.`);
 
         res.status(200).json({ message: 'Ganadores procesados y guardados con éxito.', totalGanadores: ticketsGanadoresParaEsteSorteo.length });
 
     } catch (error) {
-        console.error('Error al procesar y guardar tickets ganadores en archivo local:', error.message);
+        console.error('Error al procesar y guardar tickets ganadores en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al procesar y guardar tickets ganadores.', error: error.message });
     }
 });
 
 
-// GET /api/tickets/ganadores (ahora siempre desde archivo local)
+// GET /api/tickets/ganadores
 app.get('/api/tickets/ganadores', async (req, res) => {
     const { fecha, numeroSorteo, tipoLoteria } = req.query;
 
@@ -1514,18 +1886,14 @@ app.get('/api/tickets/ganadores', async (req, res) => {
     }
 
     try {
-        ganadores = await readJsonFile(GANADORES_FILE, []); // Recargar
-        const foundEntry = ganadores.find(w =>
-            w.drawDate === fecha && w.drawNumber === parseInt(numeroSorteo) && w.lotteryType === tipoLoteria
-        );
-
-        if (foundEntry) {
-            res.status(200).json({ ganadores: foundEntry.winners });
+        const ganadores = await getGanadoresFromDB(fecha, parseInt(numeroSorteo), tipoLoteria);
+        if (ganadores && ganadores.length > 0) {
+            res.status(200).json({ ganadores: ganadores });
         } else {
             res.status(200).json({ ganadores: [], message: 'No se encontraron tickets ganadores procesados para esta consulta.' });
         }
     } catch (error) {
-        console.error('Error al obtener ganadores desde archivo local:', error.message);
+        console.error('Error al obtener ganadores desde DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al obtener ganadores.', error: error.message });
     }
 });
@@ -1533,24 +1901,31 @@ app.get('/api/tickets/ganadores', async (req, res) => {
 // Función para liberar números que ya excedieron la reserva de 2 sorteos
 async function liberateOldReservedNumbers(currentDrawCorrelativo) {
     console.log(`[liberateOldReservedNumbers] Revisando números para liberar (correlativo actual: ${currentDrawCorrelativo})...`);
-    
-    numeros = await readJsonFile(NUMEROS_FILE, numeros); // Recargar
-    let changedCount = 0;
 
-    numeros.forEach(num => {
-        if (num.comprado && num.originalDrawNumber < currentDrawCorrelativo - 1) {
-            num.comprado = false;
-            num.originalDrawNumber = null;
-            changedCount++;
-            console.log(`Número ${num.numero} liberado. Comprado originalmente para sorteo ${num.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
+    const client = await pool.connect();
+    try {
+        // Seleccionar números que cumplen la condición para ser liberados
+        const res = await client.query(
+            'SELECT numero FROM numeros WHERE comprado = TRUE AND originalDrawNumber < $1',
+            [currentDrawCorrelativo - 1]
+        );
+        const numbersToLiberate = res.rows.map(row => row.numero);
+
+        if (numbersToLiberate.length > 0) {
+            // Actualizar el estado de esos números
+            await client.query(
+                'UPDATE numeros SET comprado = FALSE, originalDrawNumber = NULL WHERE numero = ANY($1::text[])',
+                [numbersToLiberate]
+            );
+            console.log(`Se liberaron ${numbersToLiberate.length} números antiguos en DB.`);
+        } else {
+            console.log('No hay números antiguos para liberar en este momento.');
         }
-    });
-
-    if (changedCount > 0) {
-        await writeJsonFile(NUMEROS_FILE, numeros);
-        console.log(`Se liberaron ${changedCount} números antiguos en archivo local.`);
-    } else {
-        console.log('No hay números antiguos para liberar en este momento.');
+    } catch (error) {
+        console.error('Error al liberar números antiguos en DB:', error.message);
+        throw error; // Propagar el error para que sea manejado por el llamador
+    } finally {
+        client.release();
     }
 }
 
@@ -1565,10 +1940,9 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
         last_sales_notification_count: 0,
         block_reason_message: ""
     };
-    await writeJsonFile(CONFIG_FILE, updatedConfig);
-    configuracion = updatedConfig; // Actualizar caché
-
-    console.log(`Configuración avanzada en archivo local para el siguiente sorteo: Fecha ${configuracion.fecha_sorteo}, Correlativo ${configuracion.numero_sorteo_correlativo}.`);
+    await updateConfiguracionInDB(updatedConfig);
+    console.log(`Configuración avanzada en DB para el siguiente sorteo: Fecha ${updatedConfig.fecha_sorteo}, Correlativo ${updatedConfig.numero_sorteo_correlativo}.`);
+    return updatedConfig; // Devolver la configuración actualizada
 }
 
 
@@ -1581,14 +1955,16 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
 async function evaluateDrawStatusOnly(nowMoment) {
     console.log(`[evaluateDrawStatusOnly] Iniciando evaluación de estado de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
+    let client;
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar la más reciente
-        
+        client = await pool.connect();
+        let configuracion = await getConfiguracionFromDB();
+        let ventas = await getVentasFromDB();
+
         const currentDrawDateStr = configuracion.fecha_sorteo;
 
-        const soldTicketsForCurrentDraw = ventas.filter(venta => 
-            venta.drawDate === currentDrawDateStr && 
+        const soldTicketsForCurrentDraw = ventas.filter(venta =>
+            venta.drawDate === currentDrawDateStr &&
             (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
         );
         const totalSoldTicketsCount = soldTicketsForCurrentDraw.length;
@@ -1608,14 +1984,9 @@ async function evaluateDrawStatusOnly(nowMoment) {
         if (soldPercentage < SALES_THRESHOLD_PERCENTAGE) {
             console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) por debajo del ${SALES_THRESHOLD_PERCENTAGE}% requerido. Marcando tickets como anulados.`);
 
-            soldTicketsForCurrentDraw.forEach(venta => {
-                const ventaIndex = ventas.findIndex(v => v.id === venta.id);
-                if (ventaIndex !== -1) {
-                    ventas[ventaIndex].validationStatus = 'Anulado por bajo porcentaje';
-                    ventas[ventaIndex].voidedReason = 'Ventas insuficientes para el sorteo';
-                    ventas[ventaIndex].voidedAt = nowMoment.toISOString();
-                }
-            });
+            for (const venta of soldTicketsForCurrentDraw) {
+                await updateVentaStatusInDB(venta.id, 'Anulado por bajo porcentaje', 'Ventas insuficientes para el sorteo', nowMoment.toISOString(), null, null);
+            }
             message = `Sorteo del ${currentDrawDateStr} marcado como anulado por ventas insuficientes.`;
             whatsappMessageContent = `*¡Alerta de Sorteo Suspendido!* 🚨\n\nEl sorteo del *${currentDrawDateStr}* ha sido *ANULADO* debido a un bajo porcentaje de ventas (${soldPercentage.toFixed(2)}%).\n\nTodos los tickets válidos para este sorteo serán revalidados automáticamente para el próximo sorteo.`;
             emailSubject = `ALERTA: Sorteo Anulado - ${currentDrawDateStr}`;
@@ -1641,14 +2012,9 @@ async function evaluateDrawStatusOnly(nowMoment) {
         } else {
             console.log(`[evaluateDrawStatusOnly] Ventas (${soldPercentage.toFixed(2)}%) cumplen o superan el ${SALES_THRESHOLD_PERCENTAGE}%. Marcando tickets como cerrados.`);
 
-            soldTicketsForCurrentDraw.forEach(venta => {
-                const ventaIndex = ventas.findIndex(v => v.id === venta.id);
-                if (ventaIndex !== -1) {
-                    ventas[ventaIndex].validationStatus = 'Cerrado por Suficiencia de Ventas';
-                    ventas[ventaIndex].closedReason = 'Ventas suficientes para el sorteo';
-                    ventas[ventaIndex].closedAt = nowMoment.toISOString();
-                }
-            });
+            for (const venta of soldTicketsForCurrentDraw) {
+                await updateVentaStatusInDB(venta.id, 'Cerrado por Suficiencia de Ventas', null, null, 'Ventas suficientes para el sorteo', nowMoment.toISOString());
+            }
             message = `Sorteo del ${currentDrawDateStr} marcado como cerrado por suficiencia de ventas.`;
             whatsappMessageContent = `*¡Sorteo Cerrado Exitosamente!* ✅\n\nEl sorteo del *${currentDrawDateStr}* ha sido *CERRADO* con éxito. Se alcanzó el porcentaje de ventas (${soldPercentage.toFixed(2)}%) requerido.`;
             emailSubject = `NOTIFICACIÓN: Sorteo Cerrado Exitosamente - ${currentDrawDateStr}`;
@@ -1670,9 +2036,8 @@ async function evaluateDrawStatusOnly(nowMoment) {
                 'Reporte_Cierre'
             );
         }
-        await writeJsonFile(VENTAS_FILE, ventas); // Guardar cambios en ventas.json
-        await writeJsonFile(CONFIG_FILE, configuracion); // Guardar cambios en configuracion.json
-        console.log('[evaluateDrawStatusOnly] Estado de ventas y configuración actualizados en archivo local.');
+        await updateConfiguracionInDB(configuracion); // Guardar cambios en configuracion en DB
+        console.log('[evaluateDrawStatusOnly] Estado de ventas y configuración actualizados en DB.');
 
         await sendWhatsappNotification(whatsappMessageContent);
 
@@ -1692,8 +2057,10 @@ async function evaluateDrawStatusOnly(nowMoment) {
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
     } catch (error) {
-        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo en archivo local:', error.message);
+        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo en DB:', error.message);
         return { success: false, message: `Error interno al evaluar estado de sorteo: ${error.message}` };
+    } finally {
+        if (client) client.release();
     }
 }
 
@@ -1703,8 +2070,8 @@ async function cerrarSorteoManualmente(nowMoment) {
     console.log(`[cerrarSorteoManualmente] Iniciando cierre manual de sorteo en: ${nowMoment.format('YYYY-MM-DD HH:mm:ss')}`);
 
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        
+        let configuracion = await getConfiguracionFromDB();
+
         const currentDrawCorrelativo = configuracion.numero_sorteo_correlativo;
 
         const evaluationResult = await evaluateDrawStatusOnly(nowMoment);
@@ -1715,7 +2082,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         await liberateOldReservedNumbers(currentDrawCorrelativo);
 
         const nextDayDate = nowMoment.clone().add(1, 'days').format('YYYY-MM-DD');
-        await advanceDrawConfiguration(configuracion, nextDayDate);
+        configuracion = await advanceDrawConfiguration(configuracion, nextDayDate); // Actualizar 'configuracion' después de avanzar
 
         const whatsappMessage = `*¡Sorteo Finalizado y Avanzado!* 🥳\n\nEl sorteo del *${evaluationResult.evaluatedDate}* ha sido finalizado. Ventas: *${evaluationResult.salesPercentage.toFixed(2)}%*.\n\nLa configuración ha avanzado al Sorteo Nro. *${configuracion.numero_sorteo_correlativo}* para la fecha *${configuracion.fecha_sorteo}*.`;
         await sendWhatsappNotification(whatsappMessage);
@@ -1744,7 +2111,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         };
 
     } catch (error) {
-        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo en archivo local:', error.message);
+        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo en DB:', error.message);
         return { success: false, message: `Error interno: ${error.message}` };
     }
 }
@@ -1754,8 +2121,8 @@ async function cerrarSorteoManualmente(nowMoment) {
 app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
     console.log('API: Recibida solicitud para cierre manual de sorteo.');
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        
+        const configuracion = await getConfiguracionFromDB();
+
         const currentDrawDateStr = configuracion.fecha_sorteo;
 
         const simulatedMoment = moment().tz(CARACAS_TIMEZONE);
@@ -1775,7 +2142,7 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de cierre manual de sorteo en archivo local:', error.message);
+        console.error('Error en la API de cierre manual de sorteo en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al cerrar el sorteo manualmente.', error: error.message });
     }
 });
@@ -1785,8 +2152,6 @@ app.post('/api/cerrar-sorteo-manualmente', async (req, res) => {
 app.post('/api/suspender-sorteo', async (req, res) => {
     console.log('API: Recibida solicitud para suspender sorteo (evaluación de ventas).');
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const result = await evaluateDrawStatusOnly(now);
@@ -1796,7 +2161,7 @@ app.post('/api/suspender-sorteo', async (req, res) => {
             res.status(200).json({ message: result.message, salesPercentage: result.salesPercentage });
         }
     } catch (error) {
-        console.error('Error en la API de suspensión de sorteo en archivo local:', error.message);
+        console.error('Error en la API de suspensión de sorteo en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al suspender sorteo.', error: error.message });
     }
 });
@@ -1812,18 +2177,18 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
     }
 
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        
-        const oldDrawDate = configuracion.fecha_sorteo;
-        const oldDrawCorrelativo = configuracion.numero_sorteo_correlativo; 
+        let configuracion = await getConfiguracionFromDB();
 
-        await advanceDrawConfiguration(configuracion, newDrawDate);
+        const oldDrawDate = configuracion.fecha_sorteo;
+        const oldDrawCorrelativo = configuracion.numero_sorteo_correlativo;
+
+        configuracion = await advanceDrawConfiguration(configuracion, newDrawDate); // Actualizar 'configuracion' después de avanzar
 
         await liberateOldReservedNumbers(configuracion.numero_sorteo_correlativo);
 
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar
-        const salesForOldDraw = ventas.filter(venta => 
-            venta.drawDate === oldDrawDate && 
+        const ventas = await getVentasFromDB();
+        const salesForOldDraw = ventas.filter(venta =>
+            venta.drawDate === oldDrawDate &&
             ['Confirmado', 'Pendiente', 'Cerrado por Suficiencia de Ventas', 'Anulado por bajo porcentaje'].includes(venta.validationStatus)
         );
 
@@ -1869,7 +2234,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error en la API de set-manual-draw-date en archivo local:', error.message);
+        console.error('Error en la API de set-manual-draw-date en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.message });
     }
 });
@@ -1879,14 +2244,14 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 app.post('/api/developer-sales-notification', async (req, res) => {
     console.log('API: Recibida solicitud para notificación de ventas para desarrolladores.');
     try {
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
-        ventas = await readJsonFile(VENTAS_FILE, ventas); // Recargar la más reciente
-        
+        const configuracion = await getConfiguracionFromDB();
+        const ventas = await getVentasFromDB();
+
         const now = moment().tz(CARACAS_TIMEZONE);
 
         const currentDrawDateStr = configuracion.fecha_sorteo;
-        const ventasParaFechaSorteo = ventas.filter(venta => 
-            venta.drawDate === currentDrawDateStr && 
+        const ventasParaFechaSorteo = ventas.filter(venta =>
+            venta.drawDate === currentDrawDateStr &&
             (venta.validationStatus === 'Confirmado' || venta.validationStatus === 'Pendiente')
         );
 
@@ -1911,7 +2276,7 @@ app.post('/api/developer-sales-notification', async (req, res) => {
         res.status(200).json({ message: 'Notificación de ventas para desarrolladores enviada exitosamente por WhatsApp.' });
 
     } catch (error) {
-        console.error('Error al enviar notificación de ventas para desarrolladores desde archivo local:', error.message);
+        console.error('Error al enviar notificación de ventas para desarrolladores desde DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al enviar notificación de ventas para desarrolladores.', error: error.message });
     }
 });
@@ -1920,44 +2285,54 @@ app.post('/api/developer-sales-notification', async (req, res) => {
 // Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
 app.post('/api/admin/limpiar-datos', async (req, res) => {
     console.log('API: Recibida solicitud para limpiar datos.');
+    let client;
     try {
+        client = await pool.connect();
+        await client.query('BEGIN'); // Iniciar transacción
+
         // Resetear números
+        await client.query('TRUNCATE TABLE numeros RESTART IDENTITY;');
         const initialNumbers = [];
         for (let i = 0; i < TOTAL_RAFFLE_NUMBERS; i++) {
             const numStr = i.toString().padStart(3, '0');
             initialNumbers.push({ numero: numStr, comprado: false, originalDrawNumber: null });
         }
-        await writeJsonFile(NUMEROS_FILE, initialNumbers);
-        numeros = initialNumbers;
+        for (const num of initialNumbers) {
+            await client.query('INSERT INTO numeros (numero, comprado, originalDrawNumber) VALUES ($1, $2, $3)', [num.numero, num.comprado, num.originalDrawNumber]);
+        }
 
         // Limpiar ventas, resultados, ganadores y comprobantes
-        await writeJsonFile(VENTAS_FILE, []);
-        ventas = [];
-        await writeJsonFile(RESULTADOS_ZULIA_FILE, []);
-        resultadosZulia = [];
-        await writeJsonFile(GANADORES_FILE, []);
-        ganadores = [];
-        await writeJsonFile(COMPROBANTES_FILE, []);
-        comprobantes = [];
+        await client.query('TRUNCATE TABLE ventas RESTART IDENTITY;');
+        await client.query('TRUNCATE TABLE resultados_zulia RESTART IDENTITY;');
+        await client.query('TRUNCATE TABLE ganadores RESTART IDENTITY;');
+        await client.query('TRUNCATE TABLE comprobantes RESTART IDENTITY;');
+        await client.query('TRUNCATE TABLE premios RESTART IDENTITY;'); // También limpiar premios
 
         // Resetear configuración a valores iniciales (o un estado limpio)
-        configuracion = {
-            tasa_dolar: 36.50,
+        const configuracion = await getConfiguracionFromDB(); // Obtener la configuración actual para mantener mail/whatsapp
+        const resetConfig = {
+            id: configuracion.id, // Mantener el ID de la configuración
+            tasa_dolar: [36.50], // Corregido: Array para JSONB
             pagina_bloqueada: false,
             fecha_sorteo: moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
             precio_ticket: 3.00,
             numero_sorteo_correlativo: 1,
             ultimo_numero_ticket: 0,
             ultima_fecha_resultados_zulia: null,
-            admin_whatsapp_numbers: configuracion.admin_whatsapp_numbers, // Mantener los números de WhatsApp
-            mail_config: configuracion.mail_config, // Mantener la configuración de correo
-            admin_email_for_reports: configuracion.admin_email_for_reports, // Mantener los correos de reporte
-            raffleNumbersInitialized: true, // Ya inicializados
+            admin_whatsapp_numbers: configuracion.admin_whatsapp_numbers,
+            mail_config_host: configuracion.mail_config_host,
+            mail_config_port: configuracion.mail_config_port,
+            mail_config_secure: configuracion.mail_config_secure,
+            mail_config_user: configuracion.mail_config_user,
+            mail_config_pass: configuracion.mail_config_pass,
+            mail_config_sender_name: configuracion.mail_config_sender_name,
+            admin_email_for_reports: configuracion.admin_email_for_reports,
+            raffleNumbersInitialized: true,
             last_sales_notification_count: 0,
             sales_notification_threshold: 20,
             block_reason_message: ""
         };
-        await writeJsonFile(CONFIG_FILE, configuracion);
+        await updateConfiguracionInDB(resetConfig);
 
         // Opcional: Limpiar archivos de comprobantes subidos
         const files = await fs.readdir(UPLOADS_DIR);
@@ -1966,13 +2341,17 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
         }
         console.log('Archivos de comprobantes en /uploads eliminados.');
 
+        await client.query('COMMIT'); // Confirmar transacción
 
         res.status(200).json({ message: 'Todos los datos de la aplicación han sido limpiados y reseteados.' });
         console.log('Todos los datos de la aplicación han sido limpiados y reseteados.');
 
     } catch (error) {
+        if (client) await client.query('ROLLBACK');
         console.error('Error al limpiar datos:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al limpiar datos.', error: error.message });
+    } finally {
+        if (client) client.release();
     }
 });
 
@@ -2003,7 +2382,10 @@ async function salesSummaryCronJob() {
     await sendSalesSummaryNotifications();
 }
 
-cron.schedule('*/55 * * * *', salesSummaryCronJob);
+// Corregido: Añadir la zona horaria para consistencia
+cron.schedule('*/55 * * * *', salesSummaryCronJob, {
+    timezone: CARACAS_TIMEZONE
+});
 
 /**
  * NUEVA FUNCIÓN CRON JOB: Respaldo automático de la base de datos y envío por correo.
@@ -2016,191 +2398,7 @@ async function dailyDatabaseBackupCronJob() {
         const backupFileName = `rifas_db_backup_${now.format('YYYYMMDD_HHmmss')}.zip`;
         const zipBuffer = await generateDatabaseBackupZipBuffer();
 
-        if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const emailSubject = `Respaldo Automático de Base de Datos - ${now.format('YYYY-MM-DD HH:mm')}`;
-            const emailHtmlContent = `
-                <p>Estimados administradores,</p>
-                <p>Se ha generado el respaldo automático de la base de datos de Rifas.</p>
-                <p>Fecha y Hora del Respaldo: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
-                <p>Adjunto encontrarás el archivo ZIP con los datos exportados a Excel.</p>
-                <p>Por favor, guarden este archivo en un lugar seguro.</p>
-                <p>Atentamente,<br>El equipo de Rifas</p>
-            `;
-            const attachments = [
-                {
-                    filename: backupFileName,
-                    content: zipBuffer,
-                    contentType: 'application/zip'
-                }
-            ];
-            const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
-            if (emailSent) {
-                console.log('Respaldo de base de datos enviado por correo exitosamente.');
-            } else {
-                console.error('Fallo al enviar el correo de respaldo de base de datos.');
-            }
-        } else {
-            console.warn('No hay correos de administrador configurados para enviar el respaldo de la base de datos.');
-        }
-    } catch (error) {
-        console.error('Error durante el cron job de respaldo automático de la base de datos:', error.message);
-    }
-}
-
-cron.schedule('*/55 * * * *', dailyDatabaseBackupCronJob, {
-    timezone: CARACAS_TIMEZONE
-});
-
-
-// --- Funciones de limpieza de datos antiguos (adaptadas para archivos locales) ---
-
-/**
- * Elimina ventas antiguas del archivo 'ventas.json' y actualiza los números de rifa asociados.
- * @param {number} daysToRetain Días para retener las ventas (ej. 30 para retener 30 días, eliminar más antiguos).
- */
-async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
-    console.log(`INFO: Iniciando limpieza de ventas y números de rifa anteriores a ${daysToRetain} días.`);
-    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación: ${cutoffDate}`);
-
-    ventas = await readJsonFile(VENTAS_FILE, []); // Recargar
-    numeros = await readJsonFile(NUMEROS_FILE, []); // Recargar
-
-    const oldSales = ventas.filter(sale => moment(sale.purchaseDate).isBefore(cutoffDate));
-    const salesToKeep = ventas.filter(sale => !moment(sale.purchaseDate).isBefore(cutoffDate));
-
-    console.log(`INFO: Encontradas ${oldSales.length} ventas antiguas para procesar.`);
-
-    // Actualizar el estado 'comprado' de los números de rifa asociados a estas ventas antiguas
-    const numbersToUpdate = new Set();
-    oldSales.forEach(sale => {
-        if (Array.isArray(sale.numbers)) {
-            sale.numbers.forEach(num => numbersToUpdate.add(num));
-        }
-    });
-
-    if (numbersToUpdate.size > 0) {
-        console.log(`INFO: Procesando ${numbersToUpdate.size} números de rifa para posible actualización.`);
-        numbers.forEach(numObj => {
-            if (numbersToUpdate.has(numObj.numero)) {
-                numObj.comprado = false; // Marcar como no vendido
-                numObj.originalDrawNumber = null;
-            }
-        });
-        await writeJsonFile(NUMEROS_FILE, numeros);
-        console.log('INFO: Números de rifa asociados a ventas antiguas actualizados (comprado: false).');
-    } else {
-        console.log('INFO: No hay números de rifa para actualizar de ventas antiguas.');
-    }
-
-    await writeJsonFile(VENTAS_FILE, salesToKeep);
-    ventas = salesToKeep; // Actualizar caché
-    console.log(`INFO: Total de ventas antiguas eliminadas: ${oldSales.length}. Total de ventas restantes: ${ventas.length}`);
-}
-
-/**
- * Elimina documentos de resultados de sorteos antiguos.
- * @param {number} daysToRetain Días para retener los resultados (ej. 60 para retener 60 días, eliminar más antiguos).
- */
-async function cleanOldDrawResults(daysToRetain = 60) {
-    console.log(`INFO: Iniciando limpieza de resultados de sorteos anteriores a ${daysToRetain} días.`);
-    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación de resultados: ${cutoffDate}`);
-
-    resultadosZulia = await readJsonFile(RESULTADOS_ZULIA_FILE, []); // Recargar
-    const resultsToKeep = resultadosZulia.filter(res => moment(res.fecha).isSameOrAfter(cutoffDate));
-    const oldResultsCount = resultadosZulia.length - resultsToKeep.length;
-
-    await writeJsonFile(RESULTADOS_ZULIA_FILE, resultsToKeep);
-    resultadosZulia = resultsToKeep; // Actualizar caché
-    console.log(`INFO: Total de resultados de sorteos antiguos eliminados: ${oldResultsCount}. Total restantes: ${resultadosZulia.length}`);
-}
-
-/**
- * Elimina documentos de premios antiguos.
- * @param {number} daysToRetain Días para retener los premios (ej. 60 para retener 60 días, eliminar más antiguos).
- */
-async function cleanOldPrizes(daysToRetain = 60) {
-    console.log(`INFO: Iniciando limpieza de premios anteriores a ${daysToRetain} días.`);
-    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación de premios: ${cutoffDate}`);
-
-    premios = await readJsonFile(PREMIOS_FILE, {}); // Recargar
-    const updatedPrizes = {};
-    let deletedPrizesCount = 0;
-
-    for (const fecha in premios) {
-        if (moment(fecha).isSameOrAfter(cutoffDate)) {
-            updatedPrizes[fecha] = premios[fecha];
-        } else {
-            deletedPrizesCount++;
-        }
-    }
-
-    await writeJsonFile(PREMIOS_FILE, updatedPrizes);
-    premios = updatedPrizes; // Actualizar caché
-    console.log(`INFO: Total de premios antiguos eliminados: ${deletedPrizesCount}. Total restantes: ${Object.keys(premios).length}`);
-}
-
-/**
- * Elimina documentos de ganadores antiguos.
- * @param {number} daysToRetain Días para retener los ganadores (ej. 60 para retener 60 días, eliminar más antiguos).
- */
-async function cleanOldWinners(daysToRetain = 60) {
-    console.log(`INFO: Iniciando limpieza de ganadores anteriores a ${daysToRetain} días.`);
-    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación de ganadores: ${cutoffDate}`);
-
-    ganadores = await readJsonFile(GANADORES_FILE, []); // Recargar
-    const winnersToKeep = ganadores.filter(winner => moment(winner.drawDate).isSameOrAfter(cutoffDate));
-    const oldWinnersCount = ganadores.length - winnersToKeep.length;
-
-    await writeJsonFile(GANADORES_FILE, winnersToKeep);
-    ganadores = winnersToKeep; // Actualizar caché
-    console.log(`INFO: Total de ganadores antiguos eliminados: ${oldWinnersCount}. Total restantes: ${ganadores.length}`);
-}
-
-
-// Tareas programadas (Cron Jobs)
-// Se ejecutarán después de que el servidor se inicie y los datos se carguen
-
-/**
- * Función asíncrona para la tarea programada de verificación diaria de ventas
- * y posible anulación/cierre de sorteo, y avance al siguiente sorteo.
- */
-async function dailyDrawCheckCronJob() {
-    console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
-    const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
-    console.log(`CRON JOB Resultado: ${cronResult.message}`);
-}
-
-cron.schedule('15 12 * * *', dailyDrawCheckCronJob, {
-    timezone: CARACAS_TIMEZONE
-});
-
-/**
- * Función asíncrona para la tarea programada de Notificación de ventas por WhatsApp y Email.
- * Se ejecuta periódicamente para enviar resúmenes de ventas a los administradores.
- */
-async function salesSummaryCronJob() {
-    console.log('CRON JOB: Ejecutando tarea programada para enviar notificación de resumen de ventas por WhatsApp y Email.');
-    await sendSalesSummaryNotifications();
-}
-
-cron.schedule('*/55 * * * *', salesSummaryCronJob);
-
-/**
- * NUEVA FUNCIÓN CRON JOB: Respaldo automático de la base de datos y envío por correo.
- * Se ejecuta cada 55 minutos para generar un backup y enviarlo.
- */
-async function dailyDatabaseBackupCronJob() {
-    console.log('CRON JOB: Iniciando respaldo automático de la base de datos y envío por correo.');
-    try {
-        const now = moment().tz(CARACAS_TIMEZONE);
-        const backupFileName = `rifas_db_backup_${now.format('YYYYMMDD_HHmmss')}.zip`;
-        const zipBuffer = await generateDatabaseBackupZipBuffer();
-
-        configuracion = await readJsonFile(CONFIG_FILE, configuracion); // Recargar la más reciente
+        const configuracion = await getConfiguracionFromDB(); // Recargar la más reciente
 
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
             const emailSubject = `Respaldo Automático de Base de Datos - ${now.format('YYYY-MM-DD HH:mm')}`;
@@ -2251,22 +2449,137 @@ cron.schedule('0 3 * * *', async () => { // Cada día a las 03:00 AM
 });
 
 
+// --- Funciones de limpieza de datos antiguos (adaptadas para DB) ---
+
+/**
+ * Elimina ventas antiguas de la base de datos y actualiza los números de rifa asociados.
+ * @param {number} daysToRetain Días para retener las ventas (ej. 30 para retener 30 días, eliminar más antiguos).
+ */
+async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
+    console.log(`INFO: Iniciando limpieza de ventas y números de rifa anteriores a ${daysToRetain} días.`);
+    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
+    console.log(`INFO: Fecha de corte para eliminación: ${cutoffDate}`);
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Obtener IDs de ventas antiguas
+        const oldSalesRes = await client.query('SELECT id, numbers FROM ventas WHERE "purchaseDate"::date < $1', [cutoffDate]);
+        const oldSales = oldSalesRes.rows;
+
+        console.log(`INFO: Encontradas ${oldSales.length} ventas antiguas para procesar.`);
+
+        // Actualizar el estado 'comprado' de los números de rifa asociados a estas ventas antiguas
+        const numbersToUpdate = new Set();
+        oldSales.forEach(sale => {
+            // Asegurarse de que sale.numbers sea un array (viene de JSONB)
+            const saleNumbers = Array.isArray(sale.numbers) ? sale.numbers : JSON.parse(sale.numbers || '[]');
+            saleNumbers.forEach(num => numbersToUpdate.add(num));
+        });
+
+        if (numbersToUpdate.size > 0) {
+            console.log(`INFO: Procesando ${numbersToUpdate.size} números de rifa para posible actualización.`);
+            await client.query(
+                'UPDATE numeros SET comprado = FALSE, originalDrawNumber = NULL WHERE numero = ANY($1::text[])',
+                [Array.from(numbersToUpdate)]
+            );
+            console.log('INFO: Números de rifa asociados a ventas antiguas actualizados (comprado: false).');
+        } else {
+            console.log('INFO: No hay números de rifa para actualizar de ventas antiguas.');
+        }
+
+        // Eliminar las ventas antiguas
+        const deleteSalesRes = await client.query('DELETE FROM ventas WHERE "purchaseDate"::date < $1', [cutoffDate]);
+        console.log(`INFO: Total de ventas antiguas eliminadas: ${deleteSalesRes.rowCount}.`);
+
+        await client.query('COMMIT');
+        console.log('INFO: Limpieza de ventas y números de rifa completada.');
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('ERROR: Error durante la limpieza de ventas y números de rifa:', error.message);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Elimina documentos de resultados de sorteos antiguos.
+ * @param {number} daysToRetain Días para retener los resultados (ej. 60 para retener 60 días, eliminar más antiguos).
+ */
+async function cleanOldDrawResults(daysToRetain = 60) {
+    console.log(`INFO: Iniciando limpieza de resultados de sorteos anteriores a ${daysToRetain} días.`);
+    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
+    console.log(`INFO: Fecha de corte para eliminación de resultados: ${cutoffDate}`);
+
+    const client = await pool.connect();
+    try {
+        const deleteRes = await client.query('DELETE FROM resultados_zulia WHERE (data->>\'fecha\')::date < $1', [cutoffDate]);
+        console.log(`INFO: Total de resultados de sorteos antiguos eliminados: ${deleteRes.rowCount}.`);
+    } catch (error) {
+        console.error('ERROR: Error durante la limpieza de resultados de sorteos:', error.message);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Elimina documentos de premios antiguos.
+ * @param {number} daysToRetain Días para retener los premios (ej. 60 para retener 60 días, eliminar más antiguos).
+ */
+async function cleanOldPrizes(daysToRetain = 60) {
+    console.log(`INFO: Iniciando limpieza de premios anteriores a ${daysToRetain} días.`);
+    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
+    console.log(`INFO: Fecha de corte para eliminación de premios: ${cutoffDate}`);
+
+    const client = await pool.connect();
+    try {
+        const deleteRes = await client.query('DELETE FROM premios WHERE (data->>\'fechaSorteo\')::date < $1', [cutoffDate]);
+        console.log(`INFO: Total de premios antiguos eliminados: ${deleteRes.rowCount}.`);
+    } catch (error) {
+        console.error('ERROR: Error durante la limpieza de premios:', error.message);
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Elimina documentos de ganadores antiguos.
+ * @param {number} daysToRetain Días para retener los ganadores (ej. 60 para retener 60 días, eliminar más antiguos).
+ */
+async function cleanOldWinners(daysToRetain = 60) {
+    console.log(`INFO: Iniciando limpieza de ganadores anteriores a ${daysToRetain} días.`);
+    const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
+    console.log(`INFO: Fecha de corte para eliminación de ganadores: ${cutoffDate}`);
+
+    const client = await pool.connect();
+    try {
+        const deleteRes = await client.query('DELETE FROM ganadores WHERE (data->>\'drawDate\')::date < $1', [cutoffDate]);
+        console.log(`INFO: Total de ganadores antiguos eliminados: ${deleteRes.rowCount}.`);
+    } catch (error) {
+        console.error('ERROR: Error durante la limpieza de ganadores:', error.message);
+    } finally {
+        client.release();
+    }
+}
+
+
 // Inicialización del servidor
 (async () => {
     try {
         console.log('DEBUG: Iniciando IIFE de inicialización del servidor.');
-        await ensureDataAndComprobantesDirs();
+        await ensureDataAndComprobantesDirs(); // Asegurar directorios de archivos locales
         console.log('DEBUG: Directorios asegurados.');
-        await loadInitialData();
+        await loadInitialData(); // Cargar o inicializar datos desde la DB
         console.log('DEBUG: Datos iniciales cargados.');
-        configureMailer();
+        await configureMailer(); // Configurar el mailer después de cargar la configuración de DB
         console.log('DEBUG: Mailer configurado.');
         app.listen(port, () => {
             console.log(`Servidor de la API escuchando en el puerto ${port}`);
-            console.log(`API Base URL: ${API_BASE_URL}`);
+            console.log(`URL Base de la API: ${API_BASE_URL}`);
         });
-    } catch (err) {
-        console.error('Failed to initialize data and start server:', err.message);
-        process.exit(1);
+    } catch (error) {
+        console.error('Error al iniciar el servidor:', error.message);
+        process.exit(1); // Salir del proceso si hay un error crítico al inicio
     }
 })();
