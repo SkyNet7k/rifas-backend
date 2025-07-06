@@ -205,7 +205,7 @@ async function insertVentaInDB(ventaData) {
     try {
         const query = `
             INSERT INTO ventas (
-                id, purchaseDate, drawDate, drawTime, drawNumber, ticketNumber,
+                id, "purchaseDate", drawDate, drawTime, drawNumber, ticketNumber,
                 buyerName, buyerPhone, numbers, valueUSD, valueBs, paymentMethod,
                 paymentReference, voucherURL, validationStatus
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
