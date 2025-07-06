@@ -117,8 +117,9 @@ async function getNumerosFromDB() {
     const client = await pool.connect();
     try {
         // Log the query before execution
-        console.log('DEBUG_DB: Ejecutando SELECT en tabla numeros: SELECT numero, comprado, originaldrawnumber FROM numeros ORDER BY numero::INTEGER');
-        const res = await client.query('SELECT numero, comprado, originaldrawnumber FROM numeros ORDER BY numero::INTEGER');
+        console.log('DEBUG_DB: Ejecutando SELECT en tabla numeros: SELECT numero, comprado, "originalDrawNumber" FROM numeros ORDER BY numero::INTEGER');
+        // FIX: Changed 'originaldrawnumber' to '"originalDrawNumber"' to match case-sensitive column name
+        const res = await client.query('SELECT numero, comprado, "originalDrawNumber" FROM numeros ORDER BY numero::INTEGER');
         console.log(`DEBUG_DB: Consulta SELECT en numeros exitosa. Filas encontradas: ${res.rows.length}`);
         return res.rows;
     } catch (dbError) { // Catch the specific DB error
@@ -142,7 +143,7 @@ async function updateNumeroInDB(numero, comprado, originalDrawNumber) {
     const client = await pool.connect();
     try {
         await client.query(
-            'UPDATE numeros SET comprado = $1, originalDrawNumber = $2 WHERE numero = $3',
+            'UPDATE numeros SET comprado = $1, "originalDrawNumber" = $2 WHERE numero = $3', // Added quotes for consistency
             [comprado, originalDrawNumber, numero]
         );
     } finally {
@@ -160,11 +161,11 @@ async function upsertNumerosInDB(numerosArray) {
         await client.query('BEGIN'); // Iniciar transacción
         for (const item of numerosArray) {
             await client.query(
-                `INSERT INTO numeros (numero, comprado, originalDrawNumber)
+                `INSERT INTO numeros (numero, comprado, "originalDrawNumber")
                  VALUES ($1, $2, $3)
                  ON CONFLICT (numero) DO UPDATE SET
                     comprado = EXCLUDED.comprado,
-                    originalDrawNumber = EXCLUDED.originalDrawNumber`,
+                    "originalDrawNumber" = EXCLUDED."originalDrawNumber"`, // Added quotes for consistency
                 [item.numero, item.comprado, item.originalDrawNumber]
             );
         }
@@ -919,13 +920,13 @@ app.post('/api/comprar', async (req, res) => {
             const numObjInDB = numeros.find(n => n.numero === numSel);
             if (numObjInDB) {
                 await client.query(
-                    'UPDATE numeros SET comprado = TRUE, originalDrawNumber = $1 WHERE numero = $2',
+                    'UPDATE numeros SET comprado = TRUE, "originalDrawNumber" = $1 WHERE numero = $2', // Added quotes for consistency
                     [configuracion.numero_sorteo_correlativo, numSel]
                 );
             } else {
                 // Esto no debería pasar si los números se inicializan correctamente
                 await client.query(
-                    'INSERT INTO numeros (numero, comprado, originalDrawNumber) VALUES ($1, TRUE, $2)',
+                    'INSERT INTO numeros (numero, comprado, "originalDrawNumber") VALUES ($1, TRUE, $2)', // Added quotes for consistency
                     [numSel, configuracion.numero_sorteo_correlativo]
                 );
             }
@@ -1329,7 +1330,7 @@ async function generateDatabaseBackupZipBuffer() {
 
         for (const tableInfo of tablesToExport) {
             try {
-                const res = await client.query(`SELECT ${tableInfo.columns.join(',')} FROM ${tableInfo.name}`);
+                const res = await client.query(`SELECT ${tableInfo.columns.map(col => `"${col}"`).join(',')} FROM ${tableInfo.name}`); // Quoting all column names for safety
                 const data = res.rows;
 
                 const workbook = new ExcelJS.Workbook();
@@ -1483,10 +1484,10 @@ app.post('/api/corte-ventas', async (req, res) => {
             let changedCount = 0;
 
             for (const num of numeros) {
-                if (num.comprado && num.originaldrawnumber < currentDrawCorrelativo - 1) { // Nota: 'originaldrawnumber' en minúsculas por DB
+                if (num.comprado && num.originalDrawNumber < currentDrawCorrelativo - 1) { // Nota: 'originalDrawNumber' en minúsculas por DB
                     await updateNumeroInDB(num.numero, false, null);
                     changedCount++;
-                    console.log(`Número ${num.numero} liberado. Comprado originalmente para sorteo ${num.originaldrawnumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
+                    console.log(`Número ${num.numero} liberado. Comprado originalmente para sorteo ${num.originalDrawNumber}, ahora en sorteo ${currentDrawCorrelativo}.`);
                 }
             }
 
@@ -1945,7 +1946,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
     try {
         // Seleccionar números que cumplen la condición para ser liberados
         const res = await client.query(
-            'SELECT numero FROM numeros WHERE comprado = TRUE AND originalDrawNumber < $1',
+            'SELECT numero FROM numeros WHERE comprado = TRUE AND "originalDrawNumber" < $1', // Added quotes for consistency
             [currentDrawCorrelativo - 1]
         );
         const numbersToLiberate = res.rows.map(row => row.numero);
@@ -1953,7 +1954,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
         if (numbersToLiberate.length > 0) {
             // Actualizar el estado de esos números
             await client.query(
-                'UPDATE numeros SET comprado = FALSE, originalDrawNumber = NULL WHERE numero = ANY($1::text[])',
+                'UPDATE numeros SET comprado = FALSE, "originalDrawNumber" = NULL WHERE numero = ANY($1::text[])', // Added quotes for consistency
                 [numbersToLiberate]
             );
             console.log(`Se liberaron ${numbersToLiberate.length} números antiguos en DB.`);
@@ -2337,7 +2338,7 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
             initialNumbers.push({ numero: numStr, comprado: false, originalDrawNumber: null });
         }
         for (const num of initialNumbers) {
-            await client.query('INSERT INTO numeros (numero, comprado, originalDrawNumber) VALUES ($1, $2, $3)', [num.numero, num.comprado, num.originalDrawNumber]);
+            await client.query('INSERT INTO numeros (numero, comprado, "originalDrawNumber") VALUES ($1, $2, $3)', [num.numero, num.comprado, num.originalDrawNumber]);
         }
 
         // Limpiar ventas, resultados, ganadores y comprobantes
@@ -2520,7 +2521,7 @@ async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
         if (numbersToUpdate.size > 0) {
             console.log(`INFO: Procesando ${numbersToUpdate.size} números de rifa para posible actualización.`);
             await client.query(
-                'UPDATE numeros SET comprado = FALSE, originalDrawNumber = NULL WHERE numero = ANY($1::text[])',
+                'UPDATE numeros SET comprado = FALSE, "originalDrawNumber" = NULL WHERE numero = ANY($1::text[])', // Added quotes for consistency
                 [Array.from(numbersToUpdate)]
             );
             console.log('INFO: Números de rifa asociados a ventas antiguas actualizados (comprado: false).');
