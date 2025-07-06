@@ -107,23 +107,44 @@ async function runMigrations() {
         `);
         console.log('Tabla "horarios_zulia" asegurada.');
 
-        // 6. Crear tabla 'resultados_zulia'
+        // 6. Crear tabla 'resultados_zulia' (CORRECCIÓN DE SINTAXIS UNIQUE)
         await client.query(`
             CREATE TABLE IF NOT EXISTS resultados_zulia (
                 id SERIAL PRIMARY KEY,
-                data JSONB NOT NULL,
-                UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
+                data JSONB NOT NULL
             );
         `);
+        // Añadir la restricción UNIQUE por separado para evitar el error de sintaxis
+        await client.query(`
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_resultados_zulia_fecha_tipoloteria') THEN
+                    ALTER TABLE resultados_zulia
+                    ADD CONSTRAINT unique_resultados_zulia_fecha_tipoloteria UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'));
+                END IF;
+            END
+            $$;
+        `);
         console.log('Tabla "resultados_zulia" asegurada.');
+
 
         // 7. Crear tabla 'premios'
         await client.query(`
             CREATE TABLE IF NOT EXISTS premios (
                 id SERIAL PRIMARY KEY,
-                data JSONB NOT NULL,
-                UNIQUE ((data->>'fechaSorteo'))
+                data JSONB NOT NULL
             );
+        `);
+        // Añadir la restricción UNIQUE por separado
+        await client.query(`
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_premios_fechasorteo') THEN
+                    ALTER TABLE premios
+                    ADD CONSTRAINT unique_premios_fechasorteo UNIQUE ((data->>'fechaSorteo'));
+                END IF;
+            END
+            $$;
         `);
         console.log('Tabla "premios" asegurada.');
 
@@ -131,9 +152,19 @@ async function runMigrations() {
         await client.query(`
             CREATE TABLE IF NOT EXISTS ganadores (
                 id SERIAL PRIMARY KEY,
-                data JSONB NOT NULL,
-                UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
+                data JSONB NOT NULL
             );
+        `);
+        // Añadir la restricción UNIQUE por separado
+        await client.query(`
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_ganadores_drawdata') THEN
+                    ALTER TABLE ganadores
+                    ADD CONSTRAINT unique_ganadores_drawdata UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'));
+                END IF;
+            END
+            $$;
         `);
         console.log('Tabla "ganadores" asegurada.');
 
