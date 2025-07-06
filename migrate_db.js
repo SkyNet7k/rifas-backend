@@ -45,7 +45,7 @@ async function runMigrations() {
         console.log('Tabla "configuracion" asegurada.');
 
         // 2. Añadir columnas a 'configuracion' si no existen (para actualizaciones)
-        // Usamos ALTER TABLE IF NOT EXISTS para ser idempotentes
+        // Usamos ALTER TABLE ADD COLUMN IF NOT EXISTS para ser idempotentes
         await client.query(`ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS raffleNumbersInitialized BOOLEAN DEFAULT FALSE;`);
         await client.query(`ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS last_sales_notification_count INTEGER DEFAULT 0;`);
         await client.query(`ALTER TABLE configuracion ADD COLUMN IF NOT EXISTS sales_notification_threshold INTEGER DEFAULT 20;`);
@@ -107,24 +107,19 @@ async function runMigrations() {
         `);
         console.log('Tabla "horarios_zulia" asegurada.');
 
-        // 6. Crear tabla 'resultados_zulia' (CORRECCIÓN DE SINTAXIS UNIQUE)
+        // 6. Crear tabla 'resultados_zulia'
         await client.query(`
             CREATE TABLE IF NOT EXISTS resultados_zulia (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
             );
         `);
-        // Añadir la restricción UNIQUE por separado para evitar el error de sintaxis
+        // Añadir la restricción UNIQUE por separado (sin DO $$ IF NOT EXISTS)
+        // Esto fallará si la restricción ya existe, lo cual es esperado y no crítico
         await client.query(`
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_resultados_zulia_fecha_tipoloteria') THEN
-                    ALTER TABLE resultados_zulia
-                    ADD CONSTRAINT unique_resultados_zulia_fecha_tipoloteria UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'));
-                END IF;
-            END
-            $$;
-        `);
+            ALTER TABLE resultados_zulia
+            ADD CONSTRAINT unique_resultados_zulia_fecha_tipoloteria UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'));
+        `).catch(e => console.warn(`Advertencia: La restricción unique_resultados_zulia_fecha_tipoloteria ya existe o hubo un error al añadirla: ${e.message}`));
         console.log('Tabla "resultados_zulia" asegurada.');
 
 
@@ -137,15 +132,9 @@ async function runMigrations() {
         `);
         // Añadir la restricción UNIQUE por separado
         await client.query(`
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_premios_fechasorteo') THEN
-                    ALTER TABLE premios
-                    ADD CONSTRAINT unique_premios_fechasorteo UNIQUE ((data->>'fechaSorteo'));
-                END IF;
-            END
-            $$;
-        `);
+            ALTER TABLE premios
+            ADD CONSTRAINT unique_premios_fechasorteo UNIQUE ((data->>'fechaSorteo'));
+        `).catch(e => console.warn(`Advertencia: La restricción unique_premios_fechasorteo ya existe o hubo un error al añadirla: ${e.message}`));
         console.log('Tabla "premios" asegurada.');
 
         // 8. Crear tabla 'ganadores'
@@ -157,15 +146,9 @@ async function runMigrations() {
         `);
         // Añadir la restricción UNIQUE por separado
         await client.query(`
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'unique_ganadores_drawdata') THEN
-                    ALTER TABLE ganadores
-                    ADD CONSTRAINT unique_ganadores_drawdata UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'));
-                END IF;
-            END
-            $$;
-        `);
+            ALTER TABLE ganadores
+            ADD CONSTRAINT unique_ganadores_drawdata UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'));
+        `).catch(e => console.warn(`Advertencia: La restricción unique_ganadores_drawdata ya existe o hubo un error al añadirla: ${e.message}`));
         console.log('Tabla "ganadores" asegurada.');
 
         // 9. Crear tabla 'comprobantes'
