@@ -205,7 +205,7 @@ async function insertVentaInDB(ventaData) {
     try {
         const query = `
             INSERT INTO ventas (
-                id, "purchaseDate", drawDate, drawTime, drawNumber, ticketNumber,
+                id, "purchaseDate", "drawDate", "drawTime", "drawNumber", ticketNumber,
                 buyerName, buyerPhone, numbers, valueUSD, valueBs, paymentMethod,
                 paymentReference, voucherURL, validationStatus
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
@@ -1955,7 +1955,7 @@ async function liberateOldReservedNumbers(currentDrawCorrelativo) {
             // Actualizar el estado de esos números
             await client.query(
                 'UPDATE numeros SET comprado = FALSE, "originalDrawNumber" = NULL WHERE numero = ANY($1::text[])', // Added quotes for consistency
-                [numbersToLiberate]
+                [Array.from(numbersToLiberate)]
             );
             console.log(`Se liberaron ${numbersToLiberate.length} números antiguos en DB.`);
         } else {
