@@ -114,12 +114,11 @@ async function runMigrations() {
                 data JSONB NOT NULL
             );
         `);
-        // Añadir la restricción UNIQUE por separado (sin DO $$ IF NOT EXISTS)
-        // Esto fallará si la restricción ya existe, lo cual es esperado y no crítico
+        // Crear índice UNIQUE sobre la expresión para 'resultados_zulia'
         await client.query(`
-            ALTER TABLE resultados_zulia
-            ADD CONSTRAINT unique_resultados_zulia_fecha_tipoloteria UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'));
-        `).catch(e => console.warn(`Advertencia: La restricción unique_resultados_zulia_fecha_tipoloteria ya existe o hubo un error al añadirla: ${e.message}`));
+            CREATE UNIQUE INDEX IF NOT EXISTS unique_resultados_zulia_fecha_tipoloteria
+            ON resultados_zulia ((data->>'fecha'), (data->>'tipoLoteria'));
+        `).catch(e => console.warn(`Advertencia: El índice unique_resultados_zulia_fecha_tipoloteria ya existe o hubo un error al añadirlo: ${e.message}`));
         console.log('Tabla "resultados_zulia" asegurada.');
 
 
@@ -130,11 +129,11 @@ async function runMigrations() {
                 data JSONB NOT NULL
             );
         `);
-        // Añadir la restricción UNIQUE por separado
+        // Crear índice UNIQUE sobre la expresión para 'premios'
         await client.query(`
-            ALTER TABLE premios
-            ADD CONSTRAINT unique_premios_fechasorteo UNIQUE ((data->>'fechaSorteo'));
-        `).catch(e => console.warn(`Advertencia: La restricción unique_premios_fechasorteo ya existe o hubo un error al añadirla: ${e.message}`));
+            CREATE UNIQUE INDEX IF NOT EXISTS unique_premios_fechasorteo
+            ON premios ((data->>'fechaSorteo'));
+        `).catch(e => console.warn(`Advertencia: El índice unique_premios_fechasorteo ya existe o hubo un error al añadirlo: ${e.message}`));
         console.log('Tabla "premios" asegurada.');
 
         // 8. Crear tabla 'ganadores'
@@ -144,11 +143,11 @@ async function runMigrations() {
                 data JSONB NOT NULL
             );
         `);
-        // Añadir la restricción UNIQUE por separado
+        // Crear índice UNIQUE sobre la expresión para 'ganadores'
         await client.query(`
-            ALTER TABLE ganadores
-            ADD CONSTRAINT unique_ganadores_drawdata UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'));
-        `).catch(e => console.warn(`Advertencia: La restricción unique_ganadores_drawdata ya existe o hubo un error al añadirla: ${e.message}`));
+            CREATE UNIQUE INDEX IF NOT EXISTS unique_ganadores_drawdata
+            ON ganadores ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'));
+        `).catch(e => console.warn(`Advertencia: El índice unique_ganadores_drawdata ya existe o hubo un error al añadirlo: ${e.message}`));
         console.log('Tabla "ganadores" asegurada.');
 
         // 9. Crear tabla 'comprobantes'
