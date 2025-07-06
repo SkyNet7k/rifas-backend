@@ -14,7 +14,7 @@
     "@firebasegen/default-connector": "file:dataconnect-generated/js/default-connector",
     "archiver": "^7.0.1",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^16.6.1",
     "exceljs": "^4.4.0",
     "express": "^4.17.1",
     "express-fileupload": "^1.5.1",
@@ -23,7 +23,8 @@
     "node-cron": "^4.0.7",
     "node-fetch": "^3.3.2",
     "node-schedule": "^2.1.1",
-    "nodemailer": "^6.9.13"
+    "nodemailer": "^6.9.13",
+    "pg": "^8.16.3"
   },
   "engines": {
     "node": "22.x"
