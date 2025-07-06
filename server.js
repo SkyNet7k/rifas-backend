@@ -205,7 +205,7 @@ async function insertVentaInDB(ventaData) {
     try {
         const query = `
             INSERT INTO ventas (
-                id, "purchaseDate", "drawDate", "drawTime", "drawNumber", ticketNumber,
+                id, "purchaseDate", "drawDate", "drawTime", "drawNumber", "ticketNumber",
                 buyerName, buyerPhone, numbers, valueUSD, valueBs, paymentMethod,
                 paymentReference, voucherURL, validationStatus
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
@@ -2224,7 +2224,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
         configuracion = await advanceDrawConfiguration(configuracion, newDrawDate); // Actualizar 'configuracion' después de avanzar
 
-        await liberateOldReservedNumbers(configuracion.numero_sorteo_correlativo);
+        await liberateOldReservedNumbers(configuracion.numero_sortivo_correlativo);
 
         const ventas = await getVentasFromDB();
         const salesForOldDraw = ventas.filter(venta =>
