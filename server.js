@@ -206,7 +206,7 @@ async function insertVentaInDB(ventaData) {
         const query = `
             INSERT INTO ventas (
                 id, "purchaseDate", "drawDate", "drawTime", "drawNumber", "ticketNumber",
-                buyerName, buyerPhone, numbers, valueUSD, valueBs, paymentMethod,
+                "buyerName", "buyerPhone", numbers, valueUSD, valueBs, paymentMethod,
                 paymentReference, voucherURL, validationStatus
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         `;
@@ -274,7 +274,7 @@ async function insertComprobanteInDB(comprobanteData) {
     try {
         const query = `
             INSERT INTO comprobantes (
-                id, ventaId, comprador, telefono, comprobante_nombre, comprobante_tipo, fecha_compra, url_comprobante
+                id, "ventaId", comprador, telefono, comprobante_nombre, comprobante_tipo, fecha_compra, url_comprobante
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `;
         const values = [
@@ -1320,7 +1320,7 @@ async function generateDatabaseBackupZipBuffer() {
         const tablesToExport = [
             { name: 'configuracion', columns: ['id', 'pagina_bloqueada', 'fecha_sorteo', 'precio_ticket', 'numero_sorteo_correlativo', 'ultimo_numero_ticket', 'ultima_fecha_resultados_zulia', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports', 'mail_config_host', 'mail_config_port', 'mail_config_secure', 'mail_config_user', 'mail_config_pass', 'mail_config_sender_name', 'raffleNumbersInitialized', 'last_sales_notification_count', 'sales_notification_threshold', 'block_reason_message'] },
             { name: 'numeros', columns: ['id', 'numero', 'comprado', 'originalDrawNumber'] },
-            { name: 'ventas', columns: ['id', 'purchaseDate', 'drawDate', 'drawTime', 'drawNumber', 'ticketNumber', 'buyerName', 'buyerPhone', 'numbers', 'valueUSD', 'valueBs', 'paymentMethod', 'paymentReference', 'voucherURL', 'validationStatus', 'voidedReason', 'voidedAt', 'closedReason', 'closedAt'] },
+            { name: 'ventas', columns: ['id', 'purchaseDate', 'drawDate', 'drawTime', 'drawNumber', 'ticketNumber', '"buyerName"', '"buyerPhone"', 'numbers', 'valueUSD', 'valueBs', 'paymentMethod', 'paymentReference', 'voucherURL', 'validationStatus', 'voidedReason', 'voidedAt', 'closedReason', 'closedAt'] }, // CAMBIO AQUÍ
             { name: 'horarios_zulia', columns: ['id', 'hora'] },
             { name: 'resultados_zulia', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'premios', columns: ['id', 'data'] }, // 'data' is JSONB
@@ -1330,14 +1330,14 @@ async function generateDatabaseBackupZipBuffer() {
 
         for (const tableInfo of tablesToExport) {
             try {
-                const res = await client.query(`SELECT ${tableInfo.columns.map(col => `"${col}"`).join(',')} FROM ${tableInfo.name}`); // Quoting all column names for safety
+                const res = await client.query(`SELECT ${tableInfo.columns.map(col => `"${col.replace(/"/g, '')}"`).join(',')} FROM ${tableInfo.name}`); // Quoting all column names for safety
                 const data = res.rows;
 
                 const workbook = new ExcelJS.Workbook();
                 const worksheet = workbook.addWorksheet(tableInfo.name);
 
                 if (data.length > 0) {
-                    const columns = tableInfo.columns.map(key => ({ header: key, key: key, width: 25 }));
+                    const columns = tableInfo.columns.map(key => ({ header: key, key: key.replace(/"/g, ''), width: 25 })); // Remove quotes for key
                     worksheet.columns = columns;
                     worksheet.addRow(columns.map(col => col.header));
                     data.forEach(row => {
@@ -2224,7 +2224,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
         configuracion = await advanceDrawConfiguration(configuracion, newDrawDate); // Actualizar 'configuracion' después de avanzar
 
-        await liberateOldReservedNumbers(configuracion.numero_sortivo_correlativo);
+        await liberateOldReservedNumbers(configuracion.numero_sorteo_correlativo);
 
         const ventas = await getVentasFromDB();
         const salesForOldDraw = ventas.filter(venta =>
