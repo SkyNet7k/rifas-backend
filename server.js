@@ -5,7 +5,7 @@ const fileUpload = require('express-fileupload');
 const path = require('path');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
-const cron = require('node-cron');
+const cron = require('node-node');
 const dotenv = require('dotenv');
 const ExcelJS = require('exceljs');
 const moment = require('moment-timezone');
@@ -470,7 +470,7 @@ async function ensureDataAndComprobantesDirs() {
 
 // Carga inicial de datos desde la base de datos o inicialización con valores por defecto
 async function loadInitialData() {
-    console.log('Iniciando carga inicial de datos desde la base de datos...');
+    console.log('DEBUG_INIT: Iniciando carga inicial de datos desde la base de datos...');
     let client;
     try {
         client = await pool.connect();
@@ -479,8 +479,11 @@ async function loadInitialData() {
         let configuracion = await getConfiguracionFromDB();
         let configId = null; // To store the ID of the config row
 
+        console.log('DEBUG_INIT: Configuración leída de la DB (antes de aplicar defaults):', JSON.stringify(configuracion, null, 2));
+
+
         if (Object.keys(configuracion).length === 0) {
-            console.warn('No se encontró configuración en la DB. Insertando valores por defecto.');
+            console.warn('DEBUG_INIT: No se encontró configuración en la DB. Insertando valores por defecto.');
             const default_config = {
                 pagina_bloqueada: false,
                 fecha_sorteo: moment().tz(CARACAS_TIMEZONE).add(1, 'days').format('YYYY-MM-DD'),
@@ -523,8 +526,10 @@ async function loadInitialData() {
             const res = await client.query(insertQuery, insertValues);
             configuracion = { id: res.rows[0].id, ...default_config };
             configId = res.rows[0].id;
+            console.log('DEBUG_INIT: Configuración por defecto insertada en la DB.');
         } else {
             configId = configuracion.id; // Get existing ID
+            console.log('DEBUG_INIT: Configuración existente encontrada en la DB. Verificando propiedades...');
             // Ensure all expected properties exist, setting defaults if missing
             configuracion.raffleNumbersInitialized = configuracion.raffleNumbersInitialized !== undefined ? configuracion.raffleNumbersInitialized : false;
             configuracion.last_sales_notification_count = configuracion.last_sales_notification_count !== undefined ? configuracion.last_sales_notification_count : 0;
@@ -540,6 +545,7 @@ async function loadInitialData() {
             configuracion.tasa_dolar = Array.isArray(configuracion.tasa_dolar) ? configuracion.tasa_dolar : [36.50];
             configuracion.admin_whatsapp_numbers = Array.isArray(configuracion.admin_whatsapp_numbers) ? configuracion.admin_whatsapp_numbers : [];
             configuracion.admin_email_for_reports = Array.isArray(configuracion.admin_email_for_reports) ? configuracion.admin_email_for_reports : [];
+            console.log('DEBUG_INIT: Configuración después de asegurar propiedades:', JSON.stringify(configuracion, null, 2));
         }
 
         // --- Inicializar Números de Rifa si no están (o si hay menos de 1000) ---
@@ -581,9 +587,9 @@ async function loadInitialData() {
             console.log('DEBUG_LOAD_INITIAL: La tabla numeros ya tiene 1000 números y raffleNumbersInitialized es true.');
         }
 
-        console.log('Datos iniciales cargados o asegurados en la base de datos.');
+        console.log('DEBUG_INIT: Datos iniciales cargados o asegurados en la base de datos.');
     } catch (err) {
-        console.error('Error CRÍTICO al cargar o inicializar datos en la base de datos:', err);
+        console.error('ERROR_CRITICO_INIT: Error CRÍTICO al cargar o inicializar datos en la base de datos:', err);
         process.exit(1);
     } finally {
         if (client) {
@@ -610,9 +616,9 @@ async function configureMailer() {
                 pass: emailPass
             }
         });
-        console.log('Nodemailer configurado.');
+        console.log('DEBUG_MAILER: Nodemailer configurado.');
     } else {
-        console.warn('Configuración de correo incompleta. El envío de correos no funcionará.');
+        console.warn(`DEBUG_MAILER: Configuración de correo incompleta. El envío de correos no funcionará. Host: '${configuracion.mail_config_host}', User: '${emailUser ? 'OK' : 'VACÍO'}', Pass: '${emailPass ? 'OK' : 'VACÍO'}'`);
         transporter = null;
     }
 }
@@ -628,7 +634,7 @@ async function configureMailer() {
  */
 async function sendEmail(to, subject, html, attachments = []) {
     if (!transporter) {
-        console.error('Mailer no configurado. No se pudo enviar el correo.');
+        console.error('ERROR_MAILER: Transporter no configurado. No se pudo enviar el correo.');
         return false;
     }
     const configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
@@ -641,11 +647,12 @@ async function sendEmail(to, subject, html, attachments = []) {
             html,
             attachments
         };
+        console.log(`DEBUG_MAILER: Intentando enviar correo a: ${recipients}, Asunto: ${subject}`);
         await transporter.sendMail(mailOptions);
-        console.log('Correo enviado exitosamente.');
+        console.log('DEBUG_MAILER: Correo enviado exitosamente.');
         return true;
     }  catch (error) {
-        console.error('Error al enviar correo:', error.message);
+        console.error(`ERROR_MAILER: Fallo al enviar correo a ${to}, Asunto: ${subject}. Mensaje:`, error.message);
         return false;
     }
 }
@@ -669,20 +676,20 @@ async function sendWhatsappNotification(messageText) {
             console.log('--- Fin Notificación de WhatsApp ---\n');
             console.log('NOTA: Los enlaces de WhatsApp se han generado y mostrado en la consola. Para el envío automático real, se requiere una integración con un proveedor de WhatsApp API (ej. Twilio, Vonage, WhatsApp Business API).');
         } else {
-            console.warn('No hay números de WhatsApp de administrador configurados para enviar notificaciones.');
+            console.warn('DEBUG_WHATSAPP: No hay números de WhatsApp de administrador configurados para enviar notificaciones.');
         }
 
     } catch (error) {
-        console.error('Error al enviar notificación por WhatsApp:', error.message);
+        console.error('ERROR_WHATSAPP: Error al enviar notificación por WhatsApp:', error.message);
     }
 }
 
 // Función auxiliar para enviar notificación de resumen de ventas (WhatsApp y Email)
 async function sendSalesSummaryNotifications() {
+    console.log('[sendSalesSummaryNotifications] Iniciando notificación de resumen de ventas.');
     let configuracion = await getConfiguracionFromDB(); // Obtener la configuración más reciente
     let ventas = await getVentasFromDB(); // Obtener las ventas más recientes
 
-    console.log('[sendSalesSummaryNotifications] Iniciando notificación de resumen de ventas.');
     const now = moment().tz(CARACAS_TIMEZONE);
 
     const ventasParaFechaSorteo = ventas.filter(venta =>
@@ -704,12 +711,14 @@ async function sendSalesSummaryNotifications() {
 
     try {
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
+            console.log('[sendSalesSummaryNotifications] Generando reporte Excel para correo...');
             const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
                 ventasParaFechaSorteo,
                 configuracion,
                 'Reporte de Ventas Periódico',
                 'Reporte_Ventas_Periodico'
             );
+            console.log(`[sendSalesSummaryNotifications] Reporte Excel generado: ${excelFileName}. Intentando enviar correo.`);
 
             const emailSubject = `Reporte de Ventas Periódico - ${now.format('YYYY-MM-DD HH:mm')}`;
             const emailHtmlContent = `
@@ -729,11 +738,15 @@ async function sendSalesSummaryNotifications() {
             ];
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (!emailSent) {
-                console.error('Fallo al enviar el correo de reporte de ventas periódico.');
+                console.error('ERROR_SALES_SUMMARY: Fallo al enviar el correo de reporte de ventas periódico.');
+            } else {
+                console.log('DEBUG_SALES_SUMMARY: Correo de reporte de ventas periódico enviado con éxito.');
             }
+        } else {
+            console.warn('DEBUG_SALES_SUMMARY: No hay correos de administrador configurados para enviar el reporte de ventas periódico.');
         }
     } catch (emailError) {
-        console.error('Error al generar o enviar el reporte de ventas periódico por correo:', emailError.message);
+        console.error('ERROR_SALES_SUMMARY: Error al generar o enviar el reporte de ventas periódico por correo:', emailError.message);
     }
 }
 
@@ -747,7 +760,7 @@ app.get('/', (req, res) => {
 });
 
 // Configuración de CORS explícita y exclusiva para múltiples orígenes
-const allowedOrigins = ['https://paneladmin01.netlify.app', 'https://tuoportunidadeshoy.netlify.app'];
+const allowedOrigins = ['https://paneladmin01.netlify.app', 'https://tuoportunidadeshoy.netlify.app', 'https://seller01.netlify.app']; // Añadido el dominio del panel del vendedor
 
 app.use(cors({
     origin: function (origin, callback) {
@@ -1310,6 +1323,7 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
  * @returns {Promise<Buffer>} Un buffer que representa el archivo ZIP.
  */
 async function generateDatabaseBackupZipBuffer() {
+    console.log('[DEBUG_BACKUP] Iniciando generación de backup ZIP de la base de datos.');
     const archive = archiver('zip', {
         zlib: { level: 9 }
     });
@@ -1342,6 +1356,7 @@ async function generateDatabaseBackupZipBuffer() {
 
                 const res = await client.query(`SELECT ${quotedColumns} FROM ${tableInfo.name}`);
                 const data = res.rows;
+                console.log(`[DEBUG_BACKUP] Exportando tabla: ${tableInfo.name} con ${data.length} filas.`);
 
                 const workbook = new ExcelJS.Workbook();
                 const worksheet = workbook.addWorksheet(tableInfo.name);
@@ -1377,21 +1392,28 @@ async function generateDatabaseBackupZipBuffer() {
                 const excelBuffer = await workbook.xlsx.writeBuffer();
                 archive.append(excelBuffer, { name: `${tableInfo.name}_backup.xlsx` });
             } catch (queryError) {
-                console.warn(`No se pudo leer o procesar la tabla ${tableInfo.name} para el respaldo: ${queryError.message}. Se omitirá.`);
+                console.warn(`WARN_BACKUP: No se pudo leer o procesar la tabla ${tableInfo.name} para el respaldo: ${queryError.message}. Se omitirá.`);
             }
         }
 
         archive.finalize();
+        console.log('[DEBUG_BACKUP] Archivo ZIP de respaldo finalizado.');
 
         return new Promise((resolve, reject) => {
             const buffers = [];
             output.on('data', chunk => buffers.push(chunk));
-            output.on('end', () => resolve(Buffer.concat(buffers)));
-            archive.on('error', err => reject(err));
+            output.on('end', () => {
+                console.log('[DEBUG_BACKUP] Buffer ZIP generado y listo para enviar.');
+                resolve(Buffer.concat(buffers));
+            });
+            archive.on('error', err => {
+                console.error('ERROR_BACKUP: Error durante la creación del archivo ZIP:', err.message);
+                reject(err);
+            });
         });
 
     } catch (error) {
-        console.error('Error al generar el buffer ZIP de la base de datos:', error.message);
+        console.error('ERROR_BACKUP: Error al generar el buffer ZIP de la base de datos:', error.message);
         throw error;
     } finally {
         client.release();
@@ -1447,10 +1469,12 @@ app.post('/api/corte-ventas', async (req, res) => {
             ];
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, subject, htmlContent, attachments);
             if (!emailSent) {
-                console.error('Fallo al enviar el correo de corte de ventas.');
+                console.error('ERROR_CORTE_VENTAS: Fallo al enviar el correo de corte de ventas.');
             } else {
                 console.log('[DEBUG_CORTE_VENTAS] Correo de corte de ventas enviado.');
             }
+        } else {
+            console.warn('DEBUG_CORTE_VENTAS: No hay correos de administrador configurados para enviar el reporte de corte de ventas.');
         }
 
         configuracion = await getConfiguracionFromDB();
@@ -1512,7 +1536,7 @@ app.post('/api/corte-ventas', async (req, res) => {
         res.status(200).json({ message: message });
 
     } catch (error) {
-    console.error('Error al realizar Corte de Ventas en DB:', error.message);
+    console.error('ERROR_CORTE_VENTAS: Error al realizar Corte de Ventas en DB:', error.message);
     res.status(500).json({ message: 'Error interno del servidor al realizar Corte de Ventas.', error: error.message });
     }
 });
@@ -2101,14 +2125,16 @@ async function evaluateDrawStatusOnly(nowMoment) {
 
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (!emailSent) {
-                console.error('Fallo al enviar el correo de notificación de suspensión/cierre.');
+                console.error('ERROR_EVALUATE_DRAW: Fallo al enviar el correo de notificación de suspensión/cierre.');
+            } else {
+                console.log('DEBUG_EVALUATE_DRAW: Correo de notificación de suspensión/cierre enviado con éxito.');
             }
         }
 
         return { success: true, message: message, evaluatedDate: currentDrawDateStr, salesPercentage: soldPercentage };
 
     } catch (error) {
-        console.error('[evaluateDrawStatusOnly] ERROR durante la evaluación del sorteo en DB:', error.message);
+        console.error('ERROR_EVALUATE_DRAW: ERROR durante la evaluación del sorteo en DB:', error.message);
         return { success: false, message: `Error interno al evaluar estado de sorteo: ${error.message}` };
     } finally {
         if (client) client.release();
@@ -2150,7 +2176,9 @@ async function cerrarSorteoManualmente(nowMoment) {
             `;
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent);
             if (!emailSent) {
-                console.error('Fallo al enviar el correo de notificación de cierre manual y avance.');
+                console.error('ERROR_CIERRE_MANUAL: Fallo al enviar el correo de notificación de cierre manual y avance.');
+            } else {
+                console.log('DEBUG_CIERRE_MANUAL: Correo de notificación de cierre manual y avance enviado con éxito.');
             }
         }
 
@@ -2162,7 +2190,7 @@ async function cerrarSorteoManualmente(nowMoment) {
         };
 
     } catch (error) {
-        console.error('[cerrarSorteoManualmente] ERROR durante el cierre manual del sorteo en DB:', error.message);
+        console.error('ERROR_CIERRE_MANUAL: ERROR durante el cierre manual del sorteo en DB:', error.message);
         return { success: false, message: `Error interno: ${error.message}` };
     }
 }
@@ -2274,7 +2302,9 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (!emailSent) {
-                console.error('Fallo al enviar el correo de notificación de reprogramación.');
+                console.error('ERROR_REPROGRAMACION: Fallo al enviar el correo de notificación de reprogramación.');
+            } else {
+                console.log('DEBUG_REPROGRAMACION: Correo de notificación de reprogramación enviado con éxito.');
             }
         }
 
@@ -2285,7 +2315,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Error en la API de set-manual-draw-date en DB:', error.message);
+        console.error('ERROR_REPROGRAMACION: Error en la API de set-manual-draw-date en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al establecer la fecha del sorteo manualmente.', error: error.message });
     }
 });
@@ -2399,7 +2429,7 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
 
     } catch (error) {
         if (client) await client.query('ROLLBACK');
-        console.error('Error al limpiar datos:', error.message);
+        console.error('ERROR_LIMPIAR_DATOS: Error al limpiar datos:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al limpiar datos.', error: error.message });
     } finally {
         if (client) client.release();
@@ -2470,15 +2500,15 @@ async function dailyDatabaseBackupCronJob() {
             ];
             const emailSent = await sendEmail(configuracion.admin_email_for_reports, emailSubject, emailHtmlContent, attachments);
             if (emailSent) {
-                console.log('Respaldo de base de datos enviado por correo exitosamente.');
+                console.log('DEBUG_BACKUP_CRON: Respaldo de base de datos enviado por correo exitosamente.');
             } else {
-                console.error('Fallo al enviar el correo de respaldo de base de datos.');
+                console.error('ERROR_BACKUP_CRON: Fallo al enviar el correo de respaldo de base de datos.');
             }
         } else {
-            console.warn('No hay correos de administrador configurados para enviar el respaldo de la base de datos.');
+            console.warn('DEBUG_BACKUP_CRON: No hay correos de administrador configurados para enviar el respaldo de la base de datos.');
         }
     } catch (error) {
-        console.error('Error durante el cron job de respaldo automático de la base de datos:', error.message);
+        console.error('ERROR_BACKUP_CRON: Error durante el cron job de respaldo automático de la base de datos:', error.message);
     }
 }
 
@@ -2507,9 +2537,9 @@ cron.schedule('0 3 * * *', async () => { // Cada día a las 03:00 AM
  * @param {number} daysToRetain Días para retener las ventas (ej. 30 para retener 30 días, eliminar más antiguos).
  */
 async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
-    console.log(`INFO: Iniciando limpieza de ventas y números de rifa anteriores a ${daysToRetain} días.`);
+    console.log(`INFO_CLEANUP: Iniciando limpieza de ventas y números de rifa anteriores a ${daysToRetain} días.`);
     const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación: ${cutoffDate}`);
+    console.log(`INFO_CLEANUP: Fecha de corte para eliminación: ${cutoffDate}`);
 
     const client = await pool.connect();
     try {
@@ -2519,7 +2549,7 @@ async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
         const oldSalesRes = await client.query('SELECT id, numbers FROM ventas WHERE "purchaseDate"::date < $1', [cutoffDate]);
         const oldSales = oldSalesRes.rows;
 
-        console.log(`INFO: Encontradas ${oldSales.length} ventas antiguas para procesar.`);
+        console.log(`INFO_CLEANUP: Encontradas ${oldSales.length} ventas antiguas para procesar.`);
 
         // Actualizar el estado 'comprado' de los números de rifa asociados a estas ventas antiguas
         const numbersToUpdate = new Set();
@@ -2530,25 +2560,25 @@ async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
         });
 
         if (numbersToUpdate.size > 0) {
-            console.log(`INFO: Procesando ${numbersToUpdate.size} números de rifa para posible actualización.`);
+            console.log(`INFO_CLEANUP: Procesando ${numbersToUpdate.size} números de rifa para posible actualización.`);
             await client.query(
                 'UPDATE numeros SET comprado = FALSE, "originalDrawNumber" = NULL WHERE numero = ANY($1::text[])', // Added quotes for consistency
                 [Array.from(numbersToUpdate)]
             );
-            console.log('INFO: Números de rifa asociados a ventas antiguas actualizados (comprado: false).');
+            console.log('INFO_CLEANUP: Números de rifa asociados a ventas antiguas actualizados (comprado: false).');
         } else {
-            console.log('INFO: No hay números de rifa para actualizar de ventas antiguas.');
+            console.log('INFO_CLEANUP: No hay números de rifa para actualizar de ventas antiguas.');
         }
 
         // Eliminar las ventas antiguas
         const deleteSalesRes = await client.query('DELETE FROM ventas WHERE "purchaseDate"::date < $1', [cutoffDate]);
-        console.log(`INFO: Total de ventas antiguas eliminadas: ${deleteSalesRes.rowCount}.`);
+        console.log(`INFO_CLEANUP: Total de ventas antiguas eliminadas: ${deleteSalesRes.rowCount}.`);
 
         await client.query('COMMIT');
-        console.log('INFO: Limpieza de ventas y números de rifa completada.');
+        console.log('INFO_CLEANUP: Limpieza de ventas y números de rifa completada.');
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('ERROR: Error durante la limpieza de ventas y números de rifa:', error.message);
+        console.error('ERROR_CLEANUP: Error durante la limpieza de ventas y números de rifa:', error.message);
     } finally {
         client.release();
     }
@@ -2559,16 +2589,16 @@ async function cleanOldSalesAndRaffleNumbers(daysToRetain = 30) {
  * @param {number} daysToRetain Días para retener los resultados (ej. 60 para retener 60 días, eliminar más antiguos).
  */
 async function cleanOldDrawResults(daysToRetain = 60) {
-    console.log(`INFO: Iniciando limpieza de resultados de sorteos anteriores a ${daysToRetain} días.`);
+    console.log(`INFO_CLEANUP: Iniciando limpieza de resultados de sorteos anteriores a ${daysToRetain} días.`);
     const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación de resultados: ${cutoffDate}`);
+    console.log(`INFO_CLEANUP: Fecha de corte para eliminación de resultados: ${cutoffDate}`);
 
     const client = await pool.connect();
     try {
         const deleteRes = await client.query('DELETE FROM resultados_zulia WHERE (data->>\'fecha\')::date < $1', [cutoffDate]);
-        console.log(`INFO: Total de resultados de sorteos antiguos eliminados: ${deleteRes.rowCount}.`);
+        console.log(`INFO_CLEANUP: Total de resultados de sorteos antiguos eliminados: ${deleteRes.rowCount}.`);
     } catch (error) {
-        console.error('ERROR: Error durante la limpieza de resultados de sorteos:', error.message);
+        console.error('ERROR_CLEANUP: Error durante la limpieza de resultados de sorteos:', error.message);
     } finally {
         client.release();
     }
@@ -2579,16 +2609,16 @@ async function cleanOldDrawResults(daysToRetain = 60) {
  * @param {number} daysToRetain Días para retener los premios (ej. 60 para retener 60 días, eliminar más antiguos).
  */
 async function cleanOldPrizes(daysToRetain = 60) {
-    console.log(`INFO: Iniciando limpieza de premios anteriores a ${daysToRetain} días.`);
+    console.log(`INFO_CLEANUP: Iniciando limpieza de premios anteriores a ${daysToRetain} días.`);
     const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación de premios: ${cutoffDate}`);
+    console.log(`INFO_CLEANUP: Fecha de corte para eliminación de premios: ${cutoffDate}`);
 
     const client = await pool.connect();
     try {
         const deleteRes = await client.query('DELETE FROM premios WHERE (data->>\'fechaSorteo\')::date < $1', [cutoffDate]);
-        console.log(`INFO: Total de premios antiguos eliminados: ${deleteRes.rowCount}.`);
+        console.log(`INFO_CLEANUP: Total de premios antiguos eliminados: ${deleteRes.rowCount}.`);
     } catch (error) {
-        console.error('ERROR: Error durante la limpieza de premios:', error.message);
+        console.error('ERROR_CLEANUP: Error durante la limpieza de premios:', error.message);
     } finally {
         client.release();
     }
@@ -2599,16 +2629,16 @@ async function cleanOldPrizes(daysToRetain = 60) {
  * @param {number} daysToRetain Días para retener los ganadores (ej. 60 para retener 60 días, eliminar más antiguos).
  */
 async function cleanOldWinners(daysToRetain = 60) {
-    console.log(`INFO: Iniciando limpieza de ganadores anteriores a ${daysToRetain} días.`);
+    console.log(`INFO_CLEANUP: Iniciando limpieza de ganadores anteriores a ${daysToRetain} días.`);
     const cutoffDate = moment().tz(CARACAS_TIMEZONE).subtract(daysToRetain, 'days').format('YYYY-MM-DD');
-    console.log(`INFO: Fecha de corte para eliminación de ganadores: ${cutoffDate}`);
+    console.log(`INFO_CLEANUP: Fecha de corte para eliminación de ganadores: ${cutoffDate}`);
 
     const client = await pool.connect();
     try {
         const deleteRes = await client.query('DELETE FROM ganadores WHERE (data->>\'drawDate\')::date < $1', [cutoffDate]);
-        console.log(`INFO: Total de ganadores antiguos eliminados: ${deleteRes.rowCount}.`);
+        console.log(`INFO_CLEANUP: Total de ganadores antiguos eliminados: ${deleteRes.rowCount}.`);
     } catch (error) {
-        console.error('ERROR: Error durante la limpieza de ganadores:', error.message);
+        console.error('ERROR_CLEANUP: Error durante la limpieza de ganadores:', error.message);
     } finally {
         client.release();
     }
@@ -2630,7 +2660,7 @@ async function cleanOldWinners(daysToRetain = 60) {
             console.log(`URL Base de la API: ${API_BASE_URL}`);
         });
     } catch (error) {
-        console.error('Error al iniciar el servidor:', error.message);
+        console.error('ERROR_CRITICO_INIT_SERVER: Error al iniciar el servidor:', error.message);
         process.exit(1); // Salir del proceso si hay un error crítico al inicio
     }
 })();
