@@ -327,7 +327,7 @@ async function updateHorariosInDB(tipo, horarios) {
         // la lógica para 'chance' iría aquí.
         await client.query('COMMIT');
     } catch (e) {
-        await client.query('ROLLBACK');
+        await client.query('ROLLBACK'); // Revertir en caso de error
         throw e;
     } finally {
         client.release();
@@ -714,8 +714,8 @@ async function sendSalesSummaryNotifications() {
             const emailSubject = `Reporte de Ventas Periódico - ${now.format('YYYY-MM-DD HH:mm')}`;
             const emailHtmlContent = `
                 <p>Se ha generado un reporte de ventas periódico para el sorteo del día <strong>${configuracion.fecha_sorteo}</strong>.</p>
-                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0).toFixed(2)}</p>
-                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + (venta.valueBs || 0), 0).toFixed(2)}</p>
+                <p><b>Total de Ventas USD:</b> $${ventasParaFechaSorteo.reduce((sum, venta) => sum + (parseFloat(venta.valueUSD) || 0), 0).toFixed(2)}</p>
+                <p><b>Total de Ventas Bs:</b> Bs ${ventasParaFechaSorteo.reduce((sum, venta) => sum + (parseFloat(venta.valueBs) || 0), 0).toFixed(2)}</p>
                 <p><b>Porcentaje de Tickets Vendidos:</b> ${soldPercentage.toFixed(2)}%</p>
                 <p>Adjunto encontrarás el detalle completo en formato Excel.</p>
                 <p>Última actualización: ${now.format('DD/MM/YYYY HH:mm:ss')}</p>
@@ -1071,8 +1071,8 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
                 <p><b>Comprador:</b> ${ventaData.buyerName}</p>
                 <p><b>Teléfono:</b> ${ventaData.buyerPhone}</p>
                 <p><b>Números:</b> ${ventaData.numbers.join(', ')}</p>
-                <p><b>Monto USD:</b> $${ventaData.valueUSD.toFixed(2)}</p>
-                <p><b>Monto Bs:</b> Bs ${ventaData.valueBs.toFixed(2)}</p>
+                <p><b>Monto USD:</b> $${(parseFloat(ventaData.valueUSD) || 0).toFixed(2)}</p>
+                <p><b>Monto Bs:</b> Bs ${(parseFloat(ventaData.valueBs) || 0).toFixed(2)}</p>
                 <p><b>Método de Pago:</b> ${ventaData.paymentMethod}</p>
                 <p><b>Referencia:</b> ${ventaData.paymentReference}</p>
                 <p>Haz clic <a href="${API_BASE_URL}/uploads/${fileName}" target="_blank">aquí</a> para ver el comprobante.</p>
@@ -1205,6 +1205,7 @@ app.post('/api/resultados-sorteo', async (req, res) => {
         res.status(200).json({ message: 'Resultados de sorteo guardados/actualizados con éxito.' });
     } catch (error) {
         console.error('Error al guardar/actualizar resultados de sorteo en DB:', error.message);
+        console.error('Detalle del error:', error.stack);
         res.status(500).json({ message: 'Error interno del servidor al guardar/actualizar resultados de sorteo.', error: error.message });
     }
 });
@@ -1224,8 +1225,9 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
     const now = moment().tz(CARACAS_TIMEZONE);
     const todayFormatted = now.format('YYYY-MM-DD');
 
-    const totalVentasUSD = salesData.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0);
-    const totalVentasBs = salesData.reduce((sum, venta) => sum + (venta.valueBs || 0), 0);
+    // FIX: Asegurarse de que valueUSD y valueBs sean números antes de sumar
+    const totalVentasUSD = salesData.reduce((sum, venta) => sum + (parseFloat(venta.valueUSD) || 0), 0);
+    const totalVentasBs = salesData.reduce((sum, venta) => sum + (parseFloat(venta.valueBs) || 0), 0);
 
     const workbook = new ExcelJS.Workbook();
     const worksheet = workbook.addWorksheet(reportTitle);
@@ -1282,8 +1284,8 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
             buyerPhone: venta.buyerPhone || '',
             // 'numbers' ya debería ser un array debido a getVentasFromDB
             numbers: (Array.isArray(venta.numbers) ? venta.numbers.join(', ') : ''),
-            valueUSD: venta.valueUSD || 0,
-            valueBs: venta.valueBs || 0,
+            valueUSD: (parseFloat(venta.valueUSD) || 0), // Ensure it's a number for Excel
+            valueBs: (parseFloat(venta.valueBs) || 0),   // Ensure it's a number for Excel
             paymentMethod: venta.paymentMethod || '',
             paymentReference: venta.paymentReference || '',
             voucherURL: venta.voucherURL ? `${API_BASE_URL}${venta.voucherURL}` : '',
@@ -1426,8 +1428,8 @@ app.post('/api/corte-ventas', async (req, res) => {
         console.log(`[DEBUG_CORTE_VENTAS] Excel de corte de ventas generado: ${excelFileName}`);
 
         if (configuracion.admin_email_for_reports && configuracion.admin_email_for_reports.length > 0) {
-            const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + (venta.valueUSD || 0), 0);
-            const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + (venta.valueBs || 0), 0);
+            const totalVentasUSD = ventasDelDia.reduce((sum, venta) => sum + (parseFloat(venta.valueUSD) || 0), 0);
+            const totalVentasBs = ventasDelDia.reduce((sum, venta) => sum + (parseFloat(venta.valueBs) || 0), 0);
 
             const subject = `Reporte de Corte de Ventas ${todayFormatted}`;
             const htmlContent = `
@@ -1559,21 +1561,21 @@ app.post('/api/premios', async (req, res) => {
             sorteo12PM: sorteo12PM ? {
                 tripleA: sorteo12PM.tripleA || '',
                 tripleB: sorteo12PM.tripleB || '',
-                valorTripleA: sorteo12PM.valorTripleA || '',
-                valorTripleB: sorteo12PM.valorTripleB || ''
-            } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
+                valorTripleA: (parseFloat(sorteo12PM.valorTripleA) || 0), // Ensure number
+                valorTripleB: (parseFloat(sorteo12PM.valorTripleB) || 0)  // Ensure number
+            } : { tripleA: '', tripleB: '', valorTripleA: 0, valorTripleB: 0 },
             sorteo3PM: sorteo3PM ? {
                 tripleA: sorteo3PM.tripleA || '',
                 tripleB: sorteo3PM.tripleB || '',
-                valorTripleA: sorteo3PM.valorTripleA || '',
-                valorTripleB: sorteo3PM.valorTripleB || ''
-            } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' },
+                valorTripleA: (parseFloat(sorteo3PM.valorTripleA) || 0), // Ensure number
+                valorTripleB: (parseFloat(sorteo3PM.valorTripleB) || 0)  // Ensure number
+            } : { tripleA: '', tripleB: '', valorTripleA: 0, valorTripleB: 0 },
             sorteo5PM: sorteo5PM ? {
                 tripleA: sorteo5PM.tripleA || '',
                 tripleB: sorteo5PM.tripleB || '',
-                valorTripleA: sorteo5PM.valorTripleA || '',
-                valorTripleB: sorteo5PM.valorTripleB || ''
-            } : { tripleA: '', tripleB: '', valorTripleA: '', valorTripleB: '' }
+                valorTripleA: (parseFloat(sorteo5PM.valorTripleA) || 0), // Ensure number
+                valorTripleB: (parseFloat(sorteo5PM.valorTripleB) || 0)  // Ensure number
+            } : { tripleA: '', tripleB: '', valorTripleA: 0, valorTripleB: 0 }
         };
 
         await upsertPremiosInDB(premiosData);
@@ -1696,8 +1698,8 @@ app.post('/api/generate-whatsapp-customer-link', async (req, res) => {
         const ticketNumber = venta.ticketNumber;
         // 'numbers' ya debería ser un array debido a getVentasFromDB
         const purchasedNumbers = Array.isArray(venta.numbers) ? venta.numbers.join(', ') : '';
-        const valorUsd = venta.valueUSD.toFixed(2);
-        const valorBs = venta.valueBs.toFixed(2);
+        const valorUsd = (parseFloat(venta.valueUSD) || 0).toFixed(2);
+        const valorBs = (parseFloat(venta.valueBs) || 0).toFixed(2);
         const metodoPago = venta.paymentMethod;
         const referenciaPago = venta.paymentReference;
         const fechaCompra = moment(venta.purchaseDate).tz(CARACAS_TIMEZONE).format('DD/MM/YYYY HH:mm');
@@ -1788,7 +1790,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! �🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1876,11 +1878,11 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                         }
 
                         if (prizeConfigForHour) {
-                            if (currentCoincidentNumbersForHour.includes(parseInt(winningTripleA, 10)) && prizeConfigForHour.valorTripleA) {
-                                totalPotentialPrizeUSD += parseFloat(prizeConfigForHour.valorTripleA);
+                            if (currentCoincidentNumbersForHour.includes(parseInt(winningTripleA, 10)) && (parseFloat(prizeConfigForHour.valorTripleA) || 0)) {
+                                totalPotentialPrizeUSD += (parseFloat(prizeConfigForHour.valorTripleA) || 0);
                             }
-                            if (currentCoincidentNumbersForHour.includes(parseInt(winningTripleB, 10)) && prizeConfigForHour.valorTripleB) {
-                                totalPotentialPrizeUSD += parseFloat(prizeConfigForHour.valorTripleB);
+                            if (currentCoincidentNumbersForHour.includes(parseInt(winningTripleB, 10)) && (parseFloat(prizeConfigForHour.valorTripleB) || 0)) {
+                                totalPotentialPrizeUSD += (parseFloat(prizeConfigForHour.valorTripleB) || 0);
                             }
                         }
                         coincidentNumbers = Array.from(new Set([...coincidentNumbers, ...currentCoincidentNumbersForHour]));
@@ -2357,6 +2359,13 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
         await client.query('TRUNCATE TABLE comprobantes RESTART IDENTITY;');
         await client.query('TRUNCATE TABLE premios RESTART IDENTITY;'); // También limpiar premios
 
+        // Limpiar archivos de comprobantes subidos
+        const files = await fs.readdir(UPLOADS_DIR);
+        for (const file of files) {
+            await fs.unlink(path.join(UPLOADS_DIR, file));
+        }
+        console.log('Archivos de comprobantes en /uploads eliminados.');
+
         // Resetear configuración a valores iniciales (o un estado limpio)
         const configuracion = await getConfiguracionFromDB(); // Obtener la configuración actual para mantener mail/whatsapp
         const resetConfig = {
@@ -2382,13 +2391,6 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
             block_reason_message: ""
         };
         await updateConfiguracionInDB(resetConfig);
-
-        // Opcional: Limpiar archivos de comprobantes subidos
-        const files = await fs.readdir(UPLOADS_DIR);
-        for (const file of files) {
-            await fs.unlink(path.join(UPLOADS_DIR, file));
-        }
-        console.log('Archivos de comprobantes en /uploads eliminados.');
 
         await client.query('COMMIT'); // Confirmar transacción
 
