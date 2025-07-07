@@ -57,7 +57,7 @@ async function getConfiguracionFromDB() {
         const res = await client.query('SELECT * FROM configuracion LIMIT 1');
         if (res.rows.length > 0) {
             const config = res.rows[0];
-            // El driver pg automáticamente parsea JSONB, pero esta verificación es robusta
+            // El driver pg automáticamente parsear JSONB, pero esta verificación es robusta
             // en caso de que los datos se hayan insertado como strings antes de la migración.
             if (typeof config.tasa_dolar === 'string') config.tasa_dolar = JSON.parse(config.tasa_dolar);
             if (typeof config.admin_whatsapp_numbers === 'string') config.admin_whatsapp_numbers = JSON.parse(config.admin_whatsapp_numbers);
@@ -206,8 +206,8 @@ async function insertVentaInDB(ventaData) {
         const query = `
             INSERT INTO ventas (
                 id, "purchaseDate", "drawDate", "drawTime", "drawNumber", "ticketNumber",
-                "buyerName", "buyerPhone", numbers, "valueUSD", "valueBs", paymentMethod,
-                paymentReference, voucherURL, validationStatus
+                "buyerName", "buyerPhone", numbers, "valueUSD", "valueBs", "paymentMethod",
+                "paymentReference", "voucherURL", "validationStatus"
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         `;
         const values = [
@@ -236,11 +236,11 @@ async function updateVentaStatusInDB(ventaId, validationStatus, voidedReason = n
     try {
         const query = `
             UPDATE ventas SET
-                validationStatus = $1,
-                voidedReason = $2,
-                voidedAt = $3,
-                closedReason = $4,
-                closedAt = $5
+                "validationStatus" = $1,
+                "voidedReason" = $2,
+                "voidedAt" = $3,
+                "closedReason" = $4,
+                "closedAt" = $5
             WHERE id = $6
             RETURNING *;
         `;
@@ -259,7 +259,7 @@ async function updateVentaStatusInDB(ventaId, validationStatus, voidedReason = n
 async function updateVentaVoucherURLInDB(ventaId, voucherURL) {
     const client = await pool.connect();
     try {
-        await client.query('UPDATE ventas SET voucherURL = $1 WHERE id = $2', [voucherURL, ventaId]);
+        await client.query('UPDATE ventas SET "voucherURL" = $1 WHERE id = $2', [voucherURL, ventaId]);
     } finally {
         client.release();
     }
@@ -1317,35 +1317,44 @@ async function generateDatabaseBackupZipBuffer() {
 
     const client = await pool.connect();
     try {
+        // Se han añadido comillas dobles a todos los nombres de columna en camelCase para asegurar la coincidencia exacta con PostgreSQL.
         const tablesToExport = [
             { name: 'configuracion', columns: ['id', 'pagina_bloqueada', 'fecha_sorteo', 'precio_ticket', 'numero_sorteo_correlativo', 'ultimo_numero_ticket', 'ultima_fecha_resultados_zulia', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports', 'mail_config_host', 'mail_config_port', 'mail_config_secure', 'mail_config_user', 'mail_config_pass', 'mail_config_sender_name', 'raffleNumbersInitialized', 'last_sales_notification_count', 'sales_notification_threshold', 'block_reason_message'] },
-            { name: 'numeros', columns: ['id', 'numero', 'comprado', 'originalDrawNumber'] },
-            { name: 'ventas', columns: ['id', 'purchaseDate', 'drawDate', 'drawTime', 'drawNumber', 'ticketNumber', '"buyerName"', '"buyerPhone"', 'numbers', '"valueUSD"', '"valueBs"', 'paymentMethod', 'paymentReference', 'voucherURL', 'validationStatus', 'voidedReason', 'voidedAt', 'closedReason', 'closedAt'] },
+            { name: 'numeros', columns: ['id', 'numero', 'comprado', '"originalDrawNumber"'] },
+            { name: 'ventas', columns: ['id', '"purchaseDate"', '"drawDate"', '"drawTime"', '"drawNumber"', '"ticketNumber"', '"buyerName"', '"buyerPhone"', 'numbers', '"valueUSD"', '"valueBs"', '"paymentMethod"', '"paymentReference"', '"voucherURL"', '"validationStatus"', '"voidedReason"', '"voidedAt"', '"closedReason"', '"closedAt"'] },
             { name: 'horarios_zulia', columns: ['id', 'hora'] },
             { name: 'resultados_zulia', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'premios', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'ganadores', columns: ['id', 'data'] }, // 'data' is JSONB
-            { name: 'comprobantes', columns: ['id', 'ventaId', 'comprador', 'telefono', 'comprobante_nombre', 'comprobante_tipo', 'fecha_compra', 'url_comprobante'] }
+            { name: 'comprobantes', columns: ['id', '"ventaId"', 'comprador', 'telefono', 'comprobante_nombre', 'comprobante_tipo', 'fecha_compra', 'url_comprobante'] }
         ];
 
         for (const tableInfo of tablesToExport) {
             try {
-                const res = await client.query(`SELECT ${tableInfo.columns.map(col => `"${col.replace(/"/g, '')}"`).join(',')} FROM ${tableInfo.name}`); // Quoting all column names for safety
+                // Construir la consulta SELECT citando los nombres de columna para PostgreSQL
+                const quotedColumns = tableInfo.columns.map(col => {
+                    // Si el nombre de la columna ya tiene comillas dobles, usarlo tal cual.
+                    // De lo contrario, añadir comillas dobles para forzar la sensibilidad a mayúsculas/minúsculas.
+                    return col.startsWith('"') && col.endsWith('"') ? col : `"${col}"`;
+                }).join(', ');
+
+                const res = await client.query(`SELECT ${quotedColumns} FROM ${tableInfo.name}`);
                 const data = res.rows;
 
                 const workbook = new ExcelJS.Workbook();
                 const worksheet = workbook.addWorksheet(tableInfo.name);
 
                 if (data.length > 0) {
-                    const columns = tableInfo.columns.map(key => ({ header: key, key: key.replace(/"/g, ''), width: 25 })); // Remove quotes for key
+                    // Usar los nombres de columna originales (sin comillas) como keys para el worksheet
+                    const columns = tableInfo.columns.map(key => ({ header: key.replace(/"/g, ''), key: key.replace(/"/g, ''), width: 25 }));
                     worksheet.columns = columns;
                     worksheet.addRow(columns.map(col => col.header));
                     data.forEach(row => {
                         const rowData = {};
                         columns.forEach(col => {
-                            let value = row[col.key];
+                            let value = row[col.key]; // Acceder a la propiedad del objeto de fila por su clave
                             if (typeof value === 'object' && value !== null) {
-                                // Handle JSONB columns explicitly
+                                // Manejar columnas JSONB explícitamente
                                 if (['data', 'numbers', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports'].includes(col.key)) {
                                     rowData[col.key] = JSON.stringify(value);
                                 } else if (Array.isArray(value)) {
@@ -1779,7 +1788,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! �🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
