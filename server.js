@@ -206,13 +206,14 @@ async function insertVentaInDB(ventaData) {
         const query = `
             INSERT INTO ventas (
                 id, "purchaseDate", "drawDate", "drawTime", "drawNumber", "ticketNumber",
-                buyername, "buyerPhone", numbers, valueUSD, valueBs, paymentMethod,
+                "buyerName", "buyerPhone", numbers, valueUSD, valueBs, paymentMethod,
                 paymentReference, voucherURL, validationStatus
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         `;
         const values = [
             ventaData.id, ventaData.purchaseDate, ventaData.drawDate, ventaData.drawTime, ventaData.drawNumber, ventaData.ticketNumber,
-            ventaData.buyername, ventaData.buyerPhone, JSON.stringify(ventaData.numbers), ventaData.valueUSD, ventaData.valueBs, ventaData.paymentMethod,
+            // ¡IMPORTANTE! Se corrigió 'buyername' a '"buyerName"' para que coincida con la capitalización de la columna en la base de datos.
+            ventaData.buyerName, ventaData.buyerPhone, JSON.stringify(ventaData.numbers), ventaData.valueUSD, ventaData.valueBs, ventaData.paymentMethod,
             ventaData.paymentReference, ventaData.voucherURL, ventaData.validationStatus
         ];
         await client.query(query, values);
@@ -944,7 +945,7 @@ app.post('/api/comprar', async (req, res) => {
             drawTime: horaSorteo,
             drawNumber: configuracion.numero_sorteo_correlativo,
             ticketNumber: numeroTicket,
-            buyername: comprador,
+            buyerName: comprador, // CORREGIDO: Se cambió 'buyername' a 'buyerName'
             buyerPhone: telefono,
             numbers: numerosSeleccionados,
             valueUSD: parseFloat(valorUsd),
@@ -1052,7 +1053,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         await insertComprobanteInDB({
             id: Date.now(), // Nuevo ID para el registro de comprobante
             ventaId: ventaId,
-            comprador: ventaData.buyername,
+            comprador: ventaData.buyerName, // CORREGIDO: Se cambió 'buyername' a 'buyerName'
             telefono: ventaData.buyerPhone,
             comprobante_nombre: fileName,
             comprobante_tipo: comprobanteFile.mimetype,
@@ -1068,7 +1069,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
             const subject = `Nuevo Comprobante de Pago para Venta #${ventaData.ticketNumber}`;
             const htmlContent = `
                 <p>Se ha subido un nuevo comprobante de pago para la venta con Ticket Nro. <strong>${ventaData.ticketNumber}</strong>.</p>
-                <p><b>Comprador:</b> ${ventaData.buyername}</p>
+                <p><b>Comprador:</b> ${ventaData.buyerName}</p>
                 <p><b>Teléfono:</b> ${ventaData.buyerPhone}</p>
                 <p><b>Números:</b> ${ventaData.numbers.join(', ')}</p>
                 <p><b>Monto USD:</b> $${ventaData.valueUSD.toFixed(2)}</p>
@@ -1254,7 +1255,7 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
         { header: 'Hora Sorteo', key: 'drawTime', width: 15 },
         { header: 'Nro. Sorteo', key: 'drawNumber', width: 15 },
         { header: 'Nro. Ticket', key: 'ticketNumber', width: 15 },
-        { header: 'Comprador', key: 'buyername', width: 25 },
+        { header: 'Comprador', key: 'buyerName', width: 25 }, // CORREGIDO: Se cambió 'buyername' a 'buyerName'
         { header: 'Teléfono', key: 'buyerPhone', width: 20 },
         { header: 'Números', key: 'numbers', width: 30 },
         { header: 'Valor USD', key: 'valueUSD', width: 15 },
@@ -1278,7 +1279,7 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
             drawTime: venta.drawTime || 'N/A',
             drawNumber: venta.drawNumber || '',
             ticketNumber: venta.ticketNumber || '',
-            buyername: venta.buyername || '',
+            buyerName: venta.buyerName || '', // CORREGIDO: Se cambió 'buyername' a 'buyerName'
             buyerPhone: venta.buyerPhone || '',
             // 'numbers' ya debería ser un array debido a getVentasFromDB
             numbers: (Array.isArray(venta.numbers) ? venta.numbers.join(', ') : ''),
@@ -1320,7 +1321,7 @@ async function generateDatabaseBackupZipBuffer() {
         const tablesToExport = [
             { name: 'configuracion', columns: ['id', 'pagina_bloqueada', 'fecha_sorteo', 'precio_ticket', 'numero_sorteo_correlativo', 'ultimo_numero_ticket', 'ultima_fecha_resultados_zulia', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports', 'mail_config_host', 'mail_config_port', 'mail_config_secure', 'mail_config_user', 'mail_config_pass', 'mail_config_sender_name', 'raffleNumbersInitialized', 'last_sales_notification_count', 'sales_notification_threshold', 'block_reason_message'] },
             { name: 'numeros', columns: ['id', 'numero', 'comprado', 'originalDrawNumber'] },
-            { name: 'ventas', columns: ['id', 'purchaseDate', 'drawDate', 'drawTime', 'drawNumber', 'ticketNumber', '"buyername"', '"buyerPhone"', 'numbers', 'valueUSD', 'valueBs', 'paymentMethod', 'paymentReference', 'voucherURL', 'validationStatus', 'voidedReason', 'voidedAt', 'closedReason', 'closedAt'] }, // CAMBIO AQUÍ
+            { name: 'ventas', columns: ['id', 'purchaseDate', 'drawDate', 'drawTime', 'drawNumber', 'ticketNumber', '"buyerName"', '"buyerPhone"', 'numbers', 'valueUSD', 'valueBs', 'paymentMethod', 'paymentReference', 'voucherURL', 'validationStatus', 'voidedReason', 'voidedAt', 'closedReason', 'closedAt'] }, // CORREGIDO: Se cambió '"buyername"' a '"buyerName"'
             { name: 'horarios_zulia', columns: ['id', 'hora'] },
             { name: 'resultados_zulia', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'premios', columns: ['id', 'data'] }, // 'data' is JSONB
@@ -1735,7 +1736,7 @@ app.post('/api/generate-whatsapp-false-payment-link', async (req, res) => {
 
         const customerPhoneNumber = venta.buyerPhone;
         const ticketNumber = venta.ticketNumber;
-        const comprador = venta.buyername || 'Estimado cliente';
+        const comprador = venta.buyerName || 'Estimado cliente'; // CORREGIDO: Se cambió 'buyername' a 'buyerName'
 
         const whatsappMessage = encodeURIComponent(
             `¡Hola ${comprador}! 👋\n\n` +
@@ -1760,7 +1761,7 @@ app.post('/api/notify-winner', async (req, res) => {
     const {
         ventaId, // No se usa directamente en el mensaje de WhatsApp, pero puede ser útil para logs
         buyerPhone,
-        buyername,
+        buyerName, // CORREGIDO: Se cambió 'buyername' a 'buyerName'
         numbers,
         drawDate,
         drawTime,
@@ -1770,7 +1771,7 @@ app.post('/api/notify-winner', async (req, res) => {
         totalPotentialPrizeUSD
     } = req.body;
 
-    if (!buyerPhone || !buyername || !numbers || !drawDate || !drawTime || !ticketNumber || !coincidentNumbers || totalPotentialPrizeBs === undefined || totalPotentialPrizeUSD === undefined) {
+    if (!buyerPhone || !buyerName || !numbers || !drawDate || !drawTime || !ticketNumber || !coincidentNumbers || totalPotentialPrizeBs === undefined || totalPotentialPrizeUSD === undefined) {
         return res.status(400).json({ message: 'Faltan datos requeridos para enviar la notificación de ganador.' });
     }
 
@@ -1779,7 +1780,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyername}! 🎉🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -1794,7 +1795,7 @@ app.post('/api/notify-winner', async (req, res) => {
 
         const whatsappLink = `https://api.whatsapp.com/send?phone=${buyerPhone}&text=${whatsappMessage}`;
 
-        console.log(`Generado enlace de WhatsApp para notificar a ${buyername} (${buyerPhone}): ${whatsappLink}`);
+        console.log(`Generado enlace de WhatsApp para notificar a ${buyerName} (${buyerPhone}): ${whatsappLink}`);
 
         res.status(200).json({ message: 'Enlace de notificación de WhatsApp generado con éxito. Se intentará abrir WhatsApp.', whatsappLink: whatsappLink });
 
@@ -1882,7 +1883,7 @@ app.post('/api/tickets/procesar-ganadores', async (req, res) => {
                     totalPotentialPrizeBs = totalPotentialPrizeUSD * configuracion.tasa_dolar[0]; // Acceder al valor numérico del array
                     ticketsGanadoresParaEsteSorteo.push({
                         ticketNumber: venta.ticketNumber,
-                        buyername: venta.buyername,
+                        buyerName: venta.buyerName, // CORREGIDO: Se cambió 'buyername' a 'buyerName'
                         buyerPhone: venta.buyerPhone,
                         numbers: ventaNumbers, // Asegurarse de que sea el array
                         drawDate: venta.drawDate,
