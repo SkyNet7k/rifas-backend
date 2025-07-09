@@ -635,31 +635,47 @@ async function ensureTablesExist() {
         await client.query(`
             CREATE TABLE IF NOT EXISTS resultados_zulia (
                 id SERIAL PRIMARY KEY,
-                data JSONB NOT NULL,
-                UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
+                data JSONB NOT NULL
+                -- REMOVIDO: UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
             );
         `);
-        console.log('DB: Tabla "resultados_zulia" verificada/creada.');
+        // NUEVO: Crear índice UNIQUE sobre la expresión para 'resultados_zulia' por separado
+        await client.query(`
+            CREATE UNIQUE INDEX IF NOT EXISTS unique_resultados_zulia_fecha_tipoloteria
+            ON resultados_zulia ((data->>'fecha'), (data->>'tipoLoteria'));
+        `).catch(e => console.warn(`Advertencia: El índice unique_resultados_zulia_fecha_tipoloteria ya existe o hubo un error al añadirlo: ${e.message}`));
+        console.log('DB: Tabla "resultados_zulia" verificada/creada (y su índice).');
+
 
         // Tabla de premios (premios)
         await client.query(`
             CREATE TABLE IF NOT EXISTS premios (
                 id SERIAL PRIMARY KEY,
-                data JSONB NOT NULL,
-                UNIQUE ((data->>'fechaSorteo'))
+                data JSONB NOT NULL
+                -- REMOVIDO: UNIQUE ((data->>'fechaSorteo'))
             );
         `);
-        console.log('DB: Tabla "premios" verificada/creada.');
+        // NUEVO: Crear índice UNIQUE sobre la expresión para 'premios' por separado
+        await client.query(`
+            CREATE UNIQUE INDEX IF NOT EXISTS unique_premios_fechasorteo
+            ON premios ((data->>'fechaSorteo'));
+        `).catch(e => console.warn(`Advertencia: El índice unique_premios_fechasorteo ya existe o hubo un error al añadirlo: ${e.message}`));
+        console.log('DB: Tabla "premios" verificada/creada (y su índice).');
 
         // Tabla de ganadores (ganadores)
         await client.query(`
             CREATE TABLE IF NOT EXISTS ganadores (
                 id SERIAL PRIMARY KEY,
-                data JSONB NOT NULL,
-                UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
+                data JSONB NOT NULL
+                -- REMOVIDO: UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
             );
         `);
-        console.log('DB: Tabla "ganadores" verificada/creada.');
+        // NUEVO: Crear índice UNIQUE sobre la expresión para 'ganadores' por separado
+        await client.query(`
+            CREATE UNIQUE INDEX IF NOT EXISTS unique_ganadores_drawdata
+            ON ganadores ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'));
+        `).catch(e => console.warn(`Advertencia: El índice unique_ganadores_drawdata ya existe o hubo un error al añadirlo: ${e.message}`));
+        console.log('DB: Tabla "ganadores" verificada/creada (y su índice).');
 
         // INICIO DE NUEVA LÓGICA: CREACIÓN DE LA TABLA 'sellers'
         await client.query(`
@@ -2069,7 +2085,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! �🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! 🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
