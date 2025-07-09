@@ -607,6 +607,16 @@ async function ensureTablesExist() {
         `);
         console.log('DB: Tabla "ventas" verificada/creada.');
 
+        // AÑADIDO: ALTER TABLE para añadir las columnas de vendedor si no existen
+        await client.query(`
+            ALTER TABLE ventas
+            ADD COLUMN IF NOT EXISTS "sellerId" VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS "sellerName" VARCHAR(255),
+            ADD COLUMN IF NOT EXISTS "sellerAgency" VARCHAR(255);
+        `);
+        console.log('DB: Columnas de vendedor en tabla "ventas" verificadas/añadidas.');
+
+
         // Tabla de comprobantes (comprobantes)
         await client.query(`
             CREATE TABLE IF NOT EXISTS comprobantes (
