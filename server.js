@@ -39,6 +39,7 @@ const API_BASE_URL = process.env.API_BASE_URL || 'https://rifas-t-loterias.onren
 // Rutas a tus directorios locales (para uploads y reports, no para JSONs)
 const UPLOADS_DIR = path.join(__dirname, 'uploads'); // Para comprobantes
 const REPORTS_DIR = path.join(__dirname, 'reports'); // Para reportes Excel
+const COMPROBANTES_DIR = path.join(UPLOADS_DIR, 'comprobantes'); // Asegurarse de que esta ruta esté definida
 
 const SALES_THRESHOLD_PERCENTAGE = 80;
 const DRAW_SUSPENSION_HOUR = 12;
@@ -185,7 +186,9 @@ async function upsertNumerosInDB(numerosArray) {
 async function getVentasFromDB() {
     const client = await pool.connect();
     try {
-        const res = await client.query('SELECT * FROM ventas');
+        // INICIO DE MODIFICACIÓN: Incluir campos de vendedor en la consulta
+        const res = await client.query('SELECT *, "sellerId", "sellerName", "sellerAgency" FROM ventas');
+        // FIN DE MODIFICACIÓN: Incluir campos de vendedor en la consulta
         // Asegurarse de que el campo 'numbers' (JSONB) sea un array de JS
         return res.rows.map(row => ({
             ...row,
@@ -203,18 +206,21 @@ async function getVentasFromDB() {
 async function insertVentaInDB(ventaData) {
     const client = await pool.connect();
     try {
+        // INICIO DE MODIFICACIÓN: Añadir campos de vendedor a la inserción
         const query = `
             INSERT INTO ventas (
                 id, "purchaseDate", "drawDate", "drawTime", "drawNumber", "ticketNumber",
                 "buyerName", "buyerPhone", numbers, "valueUSD", "valueBs", "paymentMethod",
-                "paymentReference", "voucherURL", "validationStatus"
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                "paymentReference", "voucherURL", "validationStatus", "sellerId", "sellerName", "sellerAgency"
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         `;
         const values = [
             ventaData.id, ventaData.purchaseDate, ventaData.drawDate, ventaData.drawTime, ventaData.drawNumber, ventaData.ticketNumber,
             ventaData.buyerName, ventaData.buyerPhone, JSON.stringify(ventaData.numbers), ventaData.valueUSD, ventaData.valueBs, ventaData.paymentMethod,
-            ventaData.paymentReference, ventaData.voucherURL, ventaData.validationStatus
+            ventaData.paymentReference, ventaData.voucherURL, ventaData.validationStatus,
+            ventaData.sellerId, ventaData.sellerName, ventaData.sellerAgency // NUEVOS CAMPOS
         ];
+        // FIN DE MODIFICACIÓN: Añadir campos de vendedor a la inserción
         await client.query(query, values);
     } finally {
         client.release();
@@ -456,12 +462,234 @@ async function upsertGanadoresInDB(ganadoresEntry) {
     }
 }
 
+// INICIO DE NUEVA LÓGICA: FUNCIONES AUXILIARES PARA VENDEDORES
+/**
+ * Obtiene un vendedor por su ID desde la base de datos.
+ * @param {string} sellerId - ID del vendedor.
+ * @returns {Promise<object|null>} El objeto vendedor o null si no se encuentra.
+ */
+async function getSellerByIdFromDB(sellerId) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('SELECT * FROM sellers WHERE seller_id = $1', [sellerId]);
+        return res.rows[0] || null;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Inserta o actualiza un vendedor en la base de datos.
+ * @param {object} sellerData - Los datos del vendedor a insertar/actualizar.
+ * @returns {Promise<object>} El objeto vendedor insertado/actualizado.
+ */
+async function upsertSellerInDB(sellerData) {
+    const client = await pool.connect();
+    try {
+        const query = `
+            INSERT INTO sellers (seller_id, full_name, id_card, agency_name, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, NOW(), NOW())
+            ON CONFLICT (seller_id) DO UPDATE SET
+                full_name = EXCLUDED.full_name,
+                id_card = EXCLUDED.id_card,
+                agency_name = EXCLUDED.agency_name,
+                updated_at = NOW()
+            RETURNING *;
+        `;
+        const res = await client.query(query, [sellerData.seller_id, sellerData.full_name, sellerData.id_card, sellerData.agency_name]);
+        return res.rows[0];
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Obtiene todos los vendedores desde la base de datos.
+ * @returns {Promise<Array>} Array de objetos de vendedores.
+ */
+async function getAllSellersFromDB() {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('SELECT * FROM sellers ORDER BY full_name ASC');
+        return res.rows;
+    } finally {
+        client.release();
+    }
+}
+
+/**
+ * Elimina un vendedor de la base de datos.
+ * @param {string} sellerId - ID del vendedor a eliminar.
+ * @returns {Promise<object|null>} El objeto vendedor eliminado o null si no se encontró.
+ */
+async function deleteSellerFromDB(sellerId) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('DELETE FROM sellers WHERE seller_id = $1 RETURNING *', [sellerId]);
+        return res.rows[0] || null;
+    } finally {
+        client.release();
+    }
+}
+// FIN DE NUEVA LÓGICA: FUNCIONES AUXILIARES PARA VENDEDORES
+
+
+// Función para asegurar que las tablas existan
+async function ensureTablesExist() {
+    const client = await pool.connect();
+    try {
+        // Tabla de configuración (configuracion)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS configuracion (
+                id SERIAL PRIMARY KEY,
+                pagina_bloqueada BOOLEAN DEFAULT FALSE,
+                fecha_sorteo DATE DEFAULT CURRENT_DATE,
+                precio_ticket NUMERIC(10, 2) DEFAULT 0.50,
+                numero_sorteo_correlativo INTEGER DEFAULT 1,
+                ultimo_numero_ticket INTEGER DEFAULT 0,
+                ultima_fecha_resultados_zulia DATE,
+                tasa_dolar JSONB DEFAULT '[36.50]'::jsonb,
+                admin_whatsapp_numbers JSONB DEFAULT '[]'::jsonb,
+                admin_email_for_reports JSONB DEFAULT '[]'::jsonb,
+                mail_config_host TEXT DEFAULT '',
+                mail_config_port INTEGER DEFAULT 587,
+                mail_config_secure BOOLEAN DEFAULT FALSE,
+                mail_config_user TEXT DEFAULT '',
+                mail_config_pass TEXT DEFAULT '',
+                mail_config_sender_name TEXT DEFAULT '',
+                raffleNumbersInitialized BOOLEAN DEFAULT FALSE,
+                last_sales_notification_count INTEGER DEFAULT 0,
+                sales_notification_threshold INTEGER DEFAULT 20,
+                block_reason_message TEXT DEFAULT ''
+            );
+        `);
+        console.log('DB: Tabla "configuracion" verificada/creada.');
+
+        // Tabla de números (numeros)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS numeros (
+                id SERIAL PRIMARY KEY,
+                numero VARCHAR(3) UNIQUE NOT NULL,
+                comprado BOOLEAN DEFAULT FALSE,
+                "originalDrawNumber" INTEGER -- Usar comillas para camelCase
+            );
+        `);
+        console.log('DB: Tabla "numeros" verificada/creada.');
+
+        // Tabla de ventas (ventas)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS ventas (
+                id BIGINT PRIMARY KEY,
+                "purchaseDate" TIMESTAMP WITH TIME ZONE NOT NULL,
+                "drawDate" DATE NOT NULL,
+                "drawTime" VARCHAR(50) NOT NULL,
+                "drawNumber" INTEGER NOT NULL,
+                "ticketNumber" VARCHAR(255) UNIQUE NOT NULL,
+                "buyerName" VARCHAR(255) NOT NULL,
+                "buyerPhone" VARCHAR(255) NOT NULL,
+                numbers JSONB NOT NULL,
+                "valueUSD" NUMERIC(10, 2) NOT NULL,
+                "valueBs" NUMERIC(10, 2) NOT NULL,
+                "paymentMethod" VARCHAR(255) NOT NULL,
+                "paymentReference" VARCHAR(255),
+                "voucherURL" TEXT,
+                "validationStatus" VARCHAR(50) DEFAULT 'Pendiente',
+                "voidedReason" TEXT,
+                "voidedAt" TIMESTAMP WITH TIME ZONE,
+                "closedReason" TEXT,
+                "closedAt" TIMESTAMP WITH TIME ZONE,
+                -- INICIO DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
+                "sellerId" VARCHAR(255),
+                "sellerName" VARCHAR(255),
+                "sellerAgency" VARCHAR(255)
+                -- FIN DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
+            );
+        `);
+        console.log('DB: Tabla "ventas" verificada/creada.');
+
+        // Tabla de comprobantes (comprobantes)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS comprobantes (
+                id BIGINT PRIMARY KEY,
+                "ventaId" BIGINT REFERENCES ventas(id),
+                comprador VARCHAR(255),
+                telefono VARCHAR(255),
+                comprobante_nombre VARCHAR(255),
+                comprobante_tipo VARCHAR(100),
+                fecha_compra DATE,
+                url_comprobante TEXT
+            );
+        `);
+        console.log('DB: Tabla "comprobantes" verificada/creada.');
+
+        // Tabla de horarios_zulia (horarios_zulia)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS horarios_zulia (
+                id SERIAL PRIMARY KEY,
+                hora VARCHAR(50) NOT NULL UNIQUE
+            );
+        `);
+        console.log('DB: Tabla "horarios_zulia" verificada/creada.');
+
+        // Tabla de resultados_zulia (resultados_zulia)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS resultados_zulia (
+                id SERIAL PRIMARY KEY,
+                data JSONB NOT NULL,
+                UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
+            );
+        `);
+        console.log('DB: Tabla "resultados_zulia" verificada/creada.');
+
+        // Tabla de premios (premios)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS premios (
+                id SERIAL PRIMARY KEY,
+                data JSONB NOT NULL,
+                UNIQUE ((data->>'fechaSorteo'))
+            );
+        `);
+        console.log('DB: Tabla "premios" verificada/creada.');
+
+        // Tabla de ganadores (ganadores)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS ganadores (
+                id SERIAL PRIMARY KEY,
+                data JSONB NOT NULL,
+                UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
+            );
+        `);
+        console.log('DB: Tabla "ganadores" verificada/creada.');
+
+        // INICIO DE NUEVA LÓGICA: CREACIÓN DE LA TABLA 'sellers'
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS sellers (
+                seller_id VARCHAR(255) PRIMARY KEY,
+                full_name VARCHAR(255) NOT NULL,
+                id_card VARCHAR(255) NOT NULL,
+                agency_name VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        console.log('DB: Tabla "sellers" verificada/creada.');
+        // FIN DE NUEVA LÓGICA: CREACIÓN DE LA TABLA 'sellers'
+
+    } catch (error) {
+        console.error('ERROR_DB_INIT: Error al asegurar que las tablas existan:', error.message);
+        throw error; // Re-lanzar para detener la inicialización si la DB no está lista
+    } finally {
+        client.release();
+    }
+}
+
 
 // Función para asegurar que los directorios existan (solo para archivos locales como comprobantes y reportes)
 async function ensureDataAndComprobantesDirs() {
     try {
         await fs.mkdir(UPLOADS_DIR, { recursive: true });
         await fs.mkdir(REPORTS_DIR, { recursive: true });
+        await fs.mkdir(COMPROBANTES_DIR, { recursive: true }); // Asegurarse de crear el subdirectorio
         console.log('Directorios locales asegurados.');
     } catch (error) {
         console.error('Error al asegurar directorios locales:', error);
@@ -866,7 +1094,8 @@ app.post('/api/numeros', async (req, res) => {
         await upsertNumerosInDB(updatedNumbers); // Usar upsert para actualizar o insertar
         console.log('DEBUG_BACKEND: Números actualizados en DB.');
         res.json({ message: 'Números actualizados con éxito.' });
-    } catch (error) {
+    }
+    catch (error) {
         console.error('Error al actualizar números en DB:', error.message);
         res.status(500).json({ message: 'Error interno del servidor al actualizar números.' });
     }
@@ -897,7 +1126,13 @@ app.get('/api/compra', (req, res) => {
 // Ruta para la compra de tickets
 app.post('/api/comprar', async (req, res) => {
     console.log('DEBUG_BACKEND: Recibida solicitud POST /api/comprar.');
-    const { numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago, comprador, telefono, horaSorteo } = req.body;
+    const {
+        numerosSeleccionados, valorUsd, valorBs, metodoPago, referenciaPago,
+        comprador, telefono, horaSorteo,
+        // INICIO DE NUEVA LÓGICA: CAMPOS DEL VENDEDOR EN LA COMPRA
+        sellerId, sellerName, sellerAgency
+        // FIN DE NUEVA LÓGICA: CAMPOS DEL VENDEDOR EN LA COMPRA
+    } = req.body;
 
     if (!numerosSeleccionados || numerosSeleccionados.length === 0 || !valorUsd || !valorBs || !metodoPago || !comprador || !telefono || !horaSorteo) {
         console.error('DEBUG_BACKEND: Faltan datos requeridos para la compra.');
@@ -965,7 +1200,12 @@ app.post('/api/comprar', async (req, res) => {
             paymentMethod: metodoPago,
             paymentReference: referenciaPago,
             voucherURL: null,
-            validationStatus: 'Pendiente'
+            validationStatus: 'Pendiente',
+            // INICIO DE NUEVA LÓGICA: CAMPOS DEL VENDEDOR EN LA NUEVA VENTA
+            sellerId: sellerId,
+            sellerName: sellerName,
+            sellerAgency: sellerAgency
+            // FIN DE NUEVA LÓGICA: CAMPOS DEL VENDEDOR EN LA NUEVA VENTA
         };
 
         await insertVentaInDB(nuevaVenta);
@@ -1053,12 +1293,12 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
         const timestamp = now.format('YYYYMMDD_HHmmss');
         const originalExtension = path.extname(comprobanteFile.name);
         const fileName = `comprobante_${ventaId}_${timestamp}${originalExtension}`;
-        const filePath = path.join(UPLOADS_DIR, fileName);
+        const filePath = path.join(COMPROBANTES_DIR, fileName); // Usar COMPROBANTES_DIR
 
         await comprobanteFile.mv(filePath);
 
         // Actualizar la URL del comprobante en la venta
-        await updateVentaVoucherURLInDB(ventaId, `/uploads/${fileName}`);
+        await updateVentaVoucherURLInDB(ventaId, `/uploads/comprobantes/${fileName}`); // Ajustar URL para el subdirectorio
         console.log(`Voucher URL actualizado en DB para venta ${ventaId}.`);
 
         // Registrar en comprobantes (metadata)
@@ -1070,7 +1310,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
             comprobante_nombre: fileName,
             comprobante_tipo: comprobanteFile.mimetype,
             fecha_compra: moment(ventaData.purchaseDate).format('YYYY-MM-DD'),
-            url_comprobante: `/uploads/${fileName}`
+            url_comprobante: `/uploads/comprobantes/${fileName}` // Ajustar URL para el subdirectorio
         });
         console.log(`Comprobante registrado en DB.`);
 
@@ -1088,7 +1328,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
                 <p><b>Monto Bs:</b> Bs ${(parseFloat(ventaData.valueBs) || 0).toFixed(2)}</p>
                 <p><b>Método de Pago:</b> ${ventaData.paymentMethod}</p>
                 <p><b>Referencia:</b> ${ventaData.paymentReference}</p>
-                <p>Haz clic <a href="${API_BASE_URL}/uploads/${fileName}" target="_blank">aquí</a> para ver el comprobante.</p>
+                <p>Haz clic <a href="${API_BASE_URL}/uploads/comprobantes/${fileName}" target="_blank">aquí</a> para ver el comprobante.</p>
                 <p>También puedes verlo en el panel de administración.</p>
             `;
             const attachments = [
@@ -1104,7 +1344,7 @@ app.post('/api/upload-comprobante/:ventaId', async (req, res) => {
             }
         }
 
-        res.status(200).json({ message: 'Comprobante subido y asociado con éxito.', url: `/uploads/${fileName}` });
+        res.status(200).json({ message: 'Comprobante subido y asociado con éxito.', url: `/uploads/comprobantes/${fileName}` });
     } catch (error) {
         if (client) await client.query('ROLLBACK');
         console.error('Error al subir el comprobante:', error.message);
@@ -1281,7 +1521,12 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
         { header: 'Razón Anulación', key: 'voidedReason', width: 30 },
         { header: 'Fecha Anulación', key: 'voidedAt', width: 25 },
         { header: 'Razón Cierre', key: 'closedReason', width: 30 },
-        { header: 'Fecha Cierre', key: 'closedAt', width: 25 }
+        { header: 'Fecha Cierre', key: 'closedAt', width: 25 },
+        // INICIO DE NUEVA LÓGICA: COLUMNAS DE VENDEDOR EN EL REPORTE
+        { header: 'ID Vendedor', key: 'sellerId', width: 20 },
+        { header: 'Nombre Vendedor', key: 'sellerName', width: 30 },
+        { header: 'Agencia Vendedor', key: 'sellerAgency', width: 30 }
+        // FIN DE NUEVA LÓGICA: COLUMNAS DE VENDEDOR EN EL REPORTE
     ];
     worksheet.addRow(ventasHeaders.map(h => h.header));
 
@@ -1306,7 +1551,12 @@ async function generateGenericSalesExcelReport(salesData, config, reportTitle, f
             voidedReason: venta.voidedReason || '',
             voidedAt: venta.voidedAt ? moment(venta.voidedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '',
             closedReason: venta.closedReason || '',
-            closedAt: venta.closedAt ? moment(venta.closedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : ''
+            closedAt: venta.closedAt ? moment(venta.closedAt).tz(CARACAS_TIMEZONE).format('YYYY-MM-DD HH:mm:ss') : '',
+            // INICIO DE NUEVA LÓGICA: DATOS DE VENDEDOR PARA EL REPORTE
+            sellerId: venta.sellerId || '',
+            sellerName: venta.sellerName || '',
+            sellerAgency: venta.sellerAgency || ''
+            // FIN DE NUEVA LÓGICA: DATOS DE VENDEDOR PARA EL REPORTE
         });
     });
 
@@ -1337,12 +1587,17 @@ async function generateDatabaseBackupZipBuffer() {
         const tablesToExport = [
             { name: 'configuracion', columns: ['id', 'pagina_bloqueada', 'fecha_sorteo', 'precio_ticket', 'numero_sorteo_correlativo', 'ultimo_numero_ticket', 'ultima_fecha_resultados_zulia', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports', 'mail_config_host', 'mail_config_port', 'mail_config_secure', 'mail_config_user', 'mail_config_pass', 'mail_config_sender_name', 'raffleNumbersInitialized', 'last_sales_notification_count', 'sales_notification_threshold', 'block_reason_message'] },
             { name: 'numeros', columns: ['id', 'numero', 'comprado', '"originalDrawNumber"'] },
-            { name: 'ventas', columns: ['id', '"purchaseDate"', '"drawDate"', '"drawTime"', '"drawNumber"', '"ticketNumber"', '"buyerName"', '"buyerPhone"', 'numbers', '"valueUSD"', '"valueBs"', '"paymentMethod"', '"paymentReference"', '"voucherURL"', '"validationStatus"', '"voidedReason"', '"voidedAt"', '"closedReason"', '"closedAt"'] },
+            // INICIO DE MODIFICACIÓN: Incluir campos de vendedor en la exportación de ventas
+            { name: 'ventas', columns: ['id', '"purchaseDate"', '"drawDate"', '"drawTime"', '"drawNumber"', '"ticketNumber"', '"buyerName"', '"buyerPhone"', 'numbers', '"valueUSD"', '"valueBs"', '"paymentMethod"', '"paymentReference"', '"voucherURL"', '"validationStatus"', '"voidedReason"', '"voidedAt"', '"closedReason"', '"closedAt"', '"sellerId"', '"sellerName"', '"sellerAgency"'] },
+            // FIN DE MODIFICACIÓN: Incluir campos de vendedor en la exportación de ventas
             { name: 'horarios_zulia', columns: ['id', 'hora'] },
             { name: 'resultados_zulia', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'premios', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'ganadores', columns: ['id', 'data'] }, // 'data' is JSONB
-            { name: 'comprobantes', columns: ['id', '"ventaId"', 'comprador', 'telefono', 'comprobante_nombre', 'comprobante_tipo', 'fecha_compra', 'url_comprobante'] }
+            { name: 'comprobantes', columns: ['id', '"ventaId"', 'comprador', 'telefono', 'comprobante_nombre', 'comprobante_tipo', 'fecha_compra', 'url_comprobante'] },
+            // INICIO DE NUEVA LÓGICA: Incluir tabla de vendedores en el backup
+            { name: 'sellers', columns: ['seller_id', 'full_name', 'id_card', 'agency_name', 'created_at', 'updated_at'] }
+            // FIN DE NUEVA LÓGICA: Incluir tabla de vendedores en el backup
         ];
 
         for (const tableInfo of tablesToExport) {
@@ -1814,7 +2069,7 @@ app.post('/api/notify-winner', async (req, res) => {
         const formattedPurchasedNumbers = Array.isArray(numbers) ? numbers.join(', ') : numbers;
 
         const whatsappMessage = encodeURIComponent(
-            `¡Felicidades, ${buyerName}! 🎉🥳🎉\n\n` +
+            `¡Felicidades, ${buyerName}! �🥳🎉\n\n` +
             `¡Tu ticket ha sido *GANADOR* en el sorteo! 🥳\n\n` +
             `Detalles del Ticket:\n` +
             `*Nro. Ticket:* ${ticketNumber}\n` +
@@ -2362,6 +2617,130 @@ app.post('/api/developer-sales-notification', async (req, res) => {
     }
 });
 
+// INICIO DE NUEVA LÓGICA: ENDPOINTS PARA LA GESTIÓN DE VENDEDORES
+
+// Endpoint para obtener un vendedor por su ID
+app.get('/api/sellers/:sellerId', async (req, res) => {
+    const { sellerId } = req.params;
+    try {
+        const seller = await getSellerByIdFromDB(sellerId);
+        if (seller) {
+            res.json(seller);
+        } else {
+            res.status(404).json({ message: 'Vendedor no encontrado.' });
+        }
+    } catch (error) {
+        console.error('ERROR_API: Error al obtener vendedor:', error.message);
+        res.status(500).json({ message: 'Error interno del servidor al obtener vendedor.' });
+    }
+});
+
+// Endpoint para crear o actualizar un vendedor
+app.post('/api/sellers', async (req, res) => {
+    const { seller_id, full_name, id_card, agency_name } = req.body;
+
+    if (!seller_id || !full_name || !id_card || !agency_name) {
+        return res.status(400).json({ message: 'Todos los campos del vendedor son obligatorios.' });
+    }
+
+    try {
+        const seller = await upsertSellerInDB({ seller_id, full_name, id_card, agency_name });
+        res.status(200).json({ message: 'Perfil de vendedor guardado con éxito.', seller: seller });
+    } catch (error) {
+        console.error('ERROR_API: Error al guardar perfil de vendedor:', error.message);
+        res.status(500).json({ message: 'Error interno del servidor al guardar perfil de vendedor.' });
+    }
+});
+
+// Endpoint para obtener todos los vendedores (para el Panel de Administración)
+app.get('/api/sellers', async (req, res) => {
+    try {
+        const sellers = await getAllSellersFromDB();
+        res.json(sellers);
+    } catch (error) {
+        console.error('ERROR_API: Error al obtener todos los vendedores:', error.message);
+        res.status(500).json({ message: 'Error interno del servidor al obtener vendedores.' });
+    }
+});
+
+// Endpoint para eliminar un vendedor
+app.delete('/api/sellers/:sellerId', async (req, res) => {
+    const { sellerId } = req.params;
+    try {
+        const deletedSeller = await deleteSellerFromDB(sellerId);
+        if (deletedSeller) {
+            res.json({ message: 'Vendedor eliminado con éxito.', seller: deletedSeller });
+        } else {
+            res.status(404).json({ message: 'Vendedor no encontrado para eliminar.' });
+        }
+    } catch (error) {
+        console.error('ERROR_API: Error al eliminar vendedor:', error.message);
+        res.status(500).json({ message: 'Error interno del servidor al eliminar vendedor.' });
+    }
+});
+// FIN DE NUEVA LÓGICA: ENDPOINTS PARA LA GESTIÓN DE VENDEDORES
+
+// INICIO DE NUEVA LÓGICA: ENDPOINT PARA REPORTE DE VENTAS POR VENDEDOR
+app.get('/api/reports/sales-by-seller', async (req, res) => {
+    console.log('API: Recibida solicitud para generar reporte de ventas por vendedor.');
+    const { sellerId, drawDate } = req.query; // Parámetros opcionales
+
+    let client;
+    try {
+        client = await pool.connect();
+        let query = 'SELECT * FROM ventas WHERE 1=1';
+        const queryParams = [];
+        let paramIndex = 1;
+
+        if (sellerId) {
+            query += ` AND "sellerId" = $${paramIndex++}`;
+            queryParams.push(sellerId);
+        }
+        if (drawDate) {
+            query += ` AND "drawDate" = $${paramIndex++}`;
+            queryParams.push(drawDate);
+        }
+
+        query += ' ORDER BY "purchaseDate" DESC';
+
+        const salesRes = await client.query(query, queryParams);
+        const salesData = salesRes.rows.map(row => ({
+            ...row,
+            numbers: typeof row.numbers === 'string' ? JSON.parse(row.numbers) : row.numbers
+        }));
+
+        const configuracion = await getConfiguracionFromDB();
+
+        const reportTitle = 'Reporte de Ventas por Vendedor';
+        const fileNamePrefix = 'Reporte_Ventas_Vendedor';
+
+        const { excelFilePath, excelFileName } = await generateGenericSalesExcelReport(
+            salesData,
+            configuracion, // Usar la configuración general
+            reportTitle,
+            fileNamePrefix
+        );
+
+        res.download(excelFilePath, excelFileName, (err) => {
+            if (err) {
+                console.error('ERROR_REPORT: Error al enviar el archivo Excel:', err.message);
+                res.status(500).json({ message: 'Error al descargar el reporte.' });
+            } else {
+                console.log('INFO_REPORT: Reporte de ventas por vendedor enviado con éxito.');
+                // Opcional: Eliminar el archivo después de enviarlo
+                fs.unlink(excelFilePath).catch(unlinkErr => console.error('Error al eliminar archivo Excel temporal:', unlinkErr));
+            }
+        });
+
+    } catch (error) {
+        console.error('ERROR_REPORT: Error al generar reporte de ventas por vendedor:', error.message);
+        res.status(500).json({ message: 'Error interno del servidor al generar el reporte de ventas por vendedor.' });
+    } finally {
+        if (client) client.release();
+    }
+});
+// FIN DE NUEVA LÓGICA: ENDPOINT PARA REPORTE DE VENTAS POR VENDEDOR
+
 
 // Endpoint para limpiar todos los datos (útil para reinicios de sorteo)
 app.post('/api/admin/limpiar-datos', async (req, res) => {
@@ -2382,19 +2761,21 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
             await client.query('INSERT INTO numeros (numero, comprado, "originalDrawNumber") VALUES ($1, $2, $3)', [num.numero, num.comprado, num.originalDrawNumber]);
         }
 
-        // Limpiar ventas, resultados, ganadores y comprobantes
-        await client.query('TRUNCATE TABLE ventas RESTART IDENTITY;');
+        // Limpiar ventas, resultados, ganadores, comprobantes y vendedores
+        await client.query('TRUNCATE TABLE ventas RESTART IDENTITY CASCADE;'); // CASCADE para eliminar referencias
         await client.query('TRUNCATE TABLE resultados_zulia RESTART IDENTITY;');
         await client.query('TRUNCATE TABLE ganadores RESTART IDENTITY;');
         await client.query('TRUNCATE TABLE comprobantes RESTART IDENTITY;');
         await client.query('TRUNCATE TABLE premios RESTART IDENTITY;'); // También limpiar premios
+        await client.query('TRUNCATE TABLE sellers RESTART IDENTITY;'); // NUEVO: Limpiar tabla de vendedores
+        await client.query('TRUNCATE TABLE sorteos_historial RESTART IDENTITY;'); // Limpiar historial de sorteos
 
         // Limpiar archivos de comprobantes subidos
-        const files = await fs.readdir(UPLOADS_DIR);
+        const files = await fs.readdir(COMPROBANTES_DIR); // Usar COMPROBANTES_DIR
         for (const file of files) {
-            await fs.unlink(path.join(UPLOADS_DIR, file));
+            await fs.unlink(path.join(COMPROBANTES_DIR, file)); // Usar COMPROBANTES_DIR
         }
-        console.log('Archivos de comprobantes en /uploads eliminados.');
+        console.log('Archivos de comprobantes en /uploads/comprobantes eliminados.');
 
         // Resetear configuración a valores iniciales (o un estado limpio)
         const configuracion = await getConfiguracionFromDB(); // Obtener la configuración actual para mantener mail/whatsapp
@@ -2651,6 +3032,8 @@ async function cleanOldWinners(daysToRetain = 60) {
         console.log('DEBUG: Iniciando IIFE de inicialización del servidor.');
         await ensureDataAndComprobantesDirs(); // Asegurar directorios de archivos locales
         console.log('DEBUG: Directorios asegurados.');
+        await ensureTablesExist(); // Asegurar que las tablas de la DB existan
+        console.log('DEBUG: Tablas de la DB verificadas/creadas.');
         await loadInitialData(); // Cargar o inicializar datos desde la DB
         console.log('DEBUG: Datos iniciales cargados.');
         await configureMailer(); // Configurar el mailer después de cargar la configuración de DB
