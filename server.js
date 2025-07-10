@@ -1227,8 +1227,19 @@ app.post('/api/comprar', async (req, res) => {
         console.log('DEBUG_BACKEND: Números actualizados en DB.');
 
         const now = moment().tz("America/Caracas");
-        configuracion.ultimo_numero_ticket = (configuracion.ultimo_numero_ticket || 0) + 1;
-        const numeroTicket = configuracion.ultimo_numero_ticket.toString().padStart(5, '0');
+        
+        // --- INICIO DE LA CORRECCIÓN PARA EL ERROR DE DUPLICATE KEY ---
+        // Incrementar y obtener el nuevo ultimo_numero_ticket de forma atómica
+        const updatedConfigRes = await client.query(
+            `UPDATE configuracion
+             SET ultimo_numero_ticket = COALESCE(ultimo_numero_ticket, 0) + 1
+             WHERE id = $1
+             RETURNING ultimo_numero_ticket;`,
+            [configuracion.id] // Asegúrate de que configuracion.id tenga el ID correcto de tu fila de configuración
+        );
+        const newUltimoNumeroTicket = updatedConfigRes.rows[0].ultimo_numero_ticket;
+        const numeroTicket = newUltimoNumeroTicket.toString().padStart(5, '0');
+        // --- FIN DE LA CORRECCIÓN ---
 
         const nuevaVenta = {
             id: Date.now(), // Usar timestamp como ID único
@@ -1256,11 +1267,8 @@ app.post('/api/comprar', async (req, res) => {
         await insertVentaInDB(nuevaVenta);
         console.log('DEBUG_BACKEND: Venta guardada en DB.');
 
-        await updateConfiguracionInDB({
-            ...configuracion,
-            ultimo_numero_ticket: configuracion.ultimo_numero_ticket
-        });
-        console.log('DEBUG_BACKEND: Configuración (ultimo_numero_ticket) actualizada en DB.');
+        // No es necesario actualizar ultimo_numero_ticket en configuracion aquí, ya se hizo atómicamente
+        // Si otros campos de configuracion necesitaran ser actualizados en esta solicitud, irían aquí.
 
         await client.query('COMMIT'); // Confirmar transacción
 
