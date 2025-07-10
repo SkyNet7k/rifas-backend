@@ -216,7 +216,7 @@ async function insertVentaInDB(ventaData) {
         `;
         const values = [
             ventaData.id, ventaData.purchaseDate, ventaData.drawDate, ventaData.drawTime, ventaData.drawNumber, ventaData.ticketNumber,
-            ventaData.buyerName, ventaData.buyerPhone, JSON.stringify(ventaData.numbers), ventaData.valueUSD, ventaData.valueBs, ventaData.paymentMethod,
+            ventaData.buyerName, venta.buyerPhone, JSON.stringify(ventaData.numbers), ventaData.valueUSD, ventaData.valueBs, ventaData.paymentMethod,
             ventaData.paymentReference, ventaData.voucherURL, ventaData.validationStatus,
             ventaData.sellerId, ventaData.sellerName, ventaData.sellerAgency // NUEVOS CAMPOS
         ];
@@ -600,11 +600,9 @@ async function ensureTablesExist() {
                 "voidedAt" TIMESTAMP WITH TIME ZONE,
                 "closedReason" TEXT,
                 "closedAt" TIMESTAMP WITH TIME ZONE,
-                // INICIO DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
                 "sellerId" VARCHAR(255),
                 "sellerName" VARCHAR(255),
                 "sellerAgency" VARCHAR(255)
-                // FIN DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
             );
         `);
         console.log('DB: Tabla "ventas" verificada/creada.');
@@ -717,7 +715,6 @@ async function ensureTablesExist() {
                 console.log(`DEBUG: Columna "${col.name}" añadida a la tabla "sellers".`);
             }
         }
-        // FIN DE NUEVA LÓGICA: CREACIÓN DE LA TABLA 'sellers'
 
     } catch (error) {
         console.error('ERROR_DB_INIT: Error al asegurar que las tablas existan:', error.message);
@@ -2317,7 +2314,6 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
         ...currentConfig, // Mantener el resto de la configuración
         fecha_sorteo: targetDate,
         numero_sorteo_correlativo: (currentConfig.numero_sorteo_correlativo || 0) + 1,
-        // CORRECCIÓN APLICADA: ELIMINAR LA LÍNEA QUE REINICIA ultimo_numero_ticket
         // ultimo_numero_ticket: 0, // <-- ESTA LÍNEA FUE ELIMINADA/COMENTADA
         pagina_bloqueada: false,
         last_sales_notification_count: 0,
@@ -2571,7 +2567,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
         configuracion = await advanceDrawConfiguration(configuracion, newDrawDate); // Actualizar 'configuracion' después de avanzar
 
-        await liberateOldReservedNumbers(configuracion.numero_sortivo_correlativo);
+        await liberateOldReservedNumbers(configuracion.numero_sorteo_correlativo);
 
         const ventas = await getVentasFromDB();
         const salesForOldDraw = ventas.filter(venta =>
