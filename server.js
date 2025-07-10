@@ -471,7 +471,8 @@ async function upsertGanadoresInDB(ganadoresEntry) {
 async function getSellerByIdFromDB(sellerId) {
     const client = await pool.connect();
     try {
-        const res = await client.query('SELECT * FROM sellers WHERE seller_id = $1', [sellerId]);
+        // Incluir las nuevas columnas de comisión en la selección
+        const res = await client.query('SELECT seller_id, full_name, id_card, agency_name, commission_percentage, commission_draw_date, commission_value_usd, commission_value_bs FROM sellers WHERE seller_id = $1', [sellerId]);
         return res.rows[0] || null;
     } finally {
         client.release();
@@ -510,7 +511,8 @@ async function upsertSellerInDB(sellerData) {
 async function getAllSellersFromDB() {
     const client = await pool.connect();
     try {
-        const res = await client.query('SELECT * FROM sellers ORDER BY full_name ASC');
+        // Incluir las nuevas columnas de comisión en la selección
+        const res = await client.query('SELECT seller_id, full_name, id_card, agency_name, commission_percentage, commission_draw_date, commission_value_usd, commission_value_bs FROM sellers ORDER BY created_at DESC');
         return res.rows;
     } finally {
         client.release();
@@ -699,6 +701,25 @@ async function ensureTablesExist() {
             );
         `);
         console.log('DB: Tabla "sellers" verificada/creada.');
+
+        // NUEVO: Añadir columnas de comisión a la tabla 'sellers' si no existen
+        const commissionColumns = [
+            { name: 'commission_percentage', type: 'NUMERIC(5,2)', default: '0.00' },
+            { name: 'commission_draw_date', type: 'VARCHAR(10)', default: "''" },
+            { name: 'commission_value_usd', type: 'NUMERIC(10,2)', default: '0.00' },
+            { name: 'commission_value_bs', type: 'NUMERIC(10,2)', default: '0.00' }
+        ];
+
+        for (const col of commissionColumns) {
+            const checkColumn = await client.query(`
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'sellers' AND column_name = '${col.name}';
+            `);
+            if (checkColumn.rows.length === 0) {
+                await client.query(`ALTER TABLE sellers ADD COLUMN ${col.name} ${col.type} DEFAULT ${col.default};`);
+                console.log(`DEBUG: Columna "${col.name}" añadida a la tabla "sellers".`);
+            }
+        }
         // FIN DE NUEVA LÓGICA: CREACIÓN DE LA TABLA 'sellers'
 
     } catch (error) {
@@ -732,8 +753,6 @@ async function loadInitialData() {
         // --- Cargar/Inicializar Configuración ---
         let configuracion = await getConfiguracionFromDB();
         let configId = null; // To store the ID of the config row
-
-        console.log('DEBUG_INIT: Configuración leída de la DB (antes de aplicar defaults):', JSON.stringify(configuracion, null, 2));
 
 
         if (Object.keys(configuracion).length === 0) {
@@ -1622,7 +1641,7 @@ async function generateDatabaseBackupZipBuffer() {
             { name: 'ganadores', columns: ['id', 'data'] }, // 'data' is JSONB
             { name: 'comprobantes', columns: ['id', '"ventaId"', 'comprador', 'telefono', 'comprobante_nombre', 'comprobante_tipo', 'fecha_compra', 'url_comprobante'] },
             // INICIO DE NUEVA LÓGICA: Incluir tabla de vendedores en el backup
-            { name: 'sellers', columns: ['seller_id', 'full_name', 'id_card', 'agency_name', 'created_at', 'updated_at'] }
+            { name: 'sellers', columns: ['seller_id', 'full_name', 'id_card', 'agency_name', 'created_at', 'updated_at', 'commission_percentage', 'commission_draw_date', 'commission_value_usd', 'commission_value_bs'] }
             // FIN DE NUEVA LÓGICA: Incluir tabla de vendedores en el backup
         ];
 
@@ -1653,15 +1672,15 @@ async function generateDatabaseBackupZipBuffer() {
                             let value = row[col.key]; // Acceder a la propiedad del objeto de fila por su clave
                             if (typeof value === 'object' && value !== null) {
                                 // Manejar columnas JSONB explícitamente
-                                if (['data', 'numbers', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports'].includes(col.key)) {
-                                    rowData[col.key] = JSON.stringify(value);
+                                if (['data', 'numbers', 'tasa_dolar', 'admin_whatsapp_numbers', 'admin_email_for_reports'].includes(col.key.replace(/"/g, ''))) { // Remove quotes for comparison
+                                    rowData[col.key.replace(/"/g, '')] = JSON.stringify(value);
                                 } else if (Array.isArray(value)) {
-                                    rowData[col.key] = value.join(', ');
+                                    rowData[col.key.replace(/"/g, '')] = value.join(', ');
                                 } else {
-                                    rowData[col.key] = JSON.stringify(value);
+                                    rowData[col.key.replace(/"/g, '')] = JSON.stringify(value);
                                 }
                             } else {
-                                rowData[col.key] = value;
+                                rowData[col.key.replace(/"/g, '')] = value;
                             }
                         });
                         worksheet.addRow(rowData);
@@ -2701,7 +2720,43 @@ app.delete('/api/sellers/:sellerId', async (req, res) => {
         }
     } catch (error) {
         console.error('ERROR_API: Error al eliminar vendedor:', error.message);
-        res.status(500).json({ message: 'Error interno del servidor al eliminar vendedor.' });
+        res.status(500).json({ message: 'Error interno del servidor.' });
+    }
+});
+
+// NUEVO ENDPOINT: Ruta para actualizar la comisión de un vendedor
+app.put('/api/sellers/commission/:sellerId', async (req, res) => {
+    const { sellerId } = req.params;
+    const { commission_percentage, commission_draw_date, commission_value_usd, commission_value_bs } = req.body;
+    const client = await pool.connect();
+    try {
+        // Validar que el sellerId existe
+        const sellerCheck = await client.query('SELECT 1 FROM sellers WHERE seller_id = $1', [sellerId]);
+        if (sellerCheck.rows.length === 0) {
+            return res.status(404).json({ message: 'Vendedor no encontrado.' });
+        }
+
+        const result = await client.query(
+            `UPDATE sellers SET
+                commission_percentage = $1,
+                commission_draw_date = $2,
+                commission_value_usd = $3,
+                commission_value_bs = $4
+             WHERE seller_id = $5
+             RETURNING *;`,
+            [commission_percentage, commission_draw_date, commission_value_usd, commission_value_bs, sellerId]
+        );
+        if (result.rows.length > 0) {
+            res.json({ message: 'Comisión del vendedor actualizada con éxito.', seller: result.rows[0] });
+        } else {
+            // Esto no debería ocurrir si el sellerCheck pasa, pero es un fallback
+            res.status(500).json({ message: 'Error al actualizar la comisión del vendedor.' });
+        }
+    } catch (error) {
+        console.error('Error al actualizar la comisión del vendedor:', error);
+        res.status(500).json({ message: 'Error interno del servidor al actualizar la comisión.', error: error.message });
+    } finally {
+        client.release();
     }
 });
 // FIN DE NUEVA LÓGICA: ENDPOINTS PARA LA GESTIÓN DE VENDEDORES
@@ -2853,8 +2908,8 @@ app.post('/api/admin/limpiar-datos', async (req, res) => {
  */
 async function dailyDrawCheckCronJob() {
     console.log('CRON JOB: Ejecutando tarea programada para verificar ventas y posible anulación/cierre de sorteo.');
-    const cronResult = await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
-    console.log(`CRON JOB Resultado: ${cronResult.message}`);
+    await cerrarSorteoManualmente(moment().tz(CARACAS_TIMEZONE));
+    console.log(`CRON JOB Resultado: Sorteo verificado y procesado.`);
 }
 
 cron.schedule('15 12 * * *', dailyDrawCheckCronJob, {
