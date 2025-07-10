@@ -573,7 +573,7 @@ async function ensureTablesExist() {
                 id SERIAL PRIMARY KEY,
                 numero VARCHAR(3) UNIQUE NOT NULL,
                 comprado BOOLEAN DEFAULT FALSE,
-                "originalDrawNumber" INTEGER -- Usar comillas para camelCase
+                "originalDrawNumber" INTEGER
             );
         `);
         console.log('DB: Tabla "numeros" verificada/creada.');
@@ -648,7 +648,6 @@ async function ensureTablesExist() {
             CREATE TABLE IF NOT EXISTS resultados_zulia (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
-                // REMOVIDO: UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
             );
         `);
         // NUEVO: Crear índice UNIQUE sobre la expresión para 'resultados_zulia' por separado
@@ -664,7 +663,6 @@ async function ensureTablesExist() {
             CREATE TABLE IF NOT EXISTS premios (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
-                // REMOVIDO: UNIQUE ((data->>'fechaSorteo'))
             );
         `);
         // NUEVO: Crear índice UNIQUE sobre la expresión para 'premios' por separado
@@ -679,7 +677,6 @@ async function ensureTablesExist() {
             CREATE TABLE IF NOT EXISTS ganadores (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
-                // REMOVIDO: UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
             );
         `);
         // NUEVO: Crear índice UNIQUE sobre la expresión para 'ganadores' por separado
@@ -2574,7 +2571,7 @@ app.post('/api/set-manual-draw-date', async (req, res) => {
 
         configuracion = await advanceDrawConfiguration(configuracion, newDrawDate); // Actualizar 'configuracion' después de avanzar
 
-        await liberateOldReservedNumbers(configuracion.numero_sorteo_correlativo);
+        await liberateOldReservedNumbers(configuracion.numero_sortivo_correlativo);
 
         const ventas = await getVentasFromDB();
         const salesForOldDraw = ventas.filter(venta =>
