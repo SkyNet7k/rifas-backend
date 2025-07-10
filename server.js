@@ -600,11 +600,11 @@ async function ensureTablesExist() {
                 "voidedAt" TIMESTAMP WITH TIME ZONE,
                 "closedReason" TEXT,
                 "closedAt" TIMESTAMP WITH TIME ZONE,
-                -- INICIO DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
+                // INICIO DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
                 "sellerId" VARCHAR(255),
                 "sellerName" VARCHAR(255),
                 "sellerAgency" VARCHAR(255)
-                -- FIN DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
+                // FIN DE NUEVA LÓGICA: CAMPOS PARA EL VENDEDOR
             );
         `);
         console.log('DB: Tabla "ventas" verificada/creada.');
@@ -648,7 +648,7 @@ async function ensureTablesExist() {
             CREATE TABLE IF NOT EXISTS resultados_zulia (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
-                -- REMOVIDO: UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
+                // REMOVIDO: UNIQUE ((data->>'fecha'), (data->>'tipoLoteria'))
             );
         `);
         // NUEVO: Crear índice UNIQUE sobre la expresión para 'resultados_zulia' por separado
@@ -664,7 +664,7 @@ async function ensureTablesExist() {
             CREATE TABLE IF NOT EXISTS premios (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
-                -- REMOVIDO: UNIQUE ((data->>'fechaSorteo'))
+                // REMOVIDO: UNIQUE ((data->>'fechaSorteo'))
             );
         `);
         // NUEVO: Crear índice UNIQUE sobre la expresión para 'premios' por separado
@@ -679,7 +679,7 @@ async function ensureTablesExist() {
             CREATE TABLE IF NOT EXISTS ganadores (
                 id SERIAL PRIMARY KEY,
                 data JSONB NOT NULL
-                -- REMOVIDO: UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
+                // REMOVIDO: UNIQUE ((data->>'drawDate'), (data->>'drawNumber'), (data->>'lotteryType'))
             );
         `);
         // NUEVO: Crear índice UNIQUE sobre la expresión para 'ganadores' por separado
@@ -1237,8 +1237,10 @@ app.post('/api/comprar', async (req, res) => {
              RETURNING ultimo_numero_ticket;`,
             [configuracion.id] // Asegúrate de que configuracion.id tenga el ID correcto de tu fila de configuración
         );
-        const newUltimoNumeroTicket = updatedConfigRes.rows[0].ultimo_numero_ticket;
-        const numeroTicket = newUltimoNumeroTicket.toString().padStart(5, '0');
+        const newUltimoNumeroSecuencial = updatedConfigRes.rows[0].ultimo_numero_ticket;
+        // Generar el ticketNumber incluyendo la fecha del sorteo
+        const formattedDrawDate = moment(configuracion.fecha_sorteo).format('YYYYMMDD');
+        const numeroTicket = `${formattedDrawDate}-${newUltimoNumeroSecuencial.toString().padStart(5, '0')}`;
         // --- FIN DE LA CORRECCIÓN ---
 
         const nuevaVenta = {
@@ -2318,7 +2320,8 @@ async function advanceDrawConfiguration(currentConfig, targetDate) {
         ...currentConfig, // Mantener el resto de la configuración
         fecha_sorteo: targetDate,
         numero_sorteo_correlativo: (currentConfig.numero_sorteo_correlativo || 0) + 1,
-        ultimo_numero_ticket: 0,
+        // CORRECCIÓN APLICADA: ELIMINAR LA LÍNEA QUE REINICIA ultimo_numero_ticket
+        // ultimo_numero_ticket: 0, // <-- ESTA LÍNEA FUE ELIMINADA/COMENTADA
         pagina_bloqueada: false,
         last_sales_notification_count: 0,
         block_reason_message: ""
